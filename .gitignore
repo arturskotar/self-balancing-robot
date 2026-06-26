@@ -32,3 +32,10 @@ __pycache__/
 
 # Logs
 *.log
+
+# WSL / desktop setup — machine-specific paths, kept private (not for public repo)
+flash.sh
+sync.sh
+WSL_SETUP.md
+WINDOWS_TO_WSL_SYNC.txt
+QUICKSTART_WSL.sh
