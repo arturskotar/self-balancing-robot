@@ -20,6 +20,10 @@ build/
 Thumbs.db
 desktop.ini
 
+# Screenshots / local scratch images
+Screenshot *.png
+*.screenshot.png
+
 # Arduino
 *.ino.cpp
 *.ino.d
