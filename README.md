@@ -10,11 +10,7 @@ encoders yet (velocity/position feedback comes later).
 self-balancing-robot/
 ├── balance_v2/
 │   └── balance_v2.ino          # Main control firmware (current)
-├── flash.sh                    # One-command: attach USB + sync + compile + upload
-├── sync.sh                     # Mirror Windows (OneDrive) -> WSL copy
 ├── arduino-cli.yaml            # Arduino CLI configuration
-├── WSL_SETUP.md                # WSL setup notes
-├── WINDOWS_TO_WSL_SYNC.txt     # Windows <-> WSL sync options
 └── README.md                   # This file
 ```
 
@@ -52,43 +48,17 @@ sudo apt install -y arduino-cli rsync
 arduino-cli core install arduino:avr
 ```
 
-### Automated flow — `flash.sh`
-`flash.sh` automates the whole bench loop: attach the USB device from Windows
-into WSL, grant serial-port access, sync the latest files, compile, and upload.
-
+### Compile, upload, monitor
 ```bash
-# attach USB + perms + sync + compile + upload
-bash ~/Projects/self-balancing-robot/flash.sh --all
-
-# usual edit -> test loop, then watch telemetry
-bash flash.sh --all --monitor
-
-# just rebuild + upload after a code change
-bash flash.sh --sync --compile --upload
-```
-
-Useful flags / overrides:
-
-| Flag | Action |
-|------|--------|
-| `--attach` | `usbipd` attach the CH340 (`1a86:7523`) into WSL |
-| `--perms`  | `chmod a+rw` the serial port |
-| `--sync`   | mirror Windows (OneDrive) → WSL copy |
-| `--compile` / `--upload` / `--monitor` | individual steps |
-| `--all`    | attach + perms + sync + compile + upload |
-| `--sketch <name>` | build a different sketch folder (default `balance_v2`) |
-| `--port <dev>` | serial port (default `/dev/ttyUSB0`) |
-
-Env overrides: `WSL_DST=...`, `HWID=...`, `BAUD=...`.
-
-> First-time USB only: in an **admin** PowerShell run `usbipd bind --hardware-id 1a86:7523` once.
-
-### Manual equivalent
-```bash
-arduino-cli compile --fqbn arduino:avr:uno ~/Projects/self-balancing-robot/balance_v2
-arduino-cli upload  -p /dev/ttyUSB0 --fqbn arduino:avr:uno ~/Projects/self-balancing-robot/balance_v2
+# from the repo root
+arduino-cli compile --fqbn arduino:avr:uno balance_v2
+arduino-cli upload  -p /dev/ttyUSB0 --fqbn arduino:avr:uno balance_v2
 arduino-cli monitor -p /dev/ttyUSB0 --config baudrate=115200
 ```
+
+Replace `/dev/ttyUSB0` with your port (`arduino-cli board list`). On WSL you
+first need to attach the USB device from Windows (`usbipd`) and grant access to
+the port (`sudo chmod a+rw /dev/ttyUSB0`).
 
 ## Control Algorithm
 
@@ -154,7 +124,7 @@ of `u` (motor wiring/axis) before touching gains.
 - Expected without velocity feedback. Add encoders (V2) for station-keeping.
 
 **Arduino not discovered on USB**:
-- Attach via `usbipd` (see `flash.sh --attach`); `ls /dev/ttyUSB*` should show it.
+- On WSL, attach the device from Windows via `usbipd`; then `ls /dev/ttyUSB*` should show it.
 - `dmesg | tail` for USB device messages.
 
 ## Serial Protocol
