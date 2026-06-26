@@ -1,0 +1,30 @@
+# Arduino CLI Configuration for Self-Balancing Robot
+# Place this file in project root or ~/.arduino15/arduino-cli.yaml
+
+board_manager:
+  additional_urls:
+    - http://arduino.esp8266.com/stable/package_esp8266com_index.json
+
+daemon:
+  port: "50051"
+
+directories:
+  data: ~/.arduino15
+  downloads: ~/.arduino15/staging
+  user: ~/Arduino
+
+logging:
+  format: text
+  level: info
+
+metrics:
+  enabled: true
+
+network:
+  user_agent: ArduinoCLI/1.0
+
+sketch:
+  always_export_binaries: false
+
+telemetry:
+  enabled: true

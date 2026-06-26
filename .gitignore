@@ -1,0 +1,34 @@
+# Build artifacts
+build/
+*.o
+*.a
+*.elf
+*.bin
+*.hex
+*.map
+
+# IDE / local tooling
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.claude/
+
+# OS / OneDrive
+Thumbs.db
+desktop.ini
+
+# Arduino
+*.ino.cpp
+*.ino.d
+*.ino.cpp.o
+
+# Compiled Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Logs
+*.log

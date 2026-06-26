@@ -1,0 +1,15 @@
+# Normalize all text to LF in the repo (required: scripts run in WSL/bash).
+* text=auto eol=lf
+
+# Shell scripts and firmware must stay LF.
+*.sh   text eol=lf
+*.ino  text eol=lf
+*.md   text eol=lf
+*.yaml text eol=lf
+*.txt  text eol=lf
+
+# Binary assets — never touch.
+*.pdf binary
+*.png binary
+*.hex binary
+*.bin binary
