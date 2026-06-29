@@ -179,6 +179,12 @@ of `u` (motor wiring/axis) before touching gains.
 - Raise `Kv` (velocity damping) to stop creeping; raise `Kx` (position hold) to
   make it return toward home. Watch `VF` / `POS` in the telemetry.
 
+**Robot buzzes/strains but the wheels don't move** (wedged or fallen against
+something): the **stall cutoff** kicks in — if `|u|` is high while `VF ≈ 0` for
+~1 s, the motors are cut to avoid stall heat, logging `STALL: …`. It resumes
+automatically once the wheels can turn again (`STALL cleared`). Tune via
+`STALL_U_MIN` / `STALL_VEL_MAX` / `STALL_TIME_US`, or set `STALL_CUTOFF 0` to disable.
+
 **Arduino not discovered on USB**:
 - On WSL, attach the device from Windows via `usbipd`; then `ls /dev/ttyUSB*` should show it.
 - `dmesg | tail` for USB device messages.

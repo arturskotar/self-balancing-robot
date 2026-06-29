@@ -143,6 +143,16 @@ const float RATE_DEADZONE  = 5.0f;  // deg/s
 // ---- Safety ----------------------------------------------------------------
 const float FALL_CUTOFF_DEG = 30.0f; // |pitch| beyond this = it fell, stop fighting
 
+// Stall cutoff: if the controller is pushing hard (|u| big) but the wheels are
+// NOT turning (|VF| ~ 0) for a sustained time, the bot is wedged/stuck and the
+// motors are just stalling (heat, current). Cut them until it frees up. A real
+// balancing wheel always moves while u is large, so only a genuine stall trips
+// this. Set STALL_CUTOFF to 0 to disable.
+#define STALL_CUTOFF 1
+const float         STALL_U_MIN   = 5.0f;     // |u| above this counts as "pushing hard"
+const float         STALL_VEL_MAX = 0.04f;    // rev/s : below this the wheels are "not moving"
+const unsigned long STALL_TIME_US = 1000000;  // both conditions must persist this long (1 s)
+
 // ---- Fixed-rate loop -------------------------------------------------------
 const unsigned long CONTROL_PERIOD_US = 5000;   // 5 ms = 200 Hz
 const float DT = CONTROL_PERIOD_US * 1e-6f;     // constant dt for the controller
@@ -179,6 +189,7 @@ long  velLastTicksL = 0, velLastTicksR = 0;   // counts at the previous control 
 float wheelVelL = 0.0f, wheelVelR = 0.0f;     // per-wheel rev/s (filtered)
 float forwardVel = 0.0f;                      // chassis rev/s = mean of the two
 float positionRev = 0.0f;                     // avg wheel position, revs from home (boot)
+bool  stalled = false;                         // true while the stall cutoff has the motors off
 
 // =============================================================================
 void setup() {
@@ -327,6 +338,29 @@ void updateVelocity() {
   positionRev = 0.5f * (l + r) / (float)ENC_COUNTS_PER_REV;   // revs from home (ticks are 0 at boot)
 }
 
+#if STALL_CUTOFF
+// Stall detector. Returns true (and latches `stalled`) once the controller has
+// been pushing hard (|u| > STALL_U_MIN) while the wheels sit still (|VF| <
+// STALL_VEL_MAX) for STALL_TIME_US. Clears as soon as either condition lifts
+// (wheels move again, or it stops fighting), so recovery is automatic. Logs the
+// edges so the cause is visible in the serial stream.
+bool updateStall(float u, unsigned long now) {
+  static unsigned long stallStartUs = 0;
+  bool fighting = fabs(u) > STALL_U_MIN && fabs(forwardVel) < STALL_VEL_MAX;
+  bool wasStalled = stalled;
+  if (fighting) {
+    if (stallStartUs == 0) stallStartUs = now;
+    if (now - stallStartUs > STALL_TIME_US) stalled = true;
+  } else {
+    stallStartUs = 0;
+    stalled = false;
+  }
+  if (stalled && !wasStalled) Serial.println("STALL: wheels not moving under load -> motors cut");
+  if (!stalled && wasStalled) Serial.println("STALL cleared -> resuming");
+  return stalled;
+}
+#endif
+
 // =============================================================================
 // Angle estimation
 // =============================================================================
@@ -421,6 +455,15 @@ void loop() {
     u = 0.0f;
     integral = 0.0f;   // don't accumulate while parked
   }
+
+#if STALL_CUTOFF
+  // --- Stall cutoff: pushing hard but wheels not turning -> motors off ---
+  if (updateStall(u, now)) {
+    motorRaw(0);
+    telemetry(error, gyroRate, 0);
+    return;
+  }
+#endif
 
   driveControl(u);
   telemetry(error, gyroRate, (int)u);
