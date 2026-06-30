@@ -163,10 +163,18 @@ const int   MOTOR_DEADBAND = 11;    // feed-forward kick past stiction (free-spi
                                     // Raise if small corrections stall; lower if it still bang-bangs.
 const float OUT_DEADZONE   = 0.5f;  // ignore PD outputs smaller than this (PWM units)
 
-// ---- Angle dead-zone (moved off the noise floor: rest jitter is ~0.15 deg) -
-const float ANGLE_DEADZONE = 0.15f; // deg : below this error AND slow -> coast. Tightened 0.30->0.15
-                                    // so it starts correcting earlier -> smaller gap before the kick.
-const float RATE_DEADZONE  = 5.0f;  // deg/s
+// ---- Coast band (motor protection): rest the motors near balance -----------
+// Within ANGLE_DEADZONE of the (leaned) target AND wheels stopped -> command 0.
+// WHY 0.15 -> 1.0 (2026-06-30): the residual jitter is motor vibration on the
+// gyro (RATE swings +/-35 while pitch moves +/-1). With a tight 0.15 band the
+// motors corrected EVERY cycle -> always energized at the deadband floor ->
+// constant current, heat, battery drain, wear. A 1.0 deg band lets the bot
+// COAST (motors fully off) when essentially balanced; it only kicks when it
+// drifts past 1 deg. Trade-off: a slow ~+/-1 deg rock instead of a constant
+// buzz. Raise toward 1.5 if it still buzzes; lower if the rock gets lurchy.
+const float ANGLE_DEADZONE = 1.0f;  // deg : |error| below this (and wheels stopped) -> coast
+const float RATE_DEADZONE  = 5.0f;  // deg/s : NO LONGER gates the coast (gyro vibration would keep it
+                                    // from ever engaging). Kept for reference / future use.
 
 // ---- Safety ----------------------------------------------------------------
 const float FALL_CUTOFF_DEG = 30.0f; // trip the fall latch: |pitch| beyond this = it fell, stop fighting
@@ -540,9 +548,12 @@ void loop() {
   // No direct Kv/Kx anymore -- the encoders act through leanCmd above.
   float u = -(Kp * error + Kd * dRateFilt + Ki * integral);
 
-  // --- Angle dead-zone: coast only when truly settled (and not drifting) ---
-  if (fabs(error) < ANGLE_DEADZONE && fabs(gyroRate) < RATE_DEADZONE
-      && fabs(forwardVel) < VEL_DEADZONE) {
+  // --- Coast band: rest the motors when essentially balanced ---
+  // Gate on the FILTERED pitch (error) and wheel velocity (VF) -- the trustworthy
+  // "settled" signals -- NOT on gyroRate, which is corrupted by motor vibration
+  // (it would never let the coast engage). If a real tilt develops, error leaves
+  // the band within a cycle or two and full control resumes before it can fall.
+  if (fabs(error) < ANGLE_DEADZONE && fabs(forwardVel) < VEL_DEADZONE) {
     u = 0.0f;
     integral = 0.0f;   // don't accumulate while parked
   }
