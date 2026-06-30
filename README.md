@@ -1,9 +1,11 @@
 # Self-Balancing Robot
 
-Self-balancing robot on 2 wheels using a GY-91 IMU (MPU9250) and full-state
-feedback. It **stands up, holds level, holds its spot, and recovers from
-nudges**: a PD inner loop on pitch (with a low-passed D term) plus wheel-encoder
-**velocity damping** (`Kv`) and **position hold** (`Kx`) so it doesn't drift.
+Self-balancing robot on 2 wheels using a GY-91 IMU (MPU9250) and a **cascaded
+controller**. It **stands up by itself, finds level, holds its spot, recovers
+from drags, and rests its motors silently when balanced**: an inner pitch PD
+loop (with a low-passed D term) wrapped by an outer position/velocity loop that
+steers a *lean setpoint* (`Kpos`/`Kvel`), plus a **coast band** that cuts the
+motors when settled so they don't buzz, heat, or drain the battery.
 
 ## Project Structure
 
@@ -12,6 +14,7 @@ self-balancing-robot/
 ├── balance_v2/
 │   └── balance_v2.ino          # Main control firmware (current)
 ├── arduino-cli.yaml            # Arduino CLI configuration
+├── CONTROL_THEORY.md           # In-depth control/robotics theory with the physics
 └── README.md                   # This file
 ```
 
@@ -97,32 +100,72 @@ the port (`sudo chmod a+rw /dev/ttyUSB0`).
 - 99% gyroscope integration (fast, drifts over time)
 - 1% accelerometer correction (slow, noisy, but absolute reference)
 
-**Full-state control law** (angle PD + encoder velocity & position):
+**Cascaded control law** — an outer position/velocity loop shapes the *lean
+setpoint* for an inner pitch PD loop (a balancer can only accelerate by leaning,
+so to brake/return it tilts *against* the motion and lets the fast inner loop
+chase that tilt — a strong, sign-stable "reverse-kick"):
 ```
-u = -(Kp * error + Kd * rate_filt + Ki * integral)   // pitch PD (D on low-passed rate)
-u += Kv * forwardVel                                  // brake wheel velocity (anti-drift)
-u += clamp(Kx * positionRev, ±POS_CLAMP)              // pull back toward home
+// OUTER loop: position + velocity  ->  a commanded lean (deg), clamped + SLOW-low-passed
+leanRaw     = -(Kpos * positionRev + Kvel * forwardVel)        clamped to ±LEAN_CLAMP
+leanCmd     = LEAN_LPF * leanCmd + (1 - LEAN_LPF) * leanRaw    // ~500 ms — MUST be slow (see below)
+effSetpoint = BALANCE_SETPOINT + leanCmd
+
+// INNER loop: balance to the leaned setpoint
+error = pitch - effSetpoint
+u     = -(Kp * error + Kd * rate_filt + Ki * integral)        // D on a low-passed rate
 ```
 `u` is then mapped to PWM with **motor-deadband feed-forward** so small
-corrections actually move the geared motors, and clamped to `MAX_PWM`. There is
-**no per-cycle slew limiter** — it added phase lag and caused overshoot. The D
+corrections actually move the geared motors, and clamped to `MAX_PWM`. The D
 term runs on a **low-passed gyro rate** (`D_LPF`) so single-sample gyro spikes
 don't become motor kicks.
+
+Two non-obvious pieces make this work on a non-minimum-phase plant:
+- **`LEAN_LPF` (outer-loop low-pass) must be slow (~500 ms).** To return home the
+  wheels must first roll the "wrong way" (non-minimum-phase). If the outer loop
+  reacts *faster* than that wrong-way transient (~100–300 ms), it re-commands the
+  lean mid-transient → positive feedback → **runaway** (an earlier ~100 ms setting
+  did exactly this). Slowing it below the transient kills the runaway.
+- **Coast band (motor protection):** when `|error| < ANGLE_DEADZONE` *and* the
+  wheels are stopped, output is forced to **0** — the motors go fully off. This
+  isn't just power saving: the residual jitter was a self-sustaining loop (motors
+  buzz → vibration → the gyro reads it as motion → motors buzz). Cutting the
+  motors at balance stops the vibration, the gyro goes quiet, and it stays
+  settled. Telemetry shows long runs of `U 0` with `RATE ≈ 0`.
+
+> **IMU axis gotcha:** on this MPU9250 library build the *pitch-axis* gyro rate
+> reads on **`getGyroY()` (negated)**, not X — `gyroRate = -(getGyroY() -
+> GYRO_Y_BIAS)`. A library update silently moved it, which zeroed the rate signal
+> and made the robot "balance slowly but explode when pushed." If you swap IMUs or
+> libraries, re-verify with `IMU_TEST` (hand-tilt, watch which gyro axis tracks).
+
+See **[CONTROL_THEORY.md](CONTROL_THEORY.md)** for the full derivation and physics.
 
 **Key parameters** (in `balance_v2/balance_v2.ino`) — current working tune:
 
 | Param | Value | Meaning |
 |-------|-------|---------|
-| `Kp` | 2.0 | proportional gain (pitch) |
-| `Kd` | 3.5 | derivative damping (on the low-passed rate) |
-| `Ki` | 0.0 | integral (unused — `Kx` handles standing bias) |
-| `Kv` | 5.0 | wheel-velocity damping (rev/s units, so runs large) |
-| `Kx` | 4.0 | position hold — pulls back toward home (rev-from-home; flip sign if it wanders) |
-| `D_LPF` | 0.60 | low-pass weight on the D-term gyro rate |
+| `Kp` | 2.0 | inner proportional gain (pitch) |
+| `Kd` | 0.3 | inner derivative damping (on the low-passed rate). **Low** — see note below |
+| `Ki` | 0.0 | inner integral (unused; the outer loop handles standing bias) |
+| `Kpos` | 1.0 | outer loop: position → lean (deg per rev from home); raise = returns home harder |
+| `Kvel` | 4.0 | outer loop: velocity → lean (deg per rev/s); raise = brakes/damps recovery harder |
+| `LEAN_CLAMP` | 5.0° | max lean the outer loop may command (tip-over safety cap) |
+| `LEAN_LPF` | 0.99 | outer-loop low-pass (~500 ms). **Must stay slow** or the plant runs away |
+| `D_LPF` | 0.60 | low-pass weight on the D-term gyro rate (~7 ms) |
+| `ANGLE_DEADZONE` | 1.0° | coast band: within this of target (and wheels stopped) → motors off |
+| `GYRO_Y_BIAS` | −9.0 | raw `getGyroY()` at rest — **recalibrate per unit** (`IMU_TEST`, hold still) |
 | `BALANCE_SETPOINT` | −3.22° | the angle where it truly balances — **calibrate on the wheels** |
+| gyro/accel on-chip DLPF | 20 / 21 Hz | MPU9250 hardware low-pass — tames motor vibration at the sensor |
 | `MAX_PWM` | 110 | output ceiling (raise carefully; watch heat/current) |
 | `MOTOR_DEADBAND` | 11 | lowest PWM that just spins the loaded wheels — **measure with `DEADBAND_TEST`** |
 | control loop | 200 Hz | fixed-rate, constant `dt` |
+
+> **Why `Kd` is so low (0.3, not the 3–5 typical of balancers):** these motors
+> couple vibration into the gyro, so the *rate* signal carries a fast phantom
+> component. A high `Kd` amplifies it into a violent limit cycle. The on-chip DLPF
+> + a low `Kd` + the coast band together keep the loop quiet. If you fit a
+> vibration-isolating (foam/rubber) IMU mount, you can carry more `Kd` for crisper
+> recovery.
 
 ## Tuning Guide
 
@@ -145,24 +188,36 @@ Then tune **P → D → I**, one gain at a time:
 2. Raise **Kd** until the oscillation damps out smoothly. Too high → motor
    hiss/chatter (Kd amplifies gyro noise) → reduce, or rely on the D-term
    low-pass (`D_LPF`) which lets you carry more Kd without amplifying spikes.
-3. (Optional) a **tiny Ki** (0.05–0.2) removes a standing lean, but here `Kx`
-   (position hold) handles that, so Ki stays 0.
-4. Once PD balances, add **Kv** (wheel-velocity damping) to stop the robot
-   creeping across the floor. Watch `VF` — it should hover near 0 when balanced.
-   Raise Kv from 0 (try ~5; rev/s is small so the gain runs large). If raising
-   Kv makes the creep *worse*, flip the sign of the `u += Kv * forwardVel` term.
-   This damps velocity but won't return the robot to a fixed spot — that's `Kx`.
-5. Add **Kx** (position hold) so it returns toward where it booted (home) after a
-   push. Watch `POS` (revs from home) — `Kx` drives it to 0. Raise from ~4 if it
-   returns too slowly; **lower or flip the sign** if it wanders off or slowly
-   oscillates across home (position feedback on a balancer is non-minimum-phase,
-   so the sign is the first thing to suspect). It's clamped (`POS_CLAMP`) so it
-   can't overpower the angle loop.
+3. (Optional) a **tiny Ki** (0.05–0.2) removes a standing lean, but here the
+   outer loop's `Kpos` (position → lean) handles that, so Ki stays 0.
+4. Once the inner PD balances, tune the **outer (cascade) loop**, which steers a
+   *lean setpoint* from velocity + position (see the control law above):
+   - **`LEAN_LPF` first — and keep it slow.** This is the outer-loop low-pass. If
+     it's faster than the plant's non-minimum-phase wrong-way transient
+     (~100–300 ms), the velocity term re-commands the lean mid-transient and the
+     robot **runs away** when dragged. Start at **0.99** (~500 ms). Only lower it
+     (toward 0.97) if recovery feels sluggish — and watch for runaway each notch.
+   - **`Kvel`** (velocity → lean) is the *brake / recovery damper*. Raise it until
+     a push/drag is arrested crisply without overshoot. Watch `VF` (should return
+     to 0) and `LEAN` (the commanded tilt). Too high → twitchy; too low →
+     overshoots home and lurches (big pitch swings during the return).
+   - **`Kpos`** (position → lean) is the *return-home* spring. Raise it until
+     `POS` converges back to 0 after a disturbance. Too high → slow oscillation
+     about home; too low → parks off-center.
+   - `LEAN_CLAMP` caps the commanded lean so the outer loop can never tip it over.
+   The cascade sign is intuitive — *lean against the motion* — so unlike the old
+   direct terms you shouldn't need to flip anything.
+5. **Coast band (`ANGLE_DEADZONE`)** — tune last, for quiet motors. Widen it
+   until the motors go silent at rest (`U 0` in telemetry, no buzz) but it doesn't
+   visibly sway. ~**1.0°** here. Too wide → a lazy ±1° rock; too narrow → the
+   motors never get to rest and buzz continuously (this is also what removes the
+   self-sustaining vibration jitter — see the control-law section).
 
 Read the serial `ERR / RATE / U` columns while tuning: growing amplitude = too
-much P or too little D; buzzing = too much D; slow lean = needs I or a wrong
-setpoint. If it drives the **wrong way** and accelerates the fall, flip the sign
-of `u` (motor wiring/axis) before touching gains.
+much P or too little D; a fast limit cycle when you *raise* `Kd` = the rate is too
+noisy/lagged for that much D (lower it); `U` never reaching 0 at rest = widen the
+coast band. If it drives the **wrong way** and accelerates the fall, the gyro or
+motor sign is off — verify with `IMU_TEST` before touching gains.
 
 ## Troubleshooting
 
@@ -171,19 +226,28 @@ of `u` (motor wiring/axis) before touching gains.
 - Recheck `BALANCE_SETPOINT` on the wheels; a wrong setpoint = constant lean.
 - Reduce Kp or raise Kd.
 
-**Robot falls immediately**:
+**Robot falls immediately / balances slowly but explodes when pushed**:
 - Check motor polarity (forward/reverse pins swapped?) — wrong sign accelerates the fall.
-- Verify IMU calibration offsets (`GYRO_X_OFFSET`, `PITCH_ZERO_OFFSET`).
+- **Verify the gyro axis** with `IMU_TEST`: hand-tilt the robot and confirm which
+  gyro channel tracks the pitch motion. This firmware uses `getGyroY()` negated
+  (`GYRO_Y_BIAS`); a library/IMU change can move it. A dead rate signal balances
+  on the accelerometer alone (sluggish) but has no damping, so it blows up fast.
+- Verify `PITCH_ZERO_OFFSET` / `BALANCE_SETPOINT` trim.
 
-**Robot drifts forward/backward**:
-- Raise `Kv` (velocity damping) to stop creeping; raise `Kx` (position hold) to
-  make it return toward home. Watch `VF` / `POS` in the telemetry.
+**Robot drifts forward/backward, or runs away when dragged**:
+- Raise `Kvel` (recovery brake) and `Kpos` (return-home spring). Watch `VF` / `POS`.
+- If it *accelerates away* on a slow drag, `LEAN_LPF` is too fast — raise it back
+  toward 0.99 (the outer loop must be slower than the wrong-way transient).
 
-**Robot buzzes/strains but the wheels don't move** (wedged or fallen against
-something): the **stall cutoff** kicks in — if `|u|` is high while `VF ≈ 0` for
-~1 s, the motors are cut to avoid stall heat, logging `STALL: …`. It resumes
-automatically once the wheels can turn again (`STALL cleared`). Tune via
-`STALL_U_MIN` / `STALL_VEL_MAX` / `STALL_TIME_US`, or set `STALL_CUTOFF 0` to disable.
+**Motors buzz / never go quiet at rest**:
+- Widen `ANGLE_DEADZONE` (coast band) until `U` reaches 0 when settled.
+- The residual gyro vibration is mechanical — a foam/rubber IMU mount removes it
+  at the source and lets you carry more `Kd`.
+
+> **Note:** the old stall cutoff is **disabled** (`STALL_CUTOFF 0`). It false-tripped
+> on the cascade's lean-and-hold (moderate `u`, near-zero `VF` is *normal* here)
+> and could deadlock into a guaranteed topple. Re-add only with a saturation-level
+> `|u|` threshold and a non-latching re-arm (off the absolute accel angle).
 
 **Arduino not discovered on USB**:
 - On WSL, attach the device from Windows via `usbipd`; then `ls /dev/ttyUSB*` should show it.
@@ -193,22 +257,23 @@ automatically once the wheels can turn again (`STALL cleared`). Tune via
 
 Output every 100 ms:
 ```
-PITCH <deg> ERR <deg> RATE <deg/s> U <pwm> SET <n> HZ <hz> LENC <t> RENC <t> VL <rev/s> VR <rev/s> VF <rev/s> POS <rev>
+PITCH <deg> ERR <deg> RATE <deg/s> U <pwm> SET <n> HZ <hz> LENC <t> RENC <t> VL <rev/s> VR <rev/s> VF <rev/s> LEAN <deg> POS <rev>
 ```
-Example:
+Example (settled — note `U 0`, the motors coasting):
 ```
-PITCH 0.83 ERR 0.07 RATE -3.14 U 12 SET 1 HZ 200 LENC 1432 RENC 1419 VL 0.04 VR 0.05 VF 0.05 POS 2.61
+PITCH -3.92 ERR -0.76 RATE 0.09 U 0 SET 0 HZ 188 LENC -28 RENC -3 VL 0.00 VR 0.00 VF 0.00 LEAN 0.05 POS -0.03
 ```
 - **PITCH**: estimated angle (deg), positive = forward lean
-- **ERR**: `PITCH − BALANCE_SETPOINT`
-- **RATE**: angular velocity (deg/s), positive = falling forward
-- **U**: control effort before deadband/PWM mapping
+- **ERR**: `PITCH − effSetpoint` (the *leaned* target, not the bare setpoint)
+- **RATE**: pitch-axis angular velocity (deg/s) from `getGyroY()` negated, positive = forward
+- **U**: control effort before deadband/PWM mapping (`0` when coasting in the dead band)
 - **SET**: active PID sweep set (0 if sweep disabled)
 - **HZ**: achieved control-loop rate (expect ~200)
-- **LENC / RENC**: left / right encoder ticks since boot (both climb when rolling forward)
+- **LENC / RENC**: left / right encoder ticks since boot
 - **VL / VR**: per-wheel speed (rev/s, low-pass filtered)
-- **VF**: chassis forward speed (mean of the two wheels) — the signal `Kv` damps
-- **POS**: average wheel position in revs from home (boot) — the signal `Kx` drives to 0
+- **VF**: chassis forward speed (mean of the two wheels) — outer loop brakes this
+- **LEAN**: lean offset (deg) the outer loop is commanding (negative = leaning back to brake/return)
+- **POS**: average wheel position in revs from home — outer loop drives this to 0
 
 (Startup banner: `BALANCE_V2_READY`.)
 
