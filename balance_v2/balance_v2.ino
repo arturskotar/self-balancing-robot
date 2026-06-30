@@ -107,18 +107,34 @@ float Kd = 0.3f;   // derivative    (deg/s    -> PWM)  RE-TUNED FROM SCRATCH 202
                    // lag (revert gyro DLPF 20->41 Hz + remove the phantom bias in software instead).
 float Ki = 0.0f;   // integral      (deg*s    -> PWM)  keep 0 until PD works
 
-// ---- Velocity & position feedback (encoders, DIRECT) -----------------------
-// Added straight to the motor command (NOT via a lean setpoint). The cascade
-// (outer loop -> lean) is the textbook structure and gives stronger braking in
-// principle, but on this non-minimum-phase plant it was unstable to flash-tune
-// (limit-cycled / ran away). This direct form was the known-stable one: it
-// balances, holds position, and recovers from nudges; its only weakness is
-// gentle braking on a slow drag. Revisit the cascade later with a real model/LQR.
-//   u += Kv*forwardVel   brakes wheel velocity (viscous; verified sign)
-//   u -= Kx*positionRev  returns toward home  (-= : non-minimum-phase, clamped)
-float Kv = 5.0f;            // forward wheel velocity (rev/s -> PWM)  raise to damp drift harder
-float Kx = 4.0f;            // wheel position (rev from home -> PWM)  raise to return home harder
-const float POS_CLAMP = 20; // PWM cap on the position term so it can't overpower the angle loop
+// ---- Cascade outer loop (encoders -> desired LEAN) -------------------------
+// Position/velocity feed a LEAN setpoint that the inner pitch loop chases,
+// instead of being added straight to the motor command. This is the textbook
+// structure for the non-minimum-phase plant: to return home the body leans
+// toward home and the inner loop drives the wheels to make that lean (it
+// performs the "wheels roll the wrong way first" kick on its own). Signs are
+// intuitive -- forward displacement / forward motion -> lean BACK (brake +
+// return). REQUIRES time-scale separation: LEAN_LPF keeps this loop slow vs the
+// inner loop so they don't fight (that's why every earlier cascade failed -- on
+// top of a dead-gyro inner loop there was nothing stable to separate from).
+//   leanRaw = -(Kpos*positionRev + Kvel*forwardVel)   then clamp + low-pass
+//   error   = pitch - (BALANCE_SETPOINT + leanCmd)
+// TUNING: start gentle. Kvel = brake strength (raise if a drag still coasts);
+// Kpos = return-home spring (raise to come home harder, lower if it hunts).
+// If it limit-cycles, SLOW the outer loop (raise LEAN_LPF) before cutting gains.
+float Kpos = 1.0f;               // wheel position (rev from home -> deg of lean)
+float Kvel = 4.0f;               // forward wheel velocity (rev/s   -> deg of lean)  2.0->4.0: recovery
+                                 // was under-damped -- overshot home (POS 0.29 -> -0.33) and swung pitch
+                                 // to -18 deg. Kvel is the brake on recovery velocity; more = less
+                                 // overshoot. If overshoot persists, the LEAN_LPF lag is the bottleneck
+                                 // (lower it toward 0.97); if it gets twitchy/runs away, back Kvel off.
+const float LEAN_CLAMP = 5.0f;   // deg : cap the commanded lean so the outer loop can't tip it over
+const float LEAN_LPF   = 0.99f;  // EMA on leanCmd (~500 ms). Higher = slower, safer outer loop.
+                                 // 0.95 (~100 ms) RAN AWAY: faster than the pendulum's non-minimum-
+                                 // phase "wrong-way" transient (~100-300 ms), so the velocity term
+                                 // re-commanded back-lean while the inner loop was still driving the
+                                 // wheels the wrong way -> positive feedback. 0.99 puts the outer loop
+                                 // safely BELOW that transient. If recovery is now weak, raise Kpos.
 
 // ---- Auto PID sweep (for recording) ----------------------------------------
 // Cycles Kp/Kd through a grid, holding each set for SWEEP_HOLD_MS so you can
@@ -160,10 +176,15 @@ const float FALL_REARM_DEG  = 8.0f;  // re-arm ONLY when the absolute accel angl
 
 // Stall cutoff: if the controller is pushing hard (|u| big) but the wheels are
 // NOT turning (|VF| ~ 0) for a sustained time, the bot is wedged/stuck and the
-// motors are just stalling (heat, current). Cut them until it frees up. A real
-// balancing wheel always moves while u is large, so only a genuine stall trips
-// this. Set STALL_CUTOFF to 0 to disable.
-#define STALL_CUTOFF 1
+// motors are just stalling (heat, current). Cut them until it frees up.
+// DISABLED 2026-06-30: the premise "a balancing wheel always moves while u is
+// large" is FALSE for the cascade -- it leans and HOLDS, i.e. moderate u with
+// near-zero wheel motion is normal. So it false-tripped at PITCH -1.25 (U~9,
+// VF~0). Worse, it DEADLOCKS: once cut, VF stays 0 and the bot falls, so |u|
+// grows, the trip condition stays true forever -> guaranteed topple. Re-add
+// later with a saturation-level threshold (|u| near MAX_PWM) AND a non-latching
+// design that re-arms off the absolute accel angle, like the fall latch does.
+#define STALL_CUTOFF 0
 const float         STALL_U_MIN   = 5.0f;     // |u| above this counts as "pushing hard"
 const float         STALL_VEL_MAX = 0.04f;    // rev/s : below this the wheels are "not moving"
 const unsigned long STALL_TIME_US = 1000000;  // both conditions must persist this long (1 s)
@@ -183,16 +204,18 @@ const float VEL_DEADZONE = 0.05f;   // rev/s : below this the wheels count as "s
 // Low-pass on the D-term gyro rate ONLY (the angle estimate still uses raw rate).
 // Knocks down single-sample gyro spikes that a high Kd would turn into kicks.
 // Higher = smoother D but more phase lag (less effective damping). 0.0 = no filter.
-const float D_LPF        = 0.80f;   // EMA weight on the previous filtered rate (~20 ms time constant).
-                                    // Raised 0.60->0.80 (2026-06-30): residual ~+/-1 deg sway near level
-                                    // is the D term chasing a fast vibration component (RATE swung +/-45
-                                    // while pitch only swung +/-1). Smoothing the D PATH ONLY cuts that
-                                    // without weakening slow-motion damping or lagging the angle estimate.
+const float D_LPF        = 0.60f;   // EMA weight on the previous filtered rate (~7 ms time constant).
+                                    // 0.80 was a REGRESSION (2026-06-30): the extra D-path lag weakened
+                                    // damping -> "oscillates a lot". This plant is lag-sensitive (same
+                                    // reason high Kd destabilizes). Back to 0.60 = the known-good inner
+                                    // loop. The residual fast wiggle is real gyro vibration; the genuine
+                                    // cure is a foam/rubber soft-mount under the IMU, not more filtering.
 
 // ---- State -----------------------------------------------------------------
 float pitch = 0.0f;
 float integral = 0.0f;
 float dRateFilt = 0.0f;   // low-pass-filtered gyro rate for the D term (angle est. uses the raw rate)
+float leanCmd   = 0.0f;   // cascade outer-loop output: the desired lean (deg) added to BALANCE_SETPOINT
 unsigned long lastControlMicros = 0;
 int controlHz = 0;   // measured control-loop frequency (should read ~200; if lower, we're falling behind)
 
@@ -490,6 +513,7 @@ void loop() {
     long hl, hr; readEncoders(hl, hr);
     homeTicksSum = hl + hr;                  // re-home here so it doesn't drive off to the old spot
     integral = 0.0f;
+    leanCmd = 0.0f;                          // drop any stale lean from before the fall
   }
   if (fallen) {
     integral = 0.0f;
@@ -498,19 +522,23 @@ void loop() {
     return;
   }
 
+  // --- Cascade OUTER loop: position + velocity -> a slow LEAN command ---
+  // Forward displacement / forward motion -> lean BACK. Clamp so it can't demand
+  // a tip-over, then low-pass so the outer loop stays slow vs the inner loop.
+  float leanRaw = -(Kpos * positionRev + Kvel * forwardVel);
+  leanRaw = constrain(leanRaw, -LEAN_CLAMP, LEAN_CLAMP);
+  leanCmd = LEAN_LPF * leanCmd + (1.0f - LEAN_LPF) * leanRaw;
+
+  // Inner-loop error now chases the LEANED target instead of the bare setpoint.
+  error = pitch - (BALANCE_SETPOINT + leanCmd);
+
   // --- Integral (with anti-windup); harmless while Ki = 0 ---
   integral += error * DT;
   integral = constrain(integral, -40.0f, 40.0f);   // clamp; tune with Ki
 
-  // --- PID inner loop (D on the low-passed rate so gyro spikes don't kick) ---
+  // --- PID INNER loop (D on the low-passed rate so gyro spikes don't kick) ---
+  // No direct Kv/Kx anymore -- the encoders act through leanCmd above.
   float u = -(Kp * error + Kd * dRateFilt + Ki * integral);
-
-  // --- Velocity damping (direct): brake wheel drift. +Kv*VF, verified sign. ---
-  u += Kv * forwardVel;
-
-  // --- Position hold (direct): return toward home. -= for the non-minimum-phase
-  //     plant (to go home the wheels first go the "wrong" way). Clamped. ---
-  u -= constrain(Kx * positionRev, -POS_CLAMP, POS_CLAMP);
 
   // --- Angle dead-zone: coast only when truly settled (and not drifting) ---
   if (fabs(error) < ANGLE_DEADZONE && fabs(gyroRate) < RATE_DEADZONE
@@ -549,5 +577,6 @@ void telemetry(float error, float rate, int u) {
   Serial.print(" VL ");   Serial.print(wheelVelL, 2);     // left wheel rev/s (filtered)
   Serial.print(" VR ");   Serial.print(wheelVelR, 2);     // right wheel rev/s (filtered)
   Serial.print(" VF ");   Serial.print(forwardVel, 2);    // chassis forward rev/s (mean)
+  Serial.print(" LEAN "); Serial.print(leanCmd, 2);       // cascade outer-loop lean command (deg)
   Serial.print(" POS ");  Serial.println(positionRev, 2); // avg wheel position, revs from home
 }
