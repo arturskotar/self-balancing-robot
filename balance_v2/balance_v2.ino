@@ -66,8 +66,24 @@ const long ENC_COUNTS_PER_REV = 546;
 // Set MOTOR_DEADBAND to ~the larger of those two. Set back to 0 when done.
 #define DEADBAND_TEST 0
 
+// ---- IMU sign/axis test ----------------------------------------------------
+// Set to 1 to verify the gyro vs accelerometer convention (motors OFF). Hold the
+// robot and SLOWLY tilt it forward then back. Expected (consistent) result:
+//   * aPitch RISES when you tilt FORWARD, falls when you tilt BACK
+//   * gX (the pitch-axis gyro) goes POSITIVE while tilting forward, negative back
+//   * gX is the axis that moves most; gY/gZ stay near 0
+// If gX has the OPPOSITE sign to aPitch's motion -> the gyro sign is flipped
+// (negate gyroRate in the code). If gY or gZ is the one that responds instead ->
+// the IMU library remapped axes (use that getter). Set back to 0 when done.
+#define IMU_TEST 0
+
 // ---- IMU calibration -------------------------------------------------------
-const float GYRO_X_OFFSET     = 3.89f;   // deg/s, removes gyro bias (well-calibrated per logs)
+// PITCH-AXIS GYRO: the MPU9250 lib (0.4.8) reports pitch-axis rotation on the Y
+// gyro, inverted vs the accel-pitch convention (confirmed with IMU_TEST: tilting
+// forward, aPitch rises while gY goes negative; gX stays ~0). So the rate is
+// -getGyroY(). GYRO_Y_BIAS = the raw getGyroY() reading when the robot is DEAD
+// STILL (~-9 here). RECALIBRATE per unit: run IMU_TEST, hold still, read gY.
+const float GYRO_Y_BIAS = -9.0f;   // deg/s : raw getGyroY() at rest
 const float PITCH_ZERO_OFFSET = -9.20f;  // deg, makes accel-pitch ~0 at mechanical level
 
 // ---- Control setpoint ------------------------------------------------------
@@ -83,30 +99,26 @@ float BALANCE_SETPOINT = -3.22f;         // deg : measured after rigidly mountin
 float Kp = 2.00f;  // proportional  (deg -> PWM)  raised 0.85 -> 2.0: at low Kp a few-degree lean
                    // produced a PWM below the wheels' stiction (see MOTOR_DEADBAND), so it never
                    // caught itself. Re-tune AFTER setting MOTOR_DEADBAND from the deadband test.
-float Kd = 3.5f;   // derivative    (deg/s    -> PWM)  4.5 was TOO much: it amplified single-sample gyro
-                   // spikes into violent kicks (U slamming to -130, big overshoot, near-falls). Back to
-                   // the known-good 3.5. The D term now runs on a LOW-PASSED rate (see D_LPF) so we get
-                   // damping without riding the noise -- raise Kd from here only with that filter in place.
+float Kd = 0.3f;   // derivative    (deg/s    -> PWM)  RE-TUNED FROM SCRATCH 2026-06-30: old 3.5-4.5 was
+                   // tuned vs a DEAD gyro. With the clean rate, RAISING Kd 0.5->1.0 made the ring WORSE,
+                   // not better -> we're past peak damping into D-DESTABILIZATION: the 20 Hz on-chip
+                   // filter lags a fast (several-Hz) component enough that D pumps it. So Kd goes DOWN.
+                   // 0.3 to get below the ring. If a low-Kd ring persists, the culprit is angle-estimate
+                   // lag (revert gyro DLPF 20->41 Hz + remove the phantom bias in software instead).
 float Ki = 0.0f;   // integral      (deg*s    -> PWM)  keep 0 until PD works
 
-// ---- Velocity feedback (encoders) ------------------------------------------
-// Damps the wheel drift the IMU-only controller can't see. Kept 0 by default,
-// same as Ki: get PD balancing first, then raise Kv a little at a time until
-// the robot stops creeping. If raising it makes the drift WORSE, the wheels run
-// the way you'd expect physics to fight -- flip the sign of the term below.
-float Kv = 5.0f;   // forward wheel velocity (rev/s -> PWM)  damps translational drift/overshoot now
-                   // that PD balances. VF is small (~0.5 rev/s in a swing) so this gain runs large:
-                   // raise toward 10-15 if it still drifts/overshoots, lower if it fights the balance.
-
-// ---- Position hold (encoders) ----------------------------------------------
-// Kv only BRAKES motion; the robot still parks wherever a disturbance left it.
-// Kx pulls it back toward HOME (the average wheel position at boot), so Kx+Kv
-// form a PD position loop on top of the angle PD. Same sign convention as Kv.
-// Start small. Raise if it returns home too slowly; LOWER or FLIP THE SIGN if it
-// wanders off or slowly oscillates back-and-forth across home (position loops on
-// a balancer are non-minimum-phase, so the sign is the first thing to suspect).
-float Kx = 4.0f;            // wheel position (rev from home -> PWM)
-const float POS_CLAMP = 20; // PWM cap on the position term so it can never overpower the angle loop
+// ---- Velocity & position feedback (encoders, DIRECT) -----------------------
+// Added straight to the motor command (NOT via a lean setpoint). The cascade
+// (outer loop -> lean) is the textbook structure and gives stronger braking in
+// principle, but on this non-minimum-phase plant it was unstable to flash-tune
+// (limit-cycled / ran away). This direct form was the known-stable one: it
+// balances, holds position, and recovers from nudges; its only weakness is
+// gentle braking on a slow drag. Revisit the cascade later with a real model/LQR.
+//   u += Kv*forwardVel   brakes wheel velocity (viscous; verified sign)
+//   u -= Kx*positionRev  returns toward home  (-= : non-minimum-phase, clamped)
+float Kv = 5.0f;            // forward wheel velocity (rev/s -> PWM)  raise to damp drift harder
+float Kx = 4.0f;            // wheel position (rev from home -> PWM)  raise to return home harder
+const float POS_CLAMP = 20; // PWM cap on the position term so it can't overpower the angle loop
 
 // ---- Auto PID sweep (for recording) ----------------------------------------
 // Cycles Kp/Kd through a grid, holding each set for SWEEP_HOLD_MS so you can
@@ -141,7 +153,10 @@ const float ANGLE_DEADZONE = 0.15f; // deg : below this error AND slow -> coast.
 const float RATE_DEADZONE  = 5.0f;  // deg/s
 
 // ---- Safety ----------------------------------------------------------------
-const float FALL_CUTOFF_DEG = 30.0f; // |pitch| beyond this = it fell, stop fighting
+const float FALL_CUTOFF_DEG = 30.0f; // trip the fall latch: |pitch| beyond this = it fell, stop fighting
+const float FALL_REARM_DEG  = 8.0f;  // re-arm ONLY when the absolute accel angle is back within this of
+                                     // the setpoint -- a gyro-drifting pitch estimate on its back can't
+                                     // restart the motors, only physically standing it up does.
 
 // Stall cutoff: if the controller is pushing hard (|u| big) but the wheels are
 // NOT turning (|VF| ~ 0) for a sustained time, the bot is wedged/stuck and the
@@ -168,7 +183,11 @@ const float VEL_DEADZONE = 0.05f;   // rev/s : below this the wheels count as "s
 // Low-pass on the D-term gyro rate ONLY (the angle estimate still uses raw rate).
 // Knocks down single-sample gyro spikes that a high Kd would turn into kicks.
 // Higher = smoother D but more phase lag (less effective damping). 0.0 = no filter.
-const float D_LPF        = 0.60f;   // EMA weight on the previous filtered rate (~7 ms time constant)
+const float D_LPF        = 0.80f;   // EMA weight on the previous filtered rate (~20 ms time constant).
+                                    // Raised 0.60->0.80 (2026-06-30): residual ~+/-1 deg sway near level
+                                    // is the D term chasing a fast vibration component (RATE swung +/-45
+                                    // while pitch only swung +/-1). Smoothing the D PATH ONLY cuts that
+                                    // without weakening slow-motion damping or lagging the angle estimate.
 
 // ---- State -----------------------------------------------------------------
 float pitch = 0.0f;
@@ -188,8 +207,10 @@ volatile long rightTicks = 0;
 long  velLastTicksL = 0, velLastTicksR = 0;   // counts at the previous control tick
 float wheelVelL = 0.0f, wheelVelR = 0.0f;     // per-wheel rev/s (filtered)
 float forwardVel = 0.0f;                      // chassis rev/s = mean of the two
-float positionRev = 0.0f;                     // avg wheel position, revs from home (boot)
+float positionRev = 0.0f;                     // avg wheel position, revs from home
+long  homeTicksSum = 0;                        // (leftTicks+rightTicks) defining "home" (0 = boot spot)
 bool  stalled = false;                         // true while the stall cutoff has the motors off
+bool  fallen = false;                          // true while the fall latch has the motors off
 
 // =============================================================================
 void setup() {
@@ -214,7 +235,17 @@ void setup() {
 
   Wire.begin();
   Wire.setClock(400000);   // 400 kHz I2C (default is 100 kHz) -> ~4x faster IMU reads, fresher data
-  if (!imu.setup(0x68)) {
+
+  // On-chip low-pass: drop the gyro DLPF from the lib default 41 Hz to 20 Hz (accel 45->21 Hz).
+  // WHY: motor/gearbox buzz couples into the gyro and RECTIFIES into a DC bias (~+14 deg/s seen
+  // while the wheels were frozen and pitch steady -- a phantom, not real rotation). That phantom
+  // offsets the complementary filter AND the D term, keeping the motors energized at the stiction
+  // floor (buzz). Filtering at the sensor kills the vibration band before it can rectify. 20 Hz is
+  // far above the balance dynamics (<5 Hz) so it adds negligible phase lag. Go DLPF_10HZ if needed.
+  MPU9250Setting imuSetting;
+  imuSetting.gyro_dlpf_cfg  = GYRO_DLPF_CFG::DLPF_20HZ;
+  imuSetting.accel_dlpf_cfg = ACCEL_DLPF_CFG::DLPF_21HZ;
+  if (!imu.setup(0x68, imuSetting)) {
     Serial.println("ERROR: IMU init failed");
     while (1) { motorRaw(0); delay(1000); }
   }
@@ -234,6 +265,9 @@ void setup() {
 #elif DEADBAND_TEST
   Serial.println("DEADBAND_TEST mode: wheels OFF THE GROUND. Ramping PWM; "
                  "note 'first-move L@/R@' -> set MOTOR_DEADBAND to ~the larger.");
+#elif IMU_TEST
+  Serial.println("IMU_TEST mode: motors OFF. Hold + slowly tilt FORWARD then BACK. "
+                 "aPitch & gX should rise together tilting forward (consistent sign).");
 #endif
 }
 
@@ -324,6 +358,22 @@ void deadbandTestLoop() {
   motorRaw(pwm);
 }
 
+// IMU sign/axis check: motors off, stream the accel-pitch and all three gyro
+// axes @ 10 Hz so you can hand-tilt and verify the convention (see IMU_TEST).
+void imuTestLoop() {
+  motorRaw(0);
+  static unsigned long lastPrint = 0;
+  if (millis() - lastPrint < 100) return;
+  lastPrint = millis();
+  imu.update();
+  Serial.print("IMU_TEST aPitch "); Serial.print(accelPitch(), 2);
+  Serial.print(" | gX ");           Serial.print(imu.getGyroX(), 2);
+  Serial.print(" gY ");             Serial.print(imu.getGyroY(), 2);  // <- pitch-axis rate (used, negated)
+  Serial.print(" gZ ");             Serial.print(imu.getGyroZ(), 2);
+  Serial.print(" | aX ");           Serial.print(imu.getAccX(), 2);
+  Serial.print(" aZ ");             Serial.println(imu.getAccZ(), 2);
+}
+
 // Update filtered wheel velocities from the counters. Call once per control
 // tick (uses the fixed DT). rev/s = Δticks / counts-per-rev / dt, then EMA.
 void updateVelocity() {
@@ -335,7 +385,7 @@ void updateVelocity() {
   wheelVelL = VEL_LPF * wheelVelL + (1.0f - VEL_LPF) * vL_raw;
   wheelVelR = VEL_LPF * wheelVelR + (1.0f - VEL_LPF) * vR_raw;
   forwardVel = 0.5f * (wheelVelL + wheelVelR);
-  positionRev = 0.5f * (l + r) / (float)ENC_COUNTS_PER_REV;   // revs from home (ticks are 0 at boot)
+  positionRev = 0.5f * ((l + r) - homeTicksSum) / (float)ENC_COUNTS_PER_REV;  // revs from home
 }
 
 #if STALL_CUTOFF
@@ -400,6 +450,9 @@ void loop() {
 #elif DEADBAND_TEST
   deadbandTestLoop();  // ramp PWM, report each wheel's stiction threshold
   return;
+#elif IMU_TEST
+  imuTestLoop();       // motors off; stream accel-pitch + gyro axes (hand-tilt to check signs)
+  return;
 #endif
 
   imu.update();   // refresh latest sample (non-blocking)
@@ -417,15 +470,28 @@ void loop() {
   updateVelocity(); // refresh filtered wheel velocities (every tick, before the safety return)
 
   // --- Estimate ---
-  float gyroRate = imu.getGyroX() - GYRO_X_OFFSET;            // deg/s about pitch axis
+  float gyroRate = -(imu.getGyroY() - GYRO_Y_BIAS);          // deg/s, forward-lean +. Pitch rate is on
+                                                             // the Y gyro (negated) -- see GYRO_Y_BIAS.
   float aPitch   = accelPitch();
   pitch = 0.99f * (pitch + gyroRate * DT) + 0.01f * aPitch;   // complementary filter (raw rate)
   dRateFilt = D_LPF * dRateFilt + (1.0f - D_LPF) * gyroRate;  // smoothed rate for the D term only
 
   float error = pitch - BALANCE_SETPOINT;
 
-  // --- Safety: it has fallen ---
-  if (fabs(pitch) > FALL_CUTOFF_DEG) {
+  // --- Safety: fall latch (hysteresis) ---
+  // Trip on the filtered pitch; re-arm ONLY when the absolute accel angle is back
+  // near the setpoint. On its back the gyro-based pitch drifts and can dip under
+  // the cutoff -> without the latch the motors flail. Keying re-arm off the
+  // accelerometer means only physically standing it up restarts them.
+  if (!fallen && fabs(pitch) > FALL_CUTOFF_DEG) fallen = true;
+  if (fallen && fabs(aPitch - BALANCE_SETPOINT) < FALL_REARM_DEG) {
+    fallen = false;
+    pitch = aPitch;                          // reseed the filter from the true angle
+    long hl, hr; readEncoders(hl, hr);
+    homeTicksSum = hl + hr;                  // re-home here so it doesn't drive off to the old spot
+    integral = 0.0f;
+  }
+  if (fallen) {
     integral = 0.0f;
     motorRaw(0);
     telemetry(error, gyroRate, 0);
@@ -436,18 +502,15 @@ void loop() {
   integral += error * DT;
   integral = constrain(integral, -40.0f, 40.0f);   // clamp; tune with Ki
 
-  // --- PID ---  (sign matches v1: positive lean -> drive to catch it)
-  // D term uses the low-passed rate so gyro spikes don't become motor kicks.
+  // --- PID inner loop (D on the low-passed rate so gyro spikes don't kick) ---
   float u = -(Kp * error + Kd * dRateFilt + Ki * integral);
 
-  // --- Velocity damping: brake the wheel drift the IMU can't see ---
-  // +Kv*VF opposes wheel velocity (U>0 = drive physical-backward, VF>0 = forward
-  // roll), i.e. viscous friction on the wheels. Verified sign against telemetry.
-  // If raising Kv makes drift/oscillation worse, flip this sign back to -.
+  // --- Velocity damping (direct): brake wheel drift. +Kv*VF, verified sign. ---
   u += Kv * forwardVel;
 
-  // --- Position hold: pull back toward home (clamped so it can't fight balance) ---
-  u += constrain(Kx * positionRev, -POS_CLAMP, POS_CLAMP);
+  // --- Position hold (direct): return toward home. -= for the non-minimum-phase
+  //     plant (to go home the wheels first go the "wrong" way). Clamped. ---
+  u -= constrain(Kx * positionRev, -POS_CLAMP, POS_CLAMP);
 
   // --- Angle dead-zone: coast only when truly settled (and not drifting) ---
   if (fabs(error) < ANGLE_DEADZONE && fabs(gyroRate) < RATE_DEADZONE
