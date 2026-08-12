@@ -22,23 +22,25 @@
 MPU9250 imu;
 
 // ---- Motor driver pins (IBT-2 H-Bridge) ------------------------------------
-#define LEFT_MOTOR_FORWARD_PIN  5
-#define LEFT_MOTOR_REVERSE_PIN  6
-#define RIGHT_MOTOR_FORWARD_PIN 9
-#define RIGHT_MOTOR_REVERSE_PIN 10
+// Teensy 4.1 map (see MIGRATION_TEENSY.md §3.1): LEFT = 6/9 (FlexPWM2.2 A/B),
+// RIGHT = 22/23 (FlexPWM4.0 A/B). Each pair shares one FlexPWM submodule.
+#define LEFT_MOTOR_FORWARD_PIN   6
+#define LEFT_MOTOR_REVERSE_PIN   9
+#define RIGHT_MOTOR_FORWARD_PIN  22
+#define RIGHT_MOTOR_REVERSE_PIN  23
 
 // ---- Encoder pins (Waveshare DCGM-3865, connector silkscreen "M V A B G M")-
-// Per motor: A = Hall A (green wire), B = Hall B (yellow wire). The A channel
-// goes on an external-interrupt pin so every pulse is caught; B is read inside
-// the ISR to get direction (half-quadrature: ~546 counts / output-shaft rev).
-// The Uno has only TWO interrupt pins (D2, D3), so each motor's A takes one.
-// Encoder V (blue) -> 5V, G (black) -> GND (shared with logic + driver ground).
-// NOTE: these counts are plumbing/telemetry only for now -- the control loop is
-// still IMU-only. Wire them, confirm the counts move, then add velocity feedback.
-#define LEFT_ENC_A   2   // INT0  (green)
-#define LEFT_ENC_B   4   // dir   (yellow)
-#define RIGHT_ENC_A  3   // INT1  (green)
-#define RIGHT_ENC_B  7   // dir   (yellow)
+// Teensy 4.1 map (see MIGRATION_TEENSY.md §3.1). Per motor: A = Hall A (green),
+// B = Hall B (yellow). Still using attachInterrupt on A + reading B for direction
+// (half-quadrature: ~546 counts / output-shaft rev) -- works on ANY Teensy pin,
+// no D2/D3 limit anymore. Pins 2/3/4/5 are ALSO hardware-QuadEncoder-capable, so
+// the future x4 upgrade (2184 counts/rev) reuses these same pins.
+// POWER (Teensy!): Encoder V (blue) -> 3.3V, G (black) -> GND. NOT 5V -- the
+// built-in pull-up would then drive 5V into a 3.3V pin and damage the Teensy.
+#define LEFT_ENC_A   2   // green
+#define LEFT_ENC_B   3   // dir (yellow)
+#define RIGHT_ENC_A  4   // green
+#define RIGHT_ENC_B  5   // dir (yellow)
 
 // Per-side count direction. The right motor/encoder is mirror-mounted, so its
 // raw counts run opposite the left; flip its sign so BOTH wheels count UP when
