@@ -78,11 +78,90 @@ Two rails, single common ground:
 
 ---
 
+## 3.1 Pinout mapping (Uno → Teensy 4.1)
+
+Pins chosen to (a) put both encoders on **hardware-quadrature-capable** pins, (b) keep the
+UART pins free for the feature roadmap (CRSF, LIDAR), and (c) avoid the SPI bus + LED.
+
+**Active signals (V1 balancer):**
+
+| Function | Signal | Uno pin | **Teensy 4.1 pin** | Teensy peripheral | Notes |
+|---|---|---:|---:|---|---|
+| Motor L | RPWM (fwd) | 5 | **6** | FlexPWM2.2 A | → 74HCT244 → IBT-2 |
+| Motor L | LPWM (rev) | 6 | **9** | FlexPWM2.2 B | shares submodule w/ 6 (one freq set) |
+| Motor R | RPWM (fwd) | 9 | **22** | FlexPWM4.0 A | → 74HCT244 → IBT-2 |
+| Motor R | LPWM (rev) | 10 | **23** | FlexPWM4.0 B | shares submodule w/ 22 |
+| Motor | R_EN / L_EN | — | **(none)** | — | tie to **5 V** (always on), not an MCU pin |
+| Encoder L | Phase A | 2 (INT0) | **2** | QuadEncoder ch1 A | hardware **x4** decode, zero CPU |
+| Encoder L | Phase B | 4 | **3** | QuadEncoder ch1 B | |
+| Encoder R | Phase A | 3 (INT1) | **4** | QuadEncoder ch2 A | |
+| Encoder R | Phase B | 7 | **5** | QuadEncoder ch2 B | pin 5 is in XBAR group {0,5,37} — OK, we use neither 0 nor 37 |
+| IMU | SDA | A4 | **18** | Wire (SDA0) | 3.3 V |
+| IMU | SCL | A5 | **19** | Wire (SCL0) | 3.3 V |
+| Status | LED | 13 | **13** | onboard LED | heartbeat/fault blink |
+
+**Reserved for the feature roadmap (don't reassign):**
+
+| Future use | Bus | Teensy 4.1 pins |
+|---|---|---|
+| **CRSF / ELRS** RX (+ telemetry back) | Serial1 | RX1 **0**, TX1 **1** |
+| **LIDAR** | Serial2 | RX2 **7**, TX2 **8** |
+| Spare UART (telemetry / GPS / 2nd LIDAR) | Serial3 | RX3 **15**, TX3 **14** |
+| SPI (SD is separate SDIO on 4.1) | SPI0 | MOSI **11**, MISO **12**, SCK **13**\*, CS **10** |
+
+\* SCK shares pin 13 with the onboard LED — pick one if you actually bring up SPI.
+
+**QuadEncoder-capable pins (T4.1):** 0,1,2,3,4,5,7,8,30,31,33,36,37. Only **4 hardware
+channels** exist. XBAR-exclusive groups (can't use two from the same group): {0,5,37} and
+{1,36}. Our choice (2,3,4,5) touches only pin 5 from any group → safe.
+
+**PWM-capable pins (T4.1):** 0-15, 18, 19, 22-25, 28, 29, 33, 36, 37, 42-47, 51, 54. Set
+`analogWriteFrequency(6, 20000)` and `analogWriteFrequency(22, 20000)` (each covers its
+submodule partner) to move motor whine out of the audible/vibration band.
+
+**Code changes (the whole pin remap is just `#define`s + two constructors):**
+```c
+// Motors (each pair -> 74HCT244 buffer -> IBT-2 RPWM/LPWM)
+#define LEFT_MOTOR_FORWARD_PIN   6
+#define LEFT_MOTOR_REVERSE_PIN   9
+#define RIGHT_MOTOR_FORWARD_PIN  22
+#define RIGHT_MOTOR_REVERSE_PIN  23
+// Encoders: QuadEncoder(channel 1-4, phaseA, phaseB, pullups). Built-in pull-up
+// + 3.3 V supply -> pullups = 0. Replaces leftEncISR/rightEncISR entirely.
+QuadEncoder encL(1, 2, 3, 0);
+QuadEncoder encR(2, 4, 5, 0);
+// IMU stays on default Wire (SDA 18 / SCL 19) - no pins to declare.
+```
+
+> **counts/rev = 2184 with x4 decode.** Bench-verified on the Uno: **13 PPR × 42:1 = 546**
+> rising-A edges per output-shaft rev (x1 counting). `QuadEncoder` does **full x4** quadrature,
+> so **546 × 4 = 2184 counts/rev** on the Teensy. Re-derive `positionRev`/`forwardVel` from
+> 2184. *(The encoder datasheet's "11 PPR / 22 poles" is wrong for this unit — 13 PPR was
+> measured and tested; trust the bench value, not the sheet.)* Re-check the per-side signs
+> (`ENC_LEFT_DIR`/`ENC_RIGHT_DIR`) since the right encoder is mirror-mounted.
+
+---
+
 ## 4. Firmware migration checklist
 
-### 4.1 Toolchain
-- [ ] Install **Teensyduino** (or PlatformIO `teensy` platform). Update `flash.sh` pipeline to target Teensy (`arduino-cli` FQBN `teensy:avr:teensy41`, or PlatformIO env).
-- [ ] Confirm the WSL→OneDrive sync + build flow still works for the new FQBN. *(Hands-off rule still applies: the user runs `flash.sh`; I don't upload.)*
+### 4.1 Toolchain & flashing — **VERIFIED**
+`arduino-cli` **compiles** Teensy fine (`teensy:avr:teensy41`), but it **cannot upload** it
+the way it uploads the Uno: Teensy flashes via the **HalfKay HID bootloader** and
+**re-enumerates to a different USB device (VID 16C0:0478) when it enters bootloader mode**,
+which breaks the `usbipd` attachment mid-flash. So the serial-upload model does not apply.
+
+**Resolved approach (in `flash.sh`, board-aware):** keep the *sync→build-in-WSL* architecture;
+**compile in WSL, upload with the Windows Teensy loader** (which handles re-enumeration
+natively). `flash.sh` calls the Windows `teensy_post_compile.exe` directly from WSL — no
+`usbipd` for Teensy. The Uno path is unchanged (usbipd + serial).
+
+- [x] ~~Pick a flashing method.~~ **Done:** hybrid compile-in-WSL / upload-via-Windows-loader.
+- [ ] One-time: `bash flash.sh --board teensy --setup` (adds PJRC index, installs `teensy:avr` into WSL's arduino-cli).
+- [ ] Confirm the Windows Teensy tools path in `flash.sh` (`TEENSY_TOOLS_LINUX`, currently `…/teensy-tools/1.60.0`) matches the installed version.
+- [ ] First flash of a blank Teensy needs one physical button press; auto-reboot works after. *(Hands-off rule still applies: the user runs `flash.sh`; I don't upload.)*
+
+Usage: `bash flash.sh --teensy --all` (sync + compile + upload). Serial monitor is a Windows
+COM port: `bash flash.sh --teensy --monitor --port COM5`.
 
 ### 4.2 Direct ports (should "just work")
 - [ ] `Wire` (I²C) → Teensy `Wire` works; pick the I²C bus/pins. MPU9250 (hideakitai lib) is portable.
@@ -91,8 +170,8 @@ Two rails, single common ground:
 
 ### 4.3 Rewrites (platform-specific)
 - [ ] **Balance loop timing** → move from the `millis()`-gated super-loop to an **`IntervalTimer` ISR** at a fixed rate (start at the current 200 Hz, then raise toward 1 kHz once floats are free). Deterministic, jitter-free, independent of everything else.
-- [ ] **Encoders** → replace the two pin-change ISRs (`leftEncISR`/`rightEncISR`) with the **`QuadEncoder`** hardware decoder (x4). Update `counts/rev`: x4 decode ≈ **2184 counts/rev** (546 × 4) — re-derive `positionRev`/`forwardVel` scaling accordingly. Re-check `ENC_LEFT_DIR`/`ENC_RIGHT_DIR` signs.
-- [ ] **Pin map** → reassign motor + encoder pins to Teensy pins (the Uno's D2/D3-interrupt constraint is gone; choose pins by hardware function, not interrupt capability).
+- [ ] **Encoders** → replace the two pin-change ISRs (`leftEncISR`/`rightEncISR`) with the **`QuadEncoder`** hardware decoder (x4, zero CPU). **counts/rev = 2184** (546 x1 × 4, see §3.1); re-derive `positionRev`/`forwardVel`. Re-check `ENC_LEFT_DIR`/`ENC_RIGHT_DIR` signs.
+- [ ] **Pin map** → apply the §3.1 mapping (motors 6/9/22/23, encoders 2/3/4/5, IMU on Wire 18/19). The Uno's D2/D3-interrupt constraint is gone — pins chosen by hardware function, keeping UARTs free for CRSF/LIDAR.
 - [ ] Re-validate `MOTOR_DEADBAND` / stiction floor at the new PWM frequency (higher PWM freq changes effective torque at low duty).
 
 ### 4.4 Re-tune (expect small shifts, not a redo)
