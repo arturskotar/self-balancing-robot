@@ -1,5 +1,6 @@
 #include <Wire.h>
 #include <MPU9250.h>
+#include "crsf.h"     // ELRS/CRSF radio on Serial1: arm kill-switch + live gain tuning
 
 // =============================================================================
 // WHEELED REVERSE PENDULUM - SELF BALANCING CONTROLLER  (v2)
@@ -291,6 +292,8 @@ void setup() {
   lastControlMicros = micros();
   readEncoders(velLastTicksL, velLastTicksR);   // baseline so the first velocity sample isn't a spike
 
+  crsf::begin();   // ELRS receiver on Serial1 (pins 0/1). Robot only runs when armed (SB up).
+
   Serial.println("BALANCE_V2_READY");
 #if ENCODER_TEST
   Serial.println("ENCODER_TEST mode: motors OFF. Roll each wheel by hand "
@@ -332,6 +335,27 @@ void driveControl(float u) {
     if (u < 0) pwm = -pwm;
   }
   motorRaw(pwm);
+}
+
+// Live gain tuning from the radio. SC (CH7) picks Kp/Kd/Kvel; the S1 knob (CH8)
+// sets it, mapped to a SAFE band centered on the shipped value (knob center =
+// shipped). "Pickup" style: switching SC does NOT jump a gain -- the knob only
+// takes over once you actually MOVE it -- so flipping SC never disturbs a gain.
+// Read the sweet spot off telemetry, then bake it into the #-defaults above.
+void applyLiveTune() {
+  static uint8_t lastSel  = 255;
+  static float   lastKnob = -1.0f;
+  uint8_t sel = crsf::gainSel();
+  float   k   = crsf::knob01();
+  if (sel != lastSel) { lastSel = sel; lastKnob = k; return; }  // just switched: wait for movement
+  if (fabsf(k - lastKnob) < 0.01f) return;                      // knob idle: leave gain as-is
+  lastKnob = k;
+  float x = (k - 0.5f) * 2.0f;                                  // -1..+1 about center
+  switch (sel) {
+    case 0: Kp   = 2.0f + 0.6f * x; break;   // 1.4 .. 2.6  (shipped 2.0)
+    case 1: Kd   = 0.3f + 0.2f * x; break;   // 0.1 .. 0.5  (shipped 0.3)
+    case 2: Kvel = 4.0f + 1.5f * x; break;   // 2.5 .. 5.5  (shipped 4.0)
+  }
 }
 
 // =============================================================================
@@ -488,7 +512,8 @@ void loop() {
   return;
 #endif
 
-  imu.update();   // refresh latest sample (non-blocking)
+  imu.update();    // refresh latest sample (non-blocking)
+  crsf::update();  // service the radio every loop pass (not just on control ticks)
 
   unsigned long now = micros();
   if ((now - lastControlMicros) < CONTROL_PERIOD_US) return;  // wait for next tick
@@ -508,6 +533,24 @@ void loop() {
   float aPitch   = accelPitch();
   pitch = 0.99f * (pitch + gyroRate * DT) + 0.01f * aPitch;   // complementary filter (raw rate)
   dRateFilt = D_LPF * dRateFilt + (1.0f - D_LPF) * gyroRate;  // smoothed rate for the D term only
+
+  // --- KILL SWITCH: disarmed (SB down) OR link lost -> cut everything ---------
+  // A balancer whose IMU is moved/knocked can command full power. SB(down) or the
+  // radio off stops the motors instantly. Keep the pitch filter running so it's
+  // accurate the moment you re-arm, and re-home while idle so re-arming doesn't
+  // lurch back toward an old position.
+  if (!crsf::armed()) {
+    motorRaw(0);
+    integral = 0.0f;
+    leanCmd  = 0.0f;
+    long hl, hr; readEncoders(hl, hr);
+    homeTicksSum = hl + hr;
+    telemetry(pitch - BALANCE_SETPOINT, gyroRate, 0);
+    return;
+  }
+
+  // --- Live gain tuning from the radio (SC selects, S1 knob sets) -------------
+  applyLiveTune();
 
   float error = pitch - BALANCE_SETPOINT;
 
@@ -591,5 +634,9 @@ void telemetry(float error, float rate, int u) {
   Serial.print(" VR ");   Serial.print(wheelVelR, 2);     // right wheel rev/s (filtered)
   Serial.print(" VF ");   Serial.print(forwardVel, 2);    // chassis forward rev/s (mean)
   Serial.print(" LEAN "); Serial.print(leanCmd, 2);       // cascade outer-loop lean command (deg)
-  Serial.print(" POS ");  Serial.println(positionRev, 2); // avg wheel position, revs from home
+  Serial.print(" POS ");  Serial.print(positionRev, 2);   // avg wheel position, revs from home
+  Serial.print(" | ARM "); Serial.print(crsf::armed() ? "Y" : "-");  // radio kill-switch state
+  Serial.print(" Kp ");    Serial.print(Kp, 2);           // live gains (tune with SC + S1 knob)
+  Serial.print(" Kd ");    Serial.print(Kd, 2);
+  Serial.print(" Kvel ");  Serial.println(Kvel, 2);
 }
