@@ -179,10 +179,10 @@ void loop() {
       // CH2 = full bidirectional drive; CH3 throttle caps top speed but never
       // below SPEED_FLOOR, so CH2 alone always drives.
       const float SPEED_FLOOR = 0.35f;
-      float dir   = stickNorm(CH_DRIVE);                                       // -1..+1
+      float dir   = -stickNorm(CH_DRIVE);                                      // inverted: stick UP = +forward
       float cap   = SPEED_FLOOR + (1.0f - SPEED_FLOOR) * throttle01(CH_SPEED); // 0.35..1.0
       float drive = dir * cap;                                                 // scaled command
-      float turn  = stickNorm(CH_TURN);                                        // +1 = right
+      float turn  = -stickNorm(CH_TURN);                                       // inverted: stick RIGHT = turn right
       uint8_t sel = switchPos3(CH_GAINSEL);               // SC: 0/1/2 -> Kp/Kd/Kvel
       const TuneGain& g = TUNE_GAINS[sel];
       float gval  = g.lo + knob01(CH_TUNE) * (g.hi - g.lo);
