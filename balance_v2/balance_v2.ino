@@ -166,6 +166,16 @@ const int   MOTOR_DEADBAND = 11;    // feed-forward kick past stiction (free-spi
                                     // Raise if small corrections stall; lower if it still bang-bangs.
 const float OUT_DEADZONE   = 0.5f;  // ignore PD outputs smaller than this (PWM units)
 
+// ---- Per-side stiction kick: the pins-6/9 motor runs stiffer than 22/23 ----
+const int   LEFT_DEADBAND  = 15;    // pins 6/9  (stiff wheel -> bigger kick)
+const int   RIGHT_DEADBAND = 11;    // pins 22/23
+
+// ---- RC drive (radio -> motion) --------------------------------------------
+const float DRIVE_MAX_VEL  = 0.6f;  // rev/s at full drive stick (conservative; raise once it tracks)
+const float TURN_AUTHORITY = 25.0f; // PWM-effort differential at full turn stick
+const float DRIVE_SIGN     = +1.0f; // flip to -1 if the drive stick drives the wrong way
+const float TURN_SIGN      = +1.0f; // flip to -1 if the turn stick steers the wrong way
+
 // ---- Coast band (motor protection): rest the motors near balance -----------
 // Within ANGLE_DEADZONE of the (leaned) target AND wheels stopped -> command 0.
 // WHY 0.15 -> 1.0 (2026-06-30): the residual jitter is motor vibration on the
@@ -325,16 +335,23 @@ void motorRaw(int pwm) {
   }
 }
 
-// Map a control effort 'u' (PWM-ish units) to PWM, jumping past the motor
-// dead band so even small efforts produce motion. No slew limiting here.
-void driveControl(float u) {
-  int pwm = 0;
-  if (fabs(u) > OUT_DEADZONE) {
-    float mag = MOTOR_DEADBAND + fabs(u);
-    pwm = (int)constrain(mag, 0.0f, (float)MAX_PWM);
-    if (u < 0) pwm = -pwm;
-  }
-  motorRaw(pwm);
+// Per-wheel PWM (left/right differ for steering). Same polarity as motorRaw(+).
+void motorPerWheel(int pwmL, int pwmR) {
+  pwmL = constrain(pwmL, -MAX_PWM, MAX_PWM);
+  pwmR = constrain(pwmR, -MAX_PWM, MAX_PWM);
+  if (pwmL >= 0) { analogWrite(LEFT_MOTOR_FORWARD_PIN, pwmL); analogWrite(LEFT_MOTOR_REVERSE_PIN, 0); }
+  else           { analogWrite(LEFT_MOTOR_FORWARD_PIN, 0);    analogWrite(LEFT_MOTOR_REVERSE_PIN, -pwmL); }
+  if (pwmR >= 0) { analogWrite(RIGHT_MOTOR_FORWARD_PIN, pwmR); analogWrite(RIGHT_MOTOR_REVERSE_PIN, 0); }
+  else           { analogWrite(RIGHT_MOTOR_FORWARD_PIN, 0);    analogWrite(RIGHT_MOTOR_REVERSE_PIN, -pwmR); }
+}
+
+// Map per-wheel efforts (balance +/- turn) to PWM, each past its own stiction
+// dead band. Below OUT_DEADZONE a wheel is left at 0 (lets the coast band rest it).
+void driveControlDiff(float uL, float uR) {
+  int pwmL = 0, pwmR = 0;
+  if (fabs(uL) > OUT_DEADZONE) { pwmL = (int)constrain(LEFT_DEADBAND  + fabs(uL), 0.0f, (float)MAX_PWM); if (uL < 0) pwmL = -pwmL; }
+  if (fabs(uR) > OUT_DEADZONE) { pwmR = (int)constrain(RIGHT_DEADBAND + fabs(uR), 0.0f, (float)MAX_PWM); if (uR < 0) pwmR = -pwmR; }
+  motorPerWheel(pwmL, pwmR);
 }
 
 // Live gain tuning from the radio. SC (CH7) picks Kp/Kd/Kvel; the S1 knob (CH8)
@@ -552,6 +569,23 @@ void loop() {
   // --- Live gain tuning from the radio (SC selects, S1 knob sets) -------------
   applyLiveTune();
 
+  // --- RC drive/turn command from the radio ----------------------------------
+  // Drive stick -> target forward velocity; turn stick -> differential. CH3
+  // throttle caps top speed. With BOTH sticks centered these are 0 and the
+  // balancer behaves exactly as before.
+  float cap       = 0.35f + 0.65f * crsf::speed();                    // CH3 speed cap 0.35..1.0
+  float targetVel = DRIVE_SIGN * crsf::drive() * cap * DRIVE_MAX_VEL; // rev/s
+  float turnCmd   = TURN_SIGN  * crsf::turn()  * cap * TURN_AUTHORITY;// per-wheel PWM-effort diff
+
+  // While driving, RELEASE the position hold: re-home under the robot so the
+  // station-keeping term (Kpos*positionRev) can't fight the pilot. positionRev
+  // stays ~0, leaving the outer loop as pure velocity control below. On release
+  // it holds wherever it stopped. (No moving-reference runaway.)
+  if (fabs(targetVel) > 0.01f) {
+    long dl, dr; readEncoders(dl, dr);
+    homeTicksSum = dl + dr;
+  }
+
   float error = pitch - BALANCE_SETPOINT;
 
   // --- Safety: fall latch (hysteresis) ---
@@ -578,7 +612,7 @@ void loop() {
   // --- Cascade OUTER loop: position + velocity -> a slow LEAN command ---
   // Forward displacement / forward motion -> lean BACK. Clamp so it can't demand
   // a tip-over, then low-pass so the outer loop stays slow vs the inner loop.
-  float leanRaw = -(Kpos * positionRev + Kvel * forwardVel);
+  float leanRaw = -(Kpos * positionRev + Kvel * (forwardVel - targetVel));
   leanRaw = constrain(leanRaw, -LEAN_CLAMP, LEAN_CLAMP);
   leanCmd = LEAN_LPF * leanCmd + (1.0f - LEAN_LPF) * leanRaw;
 
@@ -598,7 +632,10 @@ void loop() {
   // "settled" signals -- NOT on gyroRate, which is corrupted by motor vibration
   // (it would never let the coast engage). If a real tilt develops, error leaves
   // the band within a cycle or two and full control resumes before it can fall.
-  if (fabs(error) < ANGLE_DEADZONE && fabs(forwardVel) < VEL_DEADZONE) {
+  // Only coast when truly IDLE -- not while the pilot commands drive/turn, or the
+  // small drive lean (often < ANGLE_DEADZONE) gets zeroed here and nothing moves.
+  bool commanding = (fabs(targetVel) > 0.01f) || (fabs(turnCmd) > OUT_DEADZONE);
+  if (!commanding && fabs(error) < ANGLE_DEADZONE && fabs(forwardVel) < VEL_DEADZONE) {
     u = 0.0f;
     integral = 0.0f;   // don't accumulate while parked
   }
@@ -612,7 +649,7 @@ void loop() {
   }
 #endif
 
-  driveControl(u);
+  driveControlDiff(u + turnCmd, u - turnCmd);   // balance effort +/- steering (drive is via the lean)
   telemetry(error, gyroRate, (int)u);
 }
 
@@ -638,5 +675,7 @@ void telemetry(float error, float rate, int u) {
   Serial.print(" | ARM "); Serial.print(crsf::armed() ? "Y" : "-");  // radio kill-switch state
   Serial.print(" Kp ");    Serial.print(Kp, 2);           // live gains (tune with SC + S1 knob)
   Serial.print(" Kd ");    Serial.print(Kd, 2);
-  Serial.print(" Kvel ");  Serial.println(Kvel, 2);
+  Serial.print(" Kvel ");  Serial.print(Kvel, 2);
+  Serial.print(" DRV ");   Serial.print(crsf::drive(), 2);   // CH2 drive stick (should move when pushed)
+  Serial.print(" TRN ");   Serial.println(crsf::turn(), 2);  // CH1 turn stick
 }
