@@ -180,6 +180,7 @@ const float DRIVE_KP = 6.0f;
 // proportional term instead of leaving a broad proportional-only damping hole.
 // Larger tracking errors still restore the known-good neutral Kd.
 const float DRIVE_KD = 0.20f;
+const float DRIVE_D_NEAR_TARGET_LIMIT = 3.0f; // stop rate noise from becoming full floor reversals
 const float DRIVE_KD_RESTORE_START_ERROR = 1.5f;
 const float DRIVE_KD_RESTORE_FULL_ERROR  = 3.0f;
 
@@ -1219,6 +1220,11 @@ void loop() {
   float driveKdTarget = driveKdFloor + kdSafetyBlend * (Kd - driveKdFloor);
   controlLog.effectiveKd = Kd + driveAuthority * (driveKdTarget - Kd);
   dTermLog = controlLog.effectiveKd * dRateFilt;
+  if (driveAuthority > 0.0f && kdSafetyBlend < 1.0f) {
+    float dLimit = DRIVE_D_NEAR_TARGET_LIMIT +
+                   kdSafetyBlend * (fabs(dTermLog) - DRIVE_D_NEAR_TARGET_LIMIT);
+    dTermLog = constrain(dTermLog, -dLimit, dLimit);
+  }
   controlLog.dTermLimited = fabs(controlLog.effectiveKd - Kd) > 0.001f;
 
   float driveKpTarget = Kp < DRIVE_KP ? DRIVE_KP : Kp;
