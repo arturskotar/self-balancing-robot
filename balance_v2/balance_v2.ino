@@ -135,6 +135,15 @@ const float PITCH_ZERO_OFFSET = -9.20f;  // deg, makes accel-pitch ~0 at mechani
 // tuning notes) and put it here.
 float BALANCE_SETPOINT = -3.22f;         // deg : measured after rigidly mounting the IMU (now steady &
                                          // repeatable, ~0.2deg wander). Fine-tune: forward lower, back raise.
+// ⚠️ SUSPECT — 2026-08-13 telemetry. With the motors OFF (coast band) the robot sat
+// dead still at PITCH ~ -4.03 for 4.5 s. That is the angle it ACTUALLY balances at,
+// but the setpoint says -3.22 -- a 0.8 deg FORWARD bias. Inside the coast band that
+// is invisible (|ERR| 0.81 < ANGLE_DEADZONE 1.0, motors off). The moment anything
+// knocks it out of the band the controller starts chasing a target 0.8 deg forward
+// of true balance, which is a standing order to accelerate forward forever.
+// ACTION: re-measure the rest angle (disarmed, upright, motors off, read PITCH) and
+// set this to it. Not changed here -- it is a hand-calibrated constant and one log
+// could have been taken on a slope or against an obstruction.
 
 // ---- PID gains -------------------------------------------------------------
 // Start as a PD controller (Ki = 0). Add a tiny Ki only after PD balances.
@@ -173,8 +182,22 @@ float Ki = 0.0f;   // integral      (deg*s    -> PWM)  keep 0 until PD works
 // the whole Teensy era, so positionRev/forwardVel were pinned at 0 and the outer
 // loop contributed nothing. Treat Kpos/Kvel as UNVALIDATED starting points.
 // If it limit-cycles, SLOW the outer loop (raise LEAN_LPF) before cutting gains.
+// >>> DIAGNOSTIC SWITCH <<<
+// 0 = outer loop OFF: leanCmd is forced to 0, so TARGET == BALANCE_SETPOINT and
+//     this is EXACTLY the known-good baseline controller (which ran with dead
+//     encoders, i.e. with the outer loop inert) -- but at the corrected 4482 Hz.
+// 1 = outer loop ON (normal cascade).
+// Run with 0 FIRST. If it balances like the old baseline, the inner loop and the
+// motor polarity are fine and the fault is in the outer loop. If it ALSO runs
+// away, the fault is in the inner loop / motor direction, which the old 20 kHz
+// deadband was hiding (small corrections produced no output at all back then).
+#define OUTER_LOOP 1
+
 float Kpos = 1.0f;               // wheel position error (rev -> deg of lean)
-float Kvel = 4.0f;               // wheel velocity error (rev/s -> deg of lean); tune with SC=2 + S1
+float Kvel = 4.0f;               // wheel velocity error (rev/s -> deg of lean); tune with SC=2 + S1.
+                                 // SUSPECT: 4.0 means 0.68 rev/s alone commands 2.7 deg of lean, over
+                                 // half the LEAN_CLAMP. Never validated (encoders were dead). If the
+                                 // outer loop is the culprit, start around 1.0, not 4.0.
 const float LEAN_CLAMP = 5.0f;   // deg : known-good outer-loop safety cap
 const float LEAN_LPF   = 0.99f;  // EMA on leanCmd (~500 ms). Higher = slower, safer outer loop.
                                  // 0.95 (~100 ms) RAN AWAY: faster than the pendulum's non-minimum-
@@ -519,8 +542,10 @@ void applyLiveTune() {
   switch (sel) {
     case 0: Kp   = 2.0f + 0.6f * x; break;   // 1.4 .. 2.6  (shipped 2.0)
     case 1: Kd   = 0.3f + 0.2f * x; break;   // 0.1 .. 0.5  (shipped 0.3)
-    case 2: Kvel = 4.0f + 2.0f * x; break;   // 2.0 .. 6.0  (shipped 4.0) -- the outer-loop
-                                             // velocity gain, now the main drive-tuning knob
+    case 2: Kvel = 2.0f + 2.0f * x; break;   // 0.0 .. 4.0 -- range shifted DOWN so the knob can
+                                             // reach ZERO and dial the outer loop out live while
+                                             // the robot is running. Knob fully CCW = outer
+                                             // velocity feedback off.
   }
 }
 
@@ -864,8 +889,13 @@ void loop() {
 
   float posError = posSetpoint - positionRev;   // rev   : + = must travel forward
   float velError = targetVel   - forwardVel;    // rev/s : + = must speed up forward
+#if OUTER_LOOP
   float positionLean = Kpos * posError;
   float velocityLean = Kvel * velError;
+#else
+  float positionLean = 0.0f;   // DIAGNOSTIC: outer loop disabled -> pure baseline inner loop
+  float velocityLean = 0.0f;
+#endif
   float leanRaw = positionLean + velocityLean;
   leanRaw = constrain(leanRaw, -LEAN_CLAMP, LEAN_CLAMP);
   leanCmd = LEAN_LPF * leanCmd + (1.0f - LEAN_LPF) * leanRaw;
