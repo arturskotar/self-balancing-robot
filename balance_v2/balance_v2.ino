@@ -378,6 +378,12 @@ const unsigned int  LAUNCH_RELEASE_TICKS     = 20;    // require 100 ms at 200 H
 const unsigned long LAUNCH_WAIT_MS           = 2000; // do not stay armed indefinitely
 const unsigned long LAUNCH_ASSIST_MS         = 200;  // bounded axle pulse, comparable to a hand nudge
 
+// While the wheels are still breaking away, fast pitch-rate transients can make
+// D overwhelm P and reverse the axle before it establishes motion. Limit only
+// that drive-start condition. Full derivative damping returns after 100 ms of
+// commanded-direction rolling, and immediately for a larger balance error.
+const float DRIVE_BREAKAWAY_DTERM_LIMIT = 3.0f;
+
 // ---- Soft start + saturation latch (from the rc_balance reference) ---------
 // Soft start: ramp control authority in over SOFT_START_SEC after arming so a
 // mid-air / mid-tilt arm doesn't slam the motors to full.
@@ -494,7 +500,7 @@ struct ControlTelemetry {
   float gyroX = 0.0f, gyroY = 0.0f, gyroZ = 0.0f;
   float accelX = 0.0f, accelY = 0.0f, accelZ = 0.0f;
   float targetPitch = BALANCE_SETPOINT;
-  float pTerm = 0.0f, iTerm = 0.0f;
+  float pTerm = 0.0f, iTerm = 0.0f, dTermRaw = 0.0f;
   float effortL = 0.0f, effortR = 0.0f;
   float positionLean = 0.0f, velocityLean = 0.0f, leanRaw = 0.0f;
   float speedInput = 0.0f, commandCap = 0.35f;
@@ -505,6 +511,7 @@ struct ControlTelemetry {
   float posError = 0.0f, velError = 0.0f;   // outer-loop tracking errors
   float softStart = 0.0f;                   // 0..1 authority ramp after arming
   float launchBoost = 0.0f;                 // signed change needed to enforce the launch floor
+  bool dTermLimited = false;
   bool driving = false;
   char launchState = '-';                   // '-' idle, 'W' waiting for lean, 'P' axle pulse
   bool coasting = true;
@@ -935,6 +942,8 @@ void loop() {
     turnCmdLog = 0.0f;
     controlLog.targetPitch = BALANCE_SETPOINT;
     controlLog.pTerm = controlLog.iTerm = 0.0f;
+    controlLog.dTermRaw = 0.0f;
+    controlLog.dTermLimited = false;
     controlLog.effortL = controlLog.effortR = 0.0f;
     controlLog.driveRaw = crsf::drive();
     controlLog.turnRaw = crsf::turn();
@@ -1027,6 +1036,16 @@ void loop() {
   }
   driveCommandPrev = driving;
 
+  // Confirm real rolling over a window instead of trusting a one-tick encoder
+  // burst. This state also controls when full derivative damping is restored.
+  float driveVelTowardTarget = driveDirection * forwardVel;
+  if (driving && driveVelTowardTarget >= LAUNCH_RELEASE_VEL) {
+    if (launchRollingTicks < LAUNCH_RELEASE_TICKS) launchRollingTicks++;
+  } else {
+    launchRollingTicks = 0;
+  }
+  bool driveRollingConfirmed = launchRollingTicks >= LAUNCH_RELEASE_TICKS;
+
   float error = pitch - BALANCE_SETPOINT;
 
   // --- Safety: fall latch (hysteresis) ---
@@ -1055,6 +1074,8 @@ void loop() {
     dTermLog = 0.0f;
     controlLog.targetPitch = BALANCE_SETPOINT;
     controlLog.pTerm = controlLog.iTerm = 0.0f;
+    controlLog.dTermRaw = 0.0f;
+    controlLog.dTermLimited = false;
     controlLog.effortL = controlLog.effortR = 0.0f;
     controlLog.positionLean = controlLog.velocityLean = controlLog.leanRaw = 0.0f;
     controlLog.posError = controlLog.velError = 0.0f;
@@ -1107,7 +1128,15 @@ void loop() {
 
   // --- PID INNER loop (D on the low-passed rate so gyro spikes don't kick) ---
   // Encoder position/velocity act through leanCmd; no direct motor feedforward.
-  dTermLog = Kd * dRateFilt;
+  controlLog.dTermRaw = Kd * dRateFilt;
+  bool limitingDriveDerivative = driving && !driveRollingConfirmed &&
+                                 fabs(error) <= LAUNCH_ABORT_ERROR_DEG;
+  dTermLog = limitingDriveDerivative
+           ? constrain(controlLog.dTermRaw, -DRIVE_BREAKAWAY_DTERM_LIMIT,
+                                            DRIVE_BREAKAWAY_DTERM_LIMIT)
+           : controlLog.dTermRaw;
+  controlLog.dTermLimited = limitingDriveDerivative &&
+                            fabs(dTermLog - controlLog.dTermRaw) > 0.001f;
   controlLog.pTerm = Kp * error;
   controlLog.iTerm = Ki * integral;
   float u = -(controlLog.pTerm + dTermLog + controlLog.iTerm);
@@ -1159,19 +1188,12 @@ void loop() {
   // long enough to cross static friction. Stronger same-direction balance output
   // is preserved. A large error/rate aborts instead of fighting recovery.
   controlLog.launchBoost = 0.0f;
-  float launchVel = launchAssistDirection > 0 ? forwardVel : -forwardVel;
-  if (launchAssistState != LAUNCH_IDLE && launchVel >= LAUNCH_RELEASE_VEL) {
-    if (launchRollingTicks < LAUNCH_RELEASE_TICKS) launchRollingTicks++;
-  } else {
-    launchRollingTicks = 0;
-  }
-  bool launchRolling = launchRollingTicks >= LAUNCH_RELEASE_TICKS;
   if (launchAssistState == LAUNCH_WAIT_LEAN) {
     bool timedOut = (millis() - launchAssistArmedMs) >= LAUNCH_WAIT_MS;
     bool leanReady = launchAssistDirection * leanCmd >= LAUNCH_READY_LEAN_DEG;
     bool bodyReady = fabs(error) <= LAUNCH_READY_ERROR_DEG &&
                      fabs(dRateFilt) <= LAUNCH_READY_RATE_DPS;
-    if (timedOut || launchRolling || !driving) {
+    if (timedOut || driveRollingConfirmed || !driving) {
       launchAssistState = LAUNCH_IDLE;
     } else if (softStart >= 0.99f && leanReady && bodyReady) {
       launchAssistState = LAUNCH_PUSH;
@@ -1182,7 +1204,7 @@ void loop() {
     bool timedOut = (millis() - launchAssistStartedMs) >= LAUNCH_ASSIST_MS;
     bool unsafe = fabs(error) > LAUNCH_ABORT_ERROR_DEG ||
                   fabs(dRateFilt) > LAUNCH_ABORT_RATE_DPS;
-    if (timedOut || launchRolling || unsafe || !driving) {
+    if (timedOut || driveRollingConfirmed || unsafe || !driving) {
       launchAssistState = LAUNCH_IDLE;
     } else {
       // Negative motor effort is physical forward on this chassis; encoder and
@@ -1236,7 +1258,9 @@ void telemetry(float error, float rate, float u) {
 
   Serial.print(" | PID P "); Serial.print(controlLog.pTerm, 2);
   Serial.print(" I "); Serial.print(controlLog.iTerm, 2);
+  Serial.print(" D0 "); Serial.print(controlLog.dTermRaw, 2);
   Serial.print(" D "); Serial.print(dTermLog, 2);
+  Serial.print(" DLIM "); Serial.print(controlLog.dTermLimited ? "Y" : "-");
   Serial.print(" U "); Serial.print(u, 2);
   Serial.print(" EL "); Serial.print(controlLog.effortL, 2);
   Serial.print(" ER "); Serial.print(controlLog.effortR, 2);
