@@ -167,9 +167,15 @@ const int   MOTOR_DEADBAND = 11;    // feed-forward kick past stiction (free-spi
                                     // Raise if small corrections stall; lower if it still bang-bangs.
 const float OUT_DEADZONE   = 0.5f;  // ignore PD outputs smaller than this (PWM units)
 
-// ---- Per-side stiction kick: the pins-6/9 motor runs stiffer than 22/23 ----
-const int   LEFT_DEADBAND  = 15;    // pins 6/9  (stiff wheel -> bigger kick)
-const int   RIGHT_DEADBAND = 11;    // pins 22/23
+// ---- Per-side stiction kick -------------------------------------------------
+// Forward-drive logs show the balance loop now asks for the correct lean, but
+// the resulting U=1..3 only produced PWM in the teens with the old 15/11 floor.
+// Full turn works because TURN_AUTHORITY 25 plus the old floor gives ~40/36 PWM.
+// Use that observed breakaway range as the minimum whenever the PID asks a wheel
+// to move. This is deadband compensation, not drive feedforward: PID still owns
+// the sign and timing.
+const int   LEFT_DEADBAND  = 35;    // pins 6/9
+const int   RIGHT_DEADBAND = 35;    // pins 22/23
 
 // ---- RC drive (radio -> motion) --------------------------------------------
 const float DRIVE_MAX_VEL  = 0.6f;  // rev/s at full drive stick (conservative; raise once it tracks)
