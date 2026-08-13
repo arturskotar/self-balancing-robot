@@ -161,8 +161,8 @@ const float OUT_DEADZONE   = 0.5f;  // ignore PD outputs smaller than this (PWM 
 // Any extra loaded breakaway authority must be a short pulse, not a steady floor.
 const int   LEFT_DEADBAND  = 11;    // pins 6/9; keep sides equal until loaded response is measured
 const int   RIGHT_DEADBAND = 11;    // pins 22/23
-const int   BREAKAWAY_PWM  = 35;    // short loaded-wheel kick; never a steady minimum
-const unsigned long BREAKAWAY_TIME_US  = 70000;   // 70 ms kick
+const int   BREAKAWAY_PWM  = 42;    // short loaded-wheel kick; never a steady minimum
+const unsigned long BREAKAWAY_TIME_US  = 120000;  // 120 ms kick
 const unsigned long BREAKAWAY_REARM_US = 120000;  // must be idle 120 ms before another kick
 
 struct BreakawayState {
