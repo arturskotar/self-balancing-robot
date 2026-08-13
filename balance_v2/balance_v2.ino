@@ -30,6 +30,7 @@ MPU9250 imu;
 #define RIGHT_MOTOR_FORWARD_PIN  22
 #define RIGHT_MOTOR_REVERSE_PIN  23
 const int MOTOR_PWM_HZ = 20000;  // IBT-2/BTS7960 supports PWM up to 25 kHz
+const int MOTOR_PWM_BITS = 8;    // analogWrite range is explicitly 0..255 on every channel
 
 // ---- Encoder pins (Waveshare DCGM-3865, connector silkscreen "M V A B G M")-
 // Teensy 4.1 map (see MIGRATION_TEENSY.md §3.1). Per motor: A = Hall A (green),
@@ -253,6 +254,24 @@ long  homeTicksSum = 0;                        // (leftTicks+rightTicks) definin
 bool  stalled = false;                         // true while the stall cutoff has the motors off
 bool  fallen = false;                          // true while the fall latch has the motors off
 
+struct ControlTelemetry {
+  float accelPitch = 0.0f;
+  float gyroX = 0.0f, gyroY = 0.0f, gyroZ = 0.0f;
+  float accelX = 0.0f, accelY = 0.0f, accelZ = 0.0f;
+  float targetPitch = BALANCE_SETPOINT;
+  float pTerm = 0.0f, iTerm = 0.0f;
+  float effortL = 0.0f, effortR = 0.0f;
+  float positionLean = 0.0f, velocityLean = 0.0f, leanRaw = 0.0f;
+  float speedInput = 0.0f, commandCap = 0.35f;
+  float driveRaw = 0.0f, turnRaw = 0.0f;
+  float driveCmd = 0.0f, turnCmd = 0.0f;
+  float wheelVelRawL = 0.0f, wheelVelRawR = 0.0f;
+  long encoderDeltaL = 0, encoderDeltaR = 0;
+  bool driving = false;
+  bool coasting = true;
+};
+ControlTelemetry controlLog;
+
 // =============================================================================
 void setup() {
   Serial.begin(115200); // Monitor with `screen /dev/ttyUSB0 115200` -- arduino-cli's monitor
@@ -263,6 +282,7 @@ void setup() {
   pinMode(LEFT_MOTOR_REVERSE_PIN, OUTPUT);
   pinMode(RIGHT_MOTOR_FORWARD_PIN, OUTPUT);
   pinMode(RIGHT_MOTOR_REVERSE_PIN, OUTPUT);
+  analogWriteResolution(MOTOR_PWM_BITS);
   analogWriteFrequency(LEFT_MOTOR_FORWARD_PIN, MOTOR_PWM_HZ);
   analogWriteFrequency(LEFT_MOTOR_REVERSE_PIN, MOTOR_PWM_HZ);
   analogWriteFrequency(RIGHT_MOTOR_FORWARD_PIN, MOTOR_PWM_HZ);
@@ -312,6 +332,9 @@ void setup() {
   crsf::begin();   // ELRS receiver on Serial1 (pins 0/1). Robot only runs when armed (SB up).
 
   Serial.println("BALANCE_V2_READY");
+  Serial.print("PWM_CFG HZ "); Serial.print(MOTOR_PWM_HZ);
+  Serial.print(" BITS "); Serial.print(MOTOR_PWM_BITS);
+  Serial.println(" | L 6/9 FlexPWM2_2 A/B | R 22 FlexPWM4_0A 23 FlexPWM4_1A");
 #if ENCODER_TEST
   Serial.println("ENCODER_TEST mode: motors OFF. Roll each wheel by hand "
                  "(1 turn = ~546 counts = 1.00 rev).");
@@ -491,10 +514,16 @@ void imuTestLoop() {
 // tick (uses the fixed DT). rev/s = Δticks / counts-per-rev / dt, then EMA.
 void updateVelocity() {
   long l, r; readEncoders(l, r);
-  float vL_raw = (l - velLastTicksL) / (float)ENC_COUNTS_PER_REV / DT;
-  float vR_raw = (r - velLastTicksR) / (float)ENC_COUNTS_PER_REV / DT;
+  long deltaL = l - velLastTicksL;
+  long deltaR = r - velLastTicksR;
+  float vL_raw = deltaL / (float)ENC_COUNTS_PER_REV / DT;
+  float vR_raw = deltaR / (float)ENC_COUNTS_PER_REV / DT;
   velLastTicksL = l;
   velLastTicksR = r;
+  controlLog.encoderDeltaL += deltaL;
+  controlLog.encoderDeltaR += deltaR;
+  controlLog.wheelVelRawL = vL_raw;
+  controlLog.wheelVelRawR = vR_raw;
   wheelVelL = VEL_LPF * wheelVelL + (1.0f - VEL_LPF) * vL_raw;
   wheelVelR = VEL_LPF * wheelVelR + (1.0f - VEL_LPF) * vR_raw;
   forwardVel = 0.5f * (wheelVelL + wheelVelR);
@@ -605,9 +634,16 @@ void loop() {
   updateVelocity(); // refresh filtered wheel velocities (every tick, before the safety return)
 
   // --- Estimate ---
+  controlLog.gyroX = imu.getGyroX();
+  controlLog.gyroY = imu.getGyroY();
+  controlLog.gyroZ = imu.getGyroZ();
+  controlLog.accelX = imu.getAccX();
+  controlLog.accelY = imu.getAccY();
+  controlLog.accelZ = imu.getAccZ();
   float gyroRate = -(imu.getGyroY() - gyroYBias);             // deg/s, forward-lean +. Pitch rate is on
                                                              // the Y gyro (negated) -- see gyroYBias.
   float aPitch   = accelPitch();
+  controlLog.accelPitch = aPitch;
   pitch = 0.99f * (pitch + gyroRate * DT) + 0.01f * aPitch;   // complementary filter (raw rate)
   dRateFilt = D_LPF * dRateFilt + (1.0f - D_LPF) * gyroRate;  // smoothed rate for the D term only
 
@@ -623,6 +659,17 @@ void loop() {
     leanCmd  = 0.0f;
     driveLeanLog = 0.0f;
     turnCmdLog = 0.0f;
+    controlLog.targetPitch = BALANCE_SETPOINT;
+    controlLog.pTerm = controlLog.iTerm = 0.0f;
+    controlLog.effortL = controlLog.effortR = 0.0f;
+    controlLog.driveRaw = crsf::drive();
+    controlLog.turnRaw = crsf::turn();
+    controlLog.speedInput = crsf::speed();
+    controlLog.commandCap = 0.35f + 0.65f * controlLog.speedInput;
+    controlLog.driveCmd = controlLog.turnCmd = 0.0f;
+    controlLog.positionLean = controlLog.velocityLean = controlLog.leanRaw = 0.0f;
+    controlLog.driving = false;
+    controlLog.coasting = true;
     long hl, hr; readEncoders(hl, hr);
     homeTicksSum = hl + hr;
     telemetry(pitch - BALANCE_SETPOINT, gyroRate, 0);
@@ -636,21 +683,31 @@ void loop() {
   // Drive stick -> target lean angle; turn stick -> differential. CH3 throttle
   // caps both. With BOTH sticks centered these are 0 and the balancer behaves
   // exactly as before.
-  float cap       = 0.35f + 0.65f * crsf::speed();                    // CH3 speed cap 0.35..1.0
-  float driveIn   = crsf::drive();
-  float turnIn    = crsf::turn();
+  float speedIn   = crsf::speed();
+  float cap       = 0.35f + 0.65f * speedIn;                          // CH3 speed cap 0.35..1.0
+  float driveRaw  = crsf::drive();
+  float turnRaw   = crsf::turn();
+  float driveIn   = driveRaw;
+  float turnIn    = turnRaw;
   if (fabs(driveIn) < DRIVE_STICK_DEADZONE) driveIn = 0.0f;
   if (fabs(turnIn) < TURN_STICK_DEADZONE) turnIn = 0.0f;
   float driveLean = -DRIVE_SIGN * driveIn * cap * driveMaxLean;       // deg; DRV -1 -> positive forward lean
   float turnCmd   = TURN_SIGN  * turnIn  * cap * TURN_AUTHORITY;      // per-wheel PWM-effort diff
   driveLeanLog = driveLean;
   turnCmdLog = turnCmd;
+  controlLog.speedInput = speedIn;
+  controlLog.commandCap = cap;
+  controlLog.driveRaw = driveRaw;
+  controlLog.turnRaw = turnRaw;
+  controlLog.driveCmd = driveIn;
+  controlLog.turnCmd = turnIn;
 
   // While driving, RELEASE the position hold: re-home under the robot so the
   // station-keeping term (Kpos*positionRev) can't fight the pilot. positionRev
   // stays ~0, leaving the outer loop as pure drive-lean control below. On release
   // it holds wherever it stopped. (No moving-reference runaway.)
   bool driving = fabs(driveLean) > 0.01f;
+  controlLog.driving = driving;
   if (driving) {
     long dl, dr; readEncoders(dl, dr);
     homeTicksSum = dl + dr;
@@ -675,6 +732,11 @@ void loop() {
   if (fallen) {
     integral = 0.0f;
     dTermLog = 0.0f;
+    controlLog.targetPitch = BALANCE_SETPOINT;
+    controlLog.pTerm = controlLog.iTerm = 0.0f;
+    controlLog.effortL = controlLog.effortR = 0.0f;
+    controlLog.positionLean = controlLog.velocityLean = controlLog.leanRaw = 0.0f;
+    controlLog.coasting = true;
     motorRaw(0);
     telemetry(error, gyroRate, 0);
     return;
@@ -688,6 +750,10 @@ void loop() {
   float leanRaw = driveLean + positionLean + velocityLean;
   leanRaw = constrain(leanRaw, -LEAN_CLAMP, LEAN_CLAMP);
   leanCmd = LEAN_LPF * leanCmd + (1.0f - LEAN_LPF) * leanRaw;
+  controlLog.positionLean = positionLean;
+  controlLog.velocityLean = velocityLean;
+  controlLog.leanRaw = leanRaw;
+  controlLog.targetPitch = BALANCE_SETPOINT + leanCmd;
 
   // Inner-loop error now chases the LEANED target instead of the bare setpoint.
   error = pitch - (BALANCE_SETPOINT + leanCmd);
@@ -697,9 +763,11 @@ void loop() {
   integral = constrain(integral, -40.0f, 40.0f);   // clamp; tune with Ki
 
   // --- PID INNER loop (D on the low-passed rate so gyro spikes don't kick) ---
-  // No direct Kv/Kx anymore -- the encoders act through leanCmd above.
+  // Encoder position/velocity act through leanCmd; no direct motor feedforward.
   dTermLog = Kd * dRateFilt;
-  float u = -(Kp * error + dTermLog + Ki * integral);
+  controlLog.pTerm = Kp * error;
+  controlLog.iTerm = Ki * integral;
+  float u = -(controlLog.pTerm + dTermLog + controlLog.iTerm);
 
   // --- Coast band: rest the motors when essentially balanced ---
   // Gate on the FILTERED pitch (error) and wheel velocity (VF) -- the trustworthy
@@ -709,9 +777,12 @@ void loop() {
   // Only coast when truly IDLE -- not while the pilot commands drive/turn, or the
   // small drive lean (often < ANGLE_DEADZONE) gets zeroed here and nothing moves.
   bool commanding = (fabs(driveLean) > 0.01f) || (fabs(turnCmd) > OUT_DEADZONE);
+  controlLog.coasting = false;
   if (!commanding && fabs(error) < ANGLE_DEADZONE && fabs(forwardVel) < VEL_DEADZONE) {
     u = 0.0f;
     integral = 0.0f;   // don't accumulate while parked
+    controlLog.iTerm = 0.0f;
+    controlLog.coasting = true;
   }
 
 #if STALL_CUTOFF
@@ -723,7 +794,9 @@ void loop() {
   }
 #endif
 
-  driveControlDiff(u + turnCmd, u - turnCmd);   // balance effort +/- steering (drive is via the lean)
+  controlLog.effortL = u + turnCmd;
+  controlLog.effortR = u - turnCmd;
+  driveControlDiff(controlLog.effortL, controlLog.effortR);   // balance +/- steering
   telemetry(error, gyroRate, u);
 }
 
@@ -732,32 +805,74 @@ void telemetry(float error, float rate, float u) {
   static unsigned long lastPrint = 0;
   if (millis() - lastPrint < 100) return;
   lastPrint = millis();
-  Serial.print("PITCH "); Serial.print(pitch, 2);
-  Serial.print(" ERR ");  Serial.print(error, 2);
+  bool armed = crsf::armed();
+  const char *state = !armed ? "DISARM" : fallen ? "FALL" :
+                      controlLog.coasting ? "COAST" : controlLog.driving ? "DRIVE" : "BAL";
+  long lEnc, rEnc; readEncoders(lEnc, rEnc);
+
+  Serial.print("MS "); Serial.print(lastPrint);
+  Serial.print(" STATE "); Serial.print(state);
+  Serial.print(" LINK "); Serial.print(crsf::linkUp() ? "Y" : "-");
+  Serial.print(" ARM "); Serial.print(armed ? "Y" : "-");
+  Serial.print(" HZ "); Serial.print(controlHz);
+
+  Serial.print(" | IMU AP "); Serial.print(controlLog.accelPitch, 2);
+  Serial.print(" PITCH "); Serial.print(pitch, 2);
+  Serial.print(" TARGET "); Serial.print(controlLog.targetPitch, 2);
+  Serial.print(" ERR "); Serial.print(error, 2);
+  Serial.print(" GX "); Serial.print(controlLog.gyroX, 2);
+  Serial.print(" GY "); Serial.print(controlLog.gyroY, 2);
+  Serial.print(" GZ "); Serial.print(controlLog.gyroZ, 2);
   Serial.print(" RATE "); Serial.print(rate, 2);
   Serial.print(" DFILT "); Serial.print(dRateFilt, 2);
-  Serial.print(" DTERM "); Serial.print(dTermLog, 2);
-  Serial.print(" U ");    Serial.print(u, 2);
+  Serial.print(" AX "); Serial.print(controlLog.accelX, 2);
+  Serial.print(" AY "); Serial.print(controlLog.accelY, 2);
+  Serial.print(" AZ "); Serial.print(controlLog.accelZ, 2);
+
+  Serial.print(" | PID P "); Serial.print(controlLog.pTerm, 2);
+  Serial.print(" I "); Serial.print(controlLog.iTerm, 2);
+  Serial.print(" D "); Serial.print(dTermLog, 2);
+  Serial.print(" U "); Serial.print(u, 2);
+  Serial.print(" EL "); Serial.print(controlLog.effortL, 2);
+  Serial.print(" ER "); Serial.print(controlLog.effortR, 2);
   Serial.print(" PWML "); Serial.print(motorPwmL);
   Serial.print(" PWMR "); Serial.print(motorPwmR);
-  Serial.print(" SET ");  Serial.print(sweepIdx + 1);  // active sweep set (0 if sweep disabled)
-  Serial.print(" HZ ");   Serial.print(controlHz);     // achieved loop rate; expect ~200
-  long lEnc, rEnc; readEncoders(lEnc, rEnc);            // wheel ticks since boot (sanity-check wiring)
-  Serial.print(" LENC "); Serial.print(lEnc);
-  Serial.print(" RENC "); Serial.print(rEnc);
-  Serial.print(" VL ");   Serial.print(wheelVelL, 2);     // left wheel rev/s (filtered)
-  Serial.print(" VR ");   Serial.print(wheelVelR, 2);     // right wheel rev/s (filtered)
-  Serial.print(" VF ");   Serial.print(forwardVel, 2);    // chassis forward rev/s (mean)
-  Serial.print(" VROT "); Serial.print(rotationVel, 2);    // differential rev/s (yaw proxy)
-  Serial.print(" DLEAN "); Serial.print(driveLeanLog, 2);  // drive-stick requested lean angle
-  Serial.print(" TCMD "); Serial.print(turnCmdLog, 2);     // post-deadzone turn effort
-  Serial.print(" LEAN "); Serial.print(leanCmd, 2);       // cascade outer-loop lean command (deg)
-  Serial.print(" POS ");  Serial.print(positionRev, 2);   // avg wheel position, revs from home
-  Serial.print(" | ARM "); Serial.print(crsf::armed() ? "Y" : "-");  // radio kill-switch state
-  Serial.print(" Kp ");    Serial.print(Kp, 2);           // live gains (tune with SC + S1 knob)
-  Serial.print(" Kd ");    Serial.print(Kd, 2);
+
+  Serial.print(" | ENC L "); Serial.print(lEnc);
+  Serial.print(" R "); Serial.print(rEnc);
+  Serial.print(" DL "); Serial.print(controlLog.encoderDeltaL);
+  Serial.print(" DR "); Serial.print(controlLog.encoderDeltaR);
+  Serial.print(" VRL "); Serial.print(controlLog.wheelVelRawL, 2);
+  Serial.print(" VRR "); Serial.print(controlLog.wheelVelRawR, 2);
+  Serial.print(" VL "); Serial.print(wheelVelL, 2);
+  Serial.print(" VR "); Serial.print(wheelVelR, 2);
+  Serial.print(" VF "); Serial.print(forwardVel, 2);
+  Serial.print(" VROT "); Serial.print(rotationVel, 2);
+  Serial.print(" POS "); Serial.print(positionRev, 3);
+
+  Serial.print(" | LEAN DRIVE "); Serial.print(driveLeanLog, 2);
+  Serial.print(" POS "); Serial.print(controlLog.positionLean, 2);
+  Serial.print(" VEL "); Serial.print(controlLog.velocityLean, 2);
+  Serial.print(" RAW "); Serial.print(controlLog.leanRaw, 2);
+  Serial.print(" CMD "); Serial.print(leanCmd, 2);
+
+  Serial.print(" | RC SPD "); Serial.print(controlLog.speedInput, 2);
+  Serial.print(" CAP "); Serial.print(controlLog.commandCap, 2);
+  Serial.print(" DRAW "); Serial.print(controlLog.driveRaw, 2);
+  Serial.print(" TRAW "); Serial.print(controlLog.turnRaw, 2);
+  Serial.print(" DCMD "); Serial.print(controlLog.driveCmd, 2);
+  Serial.print(" TCMD "); Serial.print(controlLog.turnCmd, 2);
+  Serial.print(" TEFF "); Serial.print(turnCmdLog, 2);
+
+  Serial.print(" | CFG Kp "); Serial.print(Kp, 2);
+  Serial.print(" Kd "); Serial.print(Kd, 2);
+  Serial.print(" Kpos "); Serial.print(Kpos, 2);
+  Serial.print(" Kvel "); Serial.print(Kvel, 2);
+  Serial.print(" Dmax "); Serial.print(driveMaxLean, 2);
   Serial.print(" GBIAS "); Serial.print(gyroYBias, 2);
-  Serial.print(" Dmax ");  Serial.print(driveMaxLean, 2);
-  Serial.print(" DRV ");   Serial.print(crsf::drive(), 2);   // CH2 drive stick (should move when pushed)
-  Serial.print(" TRN ");   Serial.println(crsf::turn(), 2);  // CH1 turn stick
+  Serial.print(" DB "); Serial.print(MOTOR_DEADBAND);
+  Serial.print(" PWMHZ "); Serial.print(MOTOR_PWM_HZ);
+  Serial.print(" SET "); Serial.println(sweepIdx + 1);
+  controlLog.encoderDeltaL = 0;
+  controlLog.encoderDeltaR = 0;
 }
