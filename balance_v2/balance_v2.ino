@@ -175,6 +175,12 @@ float Ki = 0.0f;   // integral      (deg*s    -> PWM)  keep 0 until PD works
 // Translation needs turn-class common-mode authority, but neutral balance is
 // already tuned. Blend toward this proportional gain with commanded drive only.
 const float DRIVE_KP = 6.0f;
+// Motor vibration makes the rate term dominate near a commanded drive angle.
+// Reduce it smoothly only there; a larger tracking error restores the known-good
+// neutral Kd so push recovery and fall catching keep their original damping.
+const float DRIVE_KD = 0.10f;
+const float DRIVE_KD_RESTORE_START_ERROR = 1.5f;
+const float DRIVE_KD_RESTORE_FULL_ERROR  = 3.0f;
 
 // ---- Cascade outer loop (position/velocity SETPOINT -> desired LEAN) -------
 // THE PILOT DRIVES THE SETPOINT, NEVER THE LEAN AND NEVER THE MOTORS.
@@ -509,7 +515,7 @@ struct ControlTelemetry {
   float accelX = 0.0f, accelY = 0.0f, accelZ = 0.0f;
   float targetPitch = BALANCE_SETPOINT;
   float pTerm = 0.0f, iTerm = 0.0f, dTermRaw = 0.0f;
-  float effectiveKp = 0.0f;
+  float effectiveKp = 0.0f, effectiveKd = 0.0f;
   float effortL = 0.0f, effortR = 0.0f;
   float positionLean = 0.0f, velocityLean = 0.0f, leanRaw = 0.0f;
   float effectiveKvel = 0.0f;
@@ -956,6 +962,7 @@ void loop() {
     controlLog.targetPitch = BALANCE_SETPOINT;
     controlLog.pTerm = controlLog.iTerm = 0.0f;
     controlLog.effectiveKp = Kp;
+    controlLog.effectiveKd = Kd;
     controlLog.dTermRaw = 0.0f;
     controlLog.dTermLimited = false;
     controlLog.launchEvent = '-';
@@ -1116,6 +1123,7 @@ void loop() {
     controlLog.targetPitch = BALANCE_SETPOINT;
     controlLog.pTerm = controlLog.iTerm = 0.0f;
     controlLog.effectiveKp = Kp;
+    controlLog.effectiveKd = Kd;
     controlLog.dTermRaw = 0.0f;
     controlLog.dTermLimited = false;
     controlLog.effortL = controlLog.effortR = 0.0f;
@@ -1177,16 +1185,25 @@ void loop() {
 
   // --- PID INNER loop (D on the low-passed rate so gyro spikes don't kick) ---
   // Encoder position/velocity act through leanCmd; no direct motor feedforward.
-  controlLog.dTermRaw = Kd * dRateFilt;
-  dTermLog = controlLog.dTermRaw;
-  controlLog.dTermLimited = false;
   // The outer loop owns only the angle target; the inner loop remains the sole
-  // source of common-mode motor power. Raise only its proportional authority in
-  // proportion to pilot translation, leaving neutral balance and Kd unchanged.
+  // source of common-mode motor power. Drive-specific gains are blended with the
+  // pilot command, leaving the known-good neutral balance gains unchanged.
   // The speed knob limits the requested velocity, not the balance loop's ability
   // to catch the requested lean. Full stick must retain full DRIVE_KP authority
   // even when the pilot deliberately selects a low speed cap.
   float driveAuthority = driving ? constrain(fabs(driveIn), 0.0f, 1.0f) : 0.0f;
+
+  controlLog.dTermRaw = Kd * dRateFilt;
+  float kdSafetyBlend = constrain(
+      (fabs(error) - DRIVE_KD_RESTORE_START_ERROR) /
+      (DRIVE_KD_RESTORE_FULL_ERROR - DRIVE_KD_RESTORE_START_ERROR),
+      0.0f, 1.0f);
+  float driveKdFloor = Kd < DRIVE_KD ? Kd : DRIVE_KD;
+  float driveKdTarget = driveKdFloor + kdSafetyBlend * (Kd - driveKdFloor);
+  controlLog.effectiveKd = Kd + driveAuthority * (driveKdTarget - Kd);
+  dTermLog = controlLog.effectiveKd * dRateFilt;
+  controlLog.dTermLimited = fabs(controlLog.effectiveKd - Kd) > 0.001f;
+
   float driveKpTarget = Kp < DRIVE_KP ? DRIVE_KP : Kp;
   controlLog.effectiveKp = Kp + driveAuthority * (driveKpTarget - Kp);
   controlLog.pTerm = controlLog.effectiveKp * error;
@@ -1425,6 +1442,7 @@ void telemetry(float error, float rate, float u) {
   Serial.print(" | CFG Kp "); Serial.print(Kp, 2);
   Serial.print(" Kpeff "); Serial.print(controlLog.effectiveKp, 2);
   Serial.print(" Kd "); Serial.print(Kd, 2);
+  Serial.print(" Kdeff "); Serial.print(controlLog.effectiveKd, 2);
   Serial.print(" Kpos "); Serial.print(Kpos, 2);
   Serial.print(" Kvel "); Serial.print(Kvel, 2);
   Serial.print(" Kveff "); Serial.print(controlLog.effectiveKvel, 2);
