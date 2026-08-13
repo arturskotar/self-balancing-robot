@@ -117,8 +117,10 @@ const long ENC_COUNTS_PER_REV = 546;
 // inner loop reaches its commanded lean, ERR ~ 0.7 deg -> u ~ -1.4 -> PWM ~ 12/14,
 // which is BELOW breakaway. The robot then leans and sticks instead of rolling.
 //
-// Set LEFT_DEADBAND / RIGHT_DEADBAND from each wheel's own first-move value; they
-// are expected to DIFFER (right runs stiffer here). Then set this back to 0.
+// This test measures the STATIC breakaway, so set LEFT_DEADBAND_STATIC and
+// RIGHT_DEADBAND_STATIC from each wheel's own first-move value. It does NOT
+// measure the *_MOVING floors -- those are the free-spin figures, taken with the
+// wheels off the ground. Then set this back to 0.
 #define DEADBAND_TEST 0
 
 // ---- IMU sign/axis test ----------------------------------------------------
@@ -223,13 +225,18 @@ const float LEAN_LPF   = 0.99f;  // EMA on leanCmd (~500 ms). Higher = slower, s
 // Anti-windup: never let the setpoint run further than this ahead of where the
 // robot actually is. Without it, blocked wheels wind the setpoint up forever and
 // the robot lurches when they free up.
+// TIGHTENED 2.0 -> 0.5 after the 2026-08-13 stick log. With the wheels unable to
+// break away, the setpoint integrated open-loop to PSET 1.003 and STAYED there
+// once the stick was released. At Kpos = 1.0 that left a PERMANENT +1.3 deg
+// forward lean bias -- TARGET sat at -2.00 against a true balance near -3.3 --
+// so the robot would creep forward forever with the sticks centred. Classic
+// integrator windup; 2.0 rev of slack was far too much to leave unbounded.
 // TRADE-OFF: this also caps the position term at Kpos * POS_ERROR_CLAMP degrees,
-// so it bounds station-keeping authority too. At Kpos = 1.0 that is 2 deg of the
-// 5 deg LEAN_CLAMP, and bounds any release-lurch to 2 wheel revs. Raising it to
-// 5.0 would let the position term alone saturate the lean (what the baseline law
-// would have done had its encoders been alive) -- but 2.0 is the safer first
-// flight. Raise it if station-keeping feels weak against a shove or a slope.
-const float POS_ERROR_CLAMP = 2.0f;   // rev
+// so station-keeping can only correct 0.5 rev of displacement (~10 cm) and any
+// release-lurch is bounded to the same. Raise it if station-keeping feels weak
+// against a shove -- but only once the wheels reliably move, or the windup and
+// the permanent lean bias come straight back.
+const float POS_ERROR_CLAMP = 0.5f;   // rev
 
 // ---- Auto PID sweep (for recording) ----------------------------------------
 // Cycles Kp/Kd through a grid, holding each set for SWEEP_HOLD_MS so you can
@@ -267,22 +274,43 @@ const float OUT_DEADZONE   = 0.5f;  // ignore PD outputs smaller than this (PWM 
 // Symptom if this is wrong: it VEERS while creeping but tracks straight at speed.
 // NOTE this is the opposite side from the comment in rc_drive.ino, which claims
 // the pins-6/9 (left) motor is stiffer. The measurement wins; rc_drive is stale.
-// ⚠️ THESE ARE FREE-SPIN VALUES AND ARE ALMOST CERTAINLY TOO LOW.
-// The 2026-08-13 drive log proves it: at PWM 15/17 the wheels produced ZERO
-// encoder counts for seconds while bearing the robot's weight, but at 34/39
-// (turn) they rolled freely. Loaded breakaway is somewhere in 17..34, not 11/13.
-// Re-measure with DEADBAND_TEST run LOADED (see its comment) and set them here.
-// EXPECT A TRADE-OFF: a higher floor means every small correction jumps straight
-// to that PWM, which historically fed a limit cycle ("the larger kick made a
-// ~28-PWM jump through zero"). If balancing degrades after raising these, the
-// principled fix is a velocity-dependent floor -- static breakaway only while the
-// wheel is stopped, a lower Coulomb value once it is already turning -- rather
-// than one static number serving both jobs.
-const int LEFT_DEADBAND  = 11;
-const int RIGHT_DEADBAND = 13;
+// TWO floors per wheel, selected by whether that wheel is already turning. This
+// is ordinary Coulomb-vs-static friction compensation, and it reconciles two
+// measurements that looked contradictory:
+//   MOVING (11 / 13) - the free-spin figures from DEADBAND_TEST. They were never
+//     wrong, they were just the wrong PARAMETER: they describe a wheel that is
+//     already rotating, where only Coulomb friction remains.
+//   STATIC (18) - the breakaway needed to get a stopped wheel rolling under the
+//     robot's own weight through the 42:1 gearbox.
+//
+// Measured 2026-08-13, stick-engaged log. Drive commanded 11/13..13/15 and the
+// encoders did not move at all; the turn commanded 14..25 on one side and that
+// side rolled. Stick-slip is severe -- PWML 19 gave DL 0 one window, then PWML
+// 16 gave DL -6 the next -- so treat 18 as approximate, not a clean threshold.
+//
+// WHY SPLIT INSTEAD OF JUST RAISING THE FLOOR: a single static 18 would make
+// EVERY small balance correction jump to 18, and a ~28-PWM swing through zero is
+// what fed a limit cycle historically. Splitting keeps small corrections at the
+// low floor (the wheels are nearly always dithering while balancing) and spends
+// the big kick only where it is actually needed -- breaking a stopped wheel free.
+//
+// ASYMMETRY IS UNRESOLVED. The 2026-08-13 log shows the LEFT wheel frozen at
+// PWM 19 while the right spun at 17..21, i.e. the OPPOSITE of the earlier
+// inference that the right side was stiffer. Both sides stick somewhere in
+// 15..19. The static values are therefore equal until a proper loaded
+// DEADBAND_TEST separates them; the per-side structure is kept so they can.
+const int LEFT_DEADBAND_MOVING  = 11;
+const int RIGHT_DEADBAND_MOVING = 13;
+const int LEFT_DEADBAND_STATIC  = 18;
+const int RIGHT_DEADBAND_STATIC = 18;
+// A wheel counts as "moving" if its encoder changed within this many control
+// ticks (10 = 50 ms). Keyed off raw tick deltas rather than the filtered
+// velocity so the VEL_LPF lag can't leave a stopped wheel on the low floor.
+const int WHEEL_STILL_TICKS = 10;
 // Worst-case floor, used for the saturation-latch effort ceiling so the latch
 // can't false-trip on whichever wheel has the smaller usable effort range.
-const int MAX_DEADBAND = (LEFT_DEADBAND > RIGHT_DEADBAND) ? LEFT_DEADBAND : RIGHT_DEADBAND;
+const int MAX_DEADBAND = (LEFT_DEADBAND_STATIC > RIGHT_DEADBAND_STATIC)
+                       ? LEFT_DEADBAND_STATIC : RIGHT_DEADBAND_STATIC;
 
 // ---- RC drive (radio -> motion) --------------------------------------------
 // Drive stick sets a wheel VELOCITY target (rev/s), which is integrated into the
@@ -402,6 +430,7 @@ int   motorPwmL = 0, motorPwmR = 0;           // signed PWM actually sent to eac
 long  homeTicksSum = 0;                        // (leftTicks+rightTicks) defining "home" (0 = boot spot)
 bool  stalled = false;                         // true while the stall cutoff has the motors off
 bool  fallen = false;                          // true while the fall latch has the motors off
+bool  wheelMovingL = false, wheelMovingR = false;  // wheel turned within WHEEL_STILL_TICKS
 bool  armedPrev = false;                       // edge-detect the arm transition (soft start)
 unsigned long armedAtMs = 0;                   // millis() at the moment we armed
 unsigned long satTicks = 0;                    // consecutive ticks with the inner loop pinned
@@ -494,7 +523,7 @@ void setup() {
                  "(1 turn = ~546 counts = 1.00 rev).");
 #elif DEADBAND_TEST
   Serial.println("DEADBAND_TEST mode: wheels OFF THE GROUND. Ramping PWM; "
-                 "set LEFT_DEADBAND from 'first-move L@' and RIGHT_DEADBAND from 'R@'.");
+                 "set LEFT/RIGHT_DEADBAND_STATIC from 'first-move L@' and 'R@'.");
 #elif IMU_TEST
   Serial.println("IMU_TEST mode: motors OFF. Hold + slowly tilt FORWARD then BACK. "
                  "aPitch & gX should rise together tilting forward (consistent sign).");
@@ -555,17 +584,19 @@ void motorPerWheel(int pwmL, int pwmR) {
   motorWriteWheel(RIGHT_MOTOR_FORWARD_PIN, RIGHT_MOTOR_REVERSE_PIN, pwmR, lastSignR);
 }
 
-// Map a wheel's effort through ITS OWN static deadband compensation.
-// Below OUT_DEADZONE the wheel rests; otherwise PID retains sign and timing.
-int mapEffortToPwm(float effort, int deadband) {
+// Map a wheel's effort to PWM through the appropriate friction floor: the STATIC
+// (breakaway) figure if that wheel is stopped, the lower MOVING (Coulomb) figure
+// once it is already turning. Below OUT_DEADZONE the wheel rests.
+int mapEffortToPwm(float effort, bool moving, int dbMoving, int dbStatic) {
   if (fabs(effort) <= OUT_DEADZONE) return 0;
+  int deadband = moving ? dbMoving : dbStatic;
   int pwm = (int)constrain(deadband + fabs(effort), 0.0f, (float)MAX_PWM);
   return effort > 0.0f ? pwm : -pwm;
 }
 
 void driveControlDiff(float uL, float uR) {
-  int pwmL = mapEffortToPwm(uL, LEFT_DEADBAND);
-  int pwmR = mapEffortToPwm(uR, RIGHT_DEADBAND);
+  int pwmL = mapEffortToPwm(uL, wheelMovingL, LEFT_DEADBAND_MOVING,  LEFT_DEADBAND_STATIC);
+  int pwmR = mapEffortToPwm(uR, wheelMovingR, RIGHT_DEADBAND_MOVING, RIGHT_DEADBAND_STATIC);
   motorPerWheel(pwmL, pwmR);
 }
 
@@ -677,6 +708,15 @@ void updateVelocity() {
   float vR_raw = deltaR / (float)ENC_COUNTS_PER_REV / DT;
   velLastTicksL = l;
   velLastTicksR = r;
+  // Per-wheel "is it turning?" for the friction-floor selection. Uses raw tick
+  // deltas, not the filtered velocity, so VEL_LPF lag can't leave a wheel that
+  // has actually stopped sitting on the low (Coulomb) floor.
+  static int stillTicksL = WHEEL_STILL_TICKS, stillTicksR = WHEEL_STILL_TICKS;
+  if (deltaL != 0) stillTicksL = 0; else if (stillTicksL <= WHEEL_STILL_TICKS) stillTicksL++;
+  if (deltaR != 0) stillTicksR = 0; else if (stillTicksR <= WHEEL_STILL_TICKS) stillTicksR++;
+  wheelMovingL = (stillTicksL < WHEEL_STILL_TICKS);
+  wheelMovingR = (stillTicksR < WHEEL_STILL_TICKS);
+
   controlLog.encoderDeltaL += deltaL;
   controlLog.encoderDeltaR += deltaR;
   controlLog.wheelVelRawL = vL_raw;
@@ -1088,8 +1128,11 @@ void telemetry(float error, float rate, float u) {
   Serial.print(" Kvel "); Serial.print(Kvel, 2);
   Serial.print(" Vmax "); Serial.print(DRIVE_MAX_VEL, 2);
   Serial.print(" GBIAS "); Serial.print(gyroYBias, 2);
-  Serial.print(" DBL "); Serial.print(LEFT_DEADBAND);
-  Serial.print(" DBR "); Serial.print(RIGHT_DEADBAND);
+  // Floors actually in force this tick (M = moving/Coulomb, S = static breakaway).
+  Serial.print(" DBL "); Serial.print(wheelMovingL ? LEFT_DEADBAND_MOVING : LEFT_DEADBAND_STATIC);
+  Serial.print(wheelMovingL ? "M" : "S");
+  Serial.print(" DBR "); Serial.print(wheelMovingR ? RIGHT_DEADBAND_MOVING : RIGHT_DEADBAND_STATIC);
+  Serial.print(wheelMovingR ? "M" : "S");
   Serial.print(" PWMHZ "); Serial.print(MOTOR_PWM_HZ);
   Serial.print(" SET "); Serial.println(sweepIdx + 1);
   controlLog.encoderDeltaL = 0;
