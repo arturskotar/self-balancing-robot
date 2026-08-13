@@ -126,7 +126,7 @@ float Ki = 0.0f;   // integral      (deg*s    -> PWM)  keep 0 until PD works
 // the idle return-home spring.
 // If it limit-cycles, SLOW the outer loop (raise LEAN_LPF) before cutting gains.
 float Kpos = 1.0f;               // wheel position (rev from home -> deg of lean)
-float driveMaxLean = 6.0f;       // deg at full drive stick; tune with SC=2 + S1.
+float driveMaxLean = 2.0f;       // deg at full drive stick; tune with SC=2 + S1.
 const float LEAN_CLAMP = 8.0f;   // deg : cap the commanded lean so the outer loop can't tip it over
 const float LEAN_LPF   = 0.99f;  // EMA on leanCmd (~500 ms). Higher = slower, safer outer loop.
                                  // Keep direct stick-to-lean changes slower than the pitch loop so
@@ -446,7 +446,7 @@ void applyLiveTune() {
   switch (sel) {
     case 0: Kp   = 2.0f + 0.6f * x; break;   // 1.4 .. 2.6  (shipped 2.0)
     case 1: Kd   = 0.3f + 0.2f * x; break;   // 0.1 .. 0.5  (shipped 0.3)
-    case 2: driveMaxLean = 6.0f + 2.0f * x; break;   // 4.0 .. 8.0 deg (shipped 6.0)
+    case 2: driveMaxLean = 2.0f + 1.0f * x; break;   // 1.0 .. 3.0 deg (shipped 2.0)
   }
 }
 
