@@ -221,11 +221,10 @@ const float DRIVE_KD_RESTORE_FULL_ERROR  = 3.0f;
 
 float Kpos = 1.0f;               // wheel position error (rev -> deg of lean)
 float Kvel = 4.0f;               // neutral wheel-velocity damping; tune with SC=2 + S1
-// The 2026-08-14 stalled-drive log held VERR near +0.6 rev/s but requested only
-// ~3 deg, leaving the angle P term smaller than the measured drivetrain ring.
-// Double velocity-to-lean authority only while the pilot commands translation.
-// LEAN_CLAMP still bounds the request at the existing 5 deg safety limit.
-const float DRIVE_KVEL_MULTIPLIER = 2.0f;
+// Keep drive velocity feedback at the neutral-loop gain. Doubling it drove
+// leanRaw into the +/-5 deg clamp for most held-stick samples, so encoder ripple
+// could only move the command away from saturation and was fed back asymmetrically.
+const float DRIVE_KVEL_MULTIPLIER = 1.0f;
 const float LEAN_CLAMP = 5.0f;   // deg : known-good outer-loop safety cap
 const float LEAN_LPF   = 0.99f;  // EMA on leanCmd (~500 ms). Higher = slower, safer outer loop.
                                  // 0.95 (~100 ms) RAN AWAY: faster than the pendulum's non-minimum-
