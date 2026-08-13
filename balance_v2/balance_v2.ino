@@ -116,18 +116,18 @@ float Ki = 0.0f;   // integral      (deg*s    -> PWM)  keep 0 until PD works
 
 // ---- Cascade outer loop (encoders -> desired LEAN) -------------------------
 // RC drive asks directly for a lean setpoint, and the inner pitch loop drives
-// the wheels to catch that lean. When not driving, a small position spring
-// returns to the current home spot. This keeps forward/backward motion in the
-// balance loop and avoids direct common-mode motor feedforward.
+// the wheels to catch that lean. When not driving, position and velocity feed
+// back into lean so the robot returns home without drifting or overshooting.
 //   driveLean = -driveStick * driveMaxLean
-//   leanRaw   = driveLean + idlePositionLean
+//   leanRaw   = driveLean + idlePositionLean + idleVelocityLean
 //   error   = pitch - (BALANCE_SETPOINT + leanCmd)
-// TUNING: start gentle. driveMaxLean is the full-stick lean request; Kpos is
-// the idle return-home spring.
+// Physical forward encoder motion is negative on this chassis, so positive
+// Kpos/Kvel feedback produces the opposite (braking/returning) lean.
 // If it limit-cycles, SLOW the outer loop (raise LEAN_LPF) before cutting gains.
 float Kpos = 1.0f;               // wheel position (rev from home -> deg of lean)
+float Kvel = 4.0f;               // wheel velocity (rev/s -> deg of braking lean), idle only
 float driveMaxLean = 2.0f;       // deg at full drive stick; tune with SC=2 + S1.
-const float LEAN_CLAMP = 8.0f;   // deg : cap the commanded lean so the outer loop can't tip it over
+const float LEAN_CLAMP = 5.0f;   // deg : known-good outer-loop safety cap
 const float LEAN_LPF   = 0.99f;  // EMA on leanCmd (~500 ms). Higher = slower, safer outer loop.
                                  // Keep direct stick-to-lean changes slower than the pitch loop so
                                  // the robot eases into a commanded lean instead of stepping the
@@ -681,10 +681,11 @@ void loop() {
   }
 
   // --- Cascade OUTER loop: drive stick -> target LEAN command ---
-  // No velocity PI here: this test isolates the simple balancer behavior where
-  // holding forward means holding a forward lean until the pilot releases it.
+  // While idle, restore the position spring and velocity damping. While driving,
+  // release both so direct lean remains the only movement request.
   float positionLean = driving ? 0.0f : Kpos * positionRev;
-  float leanRaw = driveLean + positionLean;
+  float velocityLean = driving ? 0.0f : Kvel * forwardVel;
+  float leanRaw = driveLean + positionLean + velocityLean;
   leanRaw = constrain(leanRaw, -LEAN_CLAMP, LEAN_CLAMP);
   leanCmd = LEAN_LPF * leanCmd + (1.0f - LEAN_LPF) * leanRaw;
 
