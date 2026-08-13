@@ -378,7 +378,7 @@ const float TURN_SIGN      = +1.0f; // flip to -1 if the turn stick steers the w
 #define DRIVE_LAUNCH_ASSIST 1
 const float         LAUNCH_ASSIST_EFFORT     = 20.0f; // -35/-47 PWM with measured static floors
 const float         LAUNCH_MIN_TARGET_VEL    = 0.30f; // no full breakaway pulse for small stick inputs
-const float         LAUNCH_READY_LEAN_DEG    = 3.5f;  // most of the 5 deg drive lean must exist first
+const float         LAUNCH_READY_LEAN_DEG    = 2.5f;  // reachable with Kvel=4, Vmax=0.6, Kpos=1 before stiction
 const float         LAUNCH_READY_ERROR_DEG   = 1.25f; // body must be close to the leaned target
 const float         LAUNCH_READY_RATE_DPS    = 10.0f; // do not launch in the fast part of a pitch swing
 const float         LAUNCH_ABORT_ERROR_DEG   = 2.5f;  // immediately return authority to balance
