@@ -269,12 +269,6 @@ unsigned long sweepLastMs = 0;
 const int   MAX_PWM        = 110;   // ceiling, 0-255. Raised 80->110 for authority to recover large
                                     // backward falls. WATCH motor heat/current as you push this up.
 const float OUT_DEADZONE   = 0.5f;  // ignore PD outputs smaller than this (PWM units)
-// At a stalled drive target, do not magnify a small opposite-direction correction
-// into a full friction-floor reversal. DRIVE_KP=6 turns one safe degree of tracking
-// error into about 6 effort, so this threshold must cover that normal recovery
-// pulse. The separate error gate still restores every correction beyond 1.25 deg.
-const float DRIVE_OPPOSING_EFFORT_DEADZONE = 7.0f;
-const float DRIVE_STALL_BIAS_EFFORT = 3.0f; // maps to ~18/30 PWM at the measured static floors
 
 // ---- Per-side stiction compensation ----------------------------------------
 // Every non-zero PID effort gets a static floor so the wheel actually moves.
@@ -534,9 +528,7 @@ struct ControlTelemetry {
   float softStart = 0.0f;                   // 0..1 authority ramp after arming
   float launchBoost = 0.0f;                 // signed change needed to enforce the launch floor
   float driveVelocityEffort = 0.0f;         // persistent, safety-gated velocity torque
-  float driveStallBias = 0.0f;              // gentle post-launch breakaway effort
   bool dTermLimited = false;
-  bool driveOpposingEffortSuppressed = false;
   bool driveVelocityEffortActive = false;
   bool driving = false;
   char launchState = '-';                   // '-' idle, W waiting, P pulse, C completed until release
@@ -973,7 +965,6 @@ void loop() {
     controlLog.effectiveKd = Kd;
     controlLog.dTermRaw = 0.0f;
     controlLog.dTermLimited = false;
-    controlLog.driveOpposingEffortSuppressed = false;
     controlLog.launchEvent = '-';
     controlLog.effortL = controlLog.effortR = 0.0f;
     controlLog.driveRaw = crsf::drive();
@@ -985,7 +976,6 @@ void loop() {
     controlLog.effectiveKvel = Kvel;
     controlLog.posError = controlLog.velError = controlLog.softStart = 0.0f;
     controlLog.launchBoost = 0.0f;
-    controlLog.driveStallBias = 0.0f;
     controlLog.driveVelocityEffort = 0.0f;
     controlLog.driveVelocityEffortActive = false;
     controlLog.driving = false;
@@ -1136,13 +1126,11 @@ void loop() {
     controlLog.effectiveKd = Kd;
     controlLog.dTermRaw = 0.0f;
     controlLog.dTermLimited = false;
-    controlLog.driveOpposingEffortSuppressed = false;
     controlLog.effortL = controlLog.effortR = 0.0f;
     controlLog.positionLean = controlLog.velocityLean = controlLog.leanRaw = 0.0f;
     controlLog.effectiveKvel = Kvel;
     controlLog.posError = controlLog.velError = 0.0f;
     controlLog.launchBoost = 0.0f;
-    controlLog.driveStallBias = 0.0f;
     controlLog.driveVelocityEffort = 0.0f;
     controlLog.driveVelocityEffortActive = false;
     controlLog.launchState = '-';
@@ -1268,11 +1256,9 @@ void loop() {
   // but never reverses an opposing balance correction. Angle and lean gates abort
   // it, and LAUNCH_DONE prevents repeated kicks during a held command.
   controlLog.launchBoost = 0.0f;
-  controlLog.driveStallBias = 0.0f;
   controlLog.launchEvent = '-';
   controlLog.driveVelocityEffort = 0.0f;
   controlLog.driveVelocityEffortActive = false;
-  controlLog.driveOpposingEffortSuppressed = false;
 #if DRIVE_LAUNCH_ASSIST
   float launchEffortSign = launchAssistDirection > 0 ? -1.0f : 1.0f;
 #endif
@@ -1363,28 +1349,6 @@ void loop() {
   }
 #endif
 
-  // Zero PWM brakes this geared drivetrain, so a symmetric output deadzone can
-  // park the robot indefinitely at a non-zero lean. Suppress only tiny floor
-  // kicks opposing a still-unmet drive request. Same-direction kicks provide
-  // the net breakaway torque; meaningful balance catches always pass.
-  float commandedEffortSign = driveDirection > 0 ? -1.0f : 1.0f;
-  bool driveStillNeedsAcceleration = driving && driveDirection * velError > 0.0f;
-  bool belowRollingSpeed = driving && driveDirection * forwardVel < LAUNCH_RELEASE_VEL;
-  bool stalledAtDriveTarget = launchAssistState == LAUNCH_DONE &&
-                              fabs(targetVel) >= LAUNCH_MIN_TARGET_VEL &&
-                              driveStillNeedsAcceleration && belowRollingSpeed &&
-                              fabs(error) <= LAUNCH_READY_ERROR_DEG;
-  bool tinyOpposingEffort = commandedEffortSign * u < 0.0f &&
-                            fabs(u) <= DRIVE_OPPOSING_EFFORT_DEADZONE;
-  if (stalledAtDriveTarget && tinyOpposingEffort) {
-    u = 0.0f;
-    controlLog.driveOpposingEffortSuppressed = true;
-  }
-  if (stalledAtDriveTarget && fabs(u) <= OUT_DEADZONE) {
-    u = commandedEffortSign * DRIVE_STALL_BIAS_EFFORT;
-    controlLog.driveStallBias = u;
-  }
-
   controlLog.launchState = launchAssistState == LAUNCH_WAIT_LEAN ? 'W' :
                            launchAssistState == LAUNCH_PUSH ? 'P' :
                            launchAssistState == LAUNCH_DONE ? 'C' : '-';
@@ -1430,7 +1394,6 @@ void telemetry(float error, float rate, float u) {
   Serial.print(" D "); Serial.print(dTermLog, 2);
   Serial.print(" DLIM "); Serial.print(controlLog.dTermLimited ? "Y" : "-");
   Serial.print(" U "); Serial.print(u, 2);
-  Serial.print(" RBLK "); Serial.print(controlLog.driveOpposingEffortSuppressed ? "Y" : "-");
   Serial.print(" EL "); Serial.print(controlLog.effortL, 2);
   Serial.print(" ER "); Serial.print(controlLog.effortR, 2);
   Serial.print(" PWML "); Serial.print(motorPwmL);
@@ -1459,7 +1422,6 @@ void telemetry(float error, float rate, float u) {
   Serial.print(" START "); Serial.print(controlLog.launchState);
   Serial.print(" EXIT "); Serial.print(controlLog.launchEvent);
   Serial.print(" BOOST "); Serial.print(controlLog.launchBoost, 1);
-  Serial.print(" SBIAS "); Serial.print(controlLog.driveStallBias, 1);
   Serial.print(" BTK "); Serial.print(launchAssistTicksRemaining);
   Serial.print(" VTRQ "); Serial.print(controlLog.driveVelocityEffort, 2);
   Serial.print(" VTG "); Serial.print(controlLog.driveVelocityEffortActive ? "Y" : "-");
