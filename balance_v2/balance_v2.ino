@@ -175,10 +175,11 @@ float Ki = 0.0f;   // integral      (deg*s    -> PWM)  keep 0 until PD works
 // Translation needs turn-class common-mode authority, but neutral balance is
 // already tuned. Blend toward this proportional gain with commanded drive only.
 const float DRIVE_KP = 6.0f;
-// Motor vibration makes the rate term dominate near a commanded drive angle.
-// Reduce it smoothly only there; a larger tracking error restores the known-good
-// neutral Kd so push recovery and fall catching keep their original damping.
-const float DRIVE_KD = 0.03f;
+// Preserve enough rate damping for the measured ~5 Hz drive mode. At the logged
+// 1.5 deg / 47 deg/s oscillation, Kd=0.20 makes D comparable to the DRIVE_KP=6
+// proportional term instead of leaving a broad proportional-only damping hole.
+// Larger tracking errors still restore the known-good neutral Kd.
+const float DRIVE_KD = 0.20f;
 const float DRIVE_KD_RESTORE_START_ERROR = 1.5f;
 const float DRIVE_KD_RESTORE_FULL_ERROR  = 3.0f;
 
