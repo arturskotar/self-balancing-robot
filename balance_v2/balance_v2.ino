@@ -382,11 +382,12 @@ const float         LAUNCH_RELEASE_VEL       = 0.12f; // rev/s toward command me
 const unsigned int  LAUNCH_RELEASE_TICKS     = 20;    // require 100 ms at 200 Hz; reject oscillation spikes
 const unsigned int  LAUNCH_ASSIST_TICKS      = 40;    // 200 ms at 200 Hz, counted only while eligible
 
-// The angle cascade establishes the requested lean, but a PD angle loop has no
-// steady output once ACT reaches CMD. Give the velocity loop a small, persistent
-// axle-torque channel so non-zero VERR can keep accelerating the wheels. It is
-// enabled only after the body is safely leaned and settled; balance regains sole
-// authority immediately outside the existing launch error/rate gates.
+// Legacy A/B path. Adding velocity effort after the angle PD makes the inner loop
+// cancel that effort by developing an opposing angle error. In the 2026-08-14
+// stalled-drive log, ~-6 effort with Kp=2 required ~-3 deg error, crossed the
+// safety gate, and repeatedly switched the assist off and on. Drive authority
+// belongs in the outer loop's requested lean, so leave this disabled.
+#define DRIVE_VELOCITY_EFFORT 0
 const float DRIVE_VELOCITY_EFFORT_GAIN  = 10.0f; // rev/s error -> PWM effort
 const float DRIVE_VELOCITY_EFFORT_LIMIT = 8.0f;  // below the tested launch floor
 const float DRIVE_VELOCITY_HOLD_LEAN_DEG = 0.75f; // hysteresis after the strict 1.5 deg engagement
@@ -1225,7 +1226,10 @@ void loop() {
   float launchEffortSign = launchAssistDirection > 0 ? -1.0f : 1.0f;
   bool balanceCatchingTowardDrive = launchEffortSign * u > 0.0f;
 #endif
+#if DRIVE_LAUNCH_ASSIST || DRIVE_VELOCITY_EFFORT
   float actualLean = pitch - BALANCE_SETPOINT;
+#endif
+#if DRIVE_VELOCITY_EFFORT
   bool velocityNeedsDrive = driveDirection * velError > 0.0f;
   bool driveVelocityEffortReady = driving &&
                                   velocityNeedsDrive &&
@@ -1239,6 +1243,9 @@ void loop() {
                                        fabs(dRateFilt) <= LAUNCH_ABORT_RATE_DPS;
   if (!driveVelocityEffortSafeToHold) driveVelocityEffortLatched = false;
   else if (driveVelocityEffortReady)   driveVelocityEffortLatched = true;
+#else
+  driveVelocityEffortLatched = false;
+#endif
 #if DRIVE_LAUNCH_ASSIST
   if (launchAssistState == LAUNCH_WAIT_LEAN) {
     bool leanReady = launchAssistDirection * actualLean >= LAUNCH_READY_LEAN_DEG;
@@ -1297,9 +1304,9 @@ void loop() {
   }
 #endif
 
-  // Do not stack this with the stronger breakaway pulse. Once that pulse is
-  // inactive, velocity error supplies a bounded average torque instead of
-  // disappearing when the angle PD reaches zero tracking error.
+  // Legacy post-PD velocity effort retained behind a switch for controlled A/B
+  // comparison only. Normal drive authority comes from the outer-loop lean.
+#if DRIVE_VELOCITY_EFFORT
   if (launchAssistState != LAUNCH_PUSH && driveVelocityEffortLatched) {
     controlLog.driveVelocityEffort = constrain(-DRIVE_VELOCITY_EFFORT_GAIN * velError,
                                                 -DRIVE_VELOCITY_EFFORT_LIMIT,
@@ -1308,6 +1315,7 @@ void loop() {
         fabs(controlLog.driveVelocityEffort) > OUT_DEADZONE;
     u += controlLog.driveVelocityEffort;
   }
+#endif
   controlLog.launchState = launchAssistState == LAUNCH_WAIT_LEAN ? 'W' :
                            launchAssistState == LAUNCH_PUSH ? 'P' : '-';
 
