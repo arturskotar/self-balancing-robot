@@ -75,8 +75,15 @@ static uint8_t gainSel() { uint16_t u = toUs(ch[CH_GAINSEL]); return u < 1300 ? 
 static float   knob01()  { return constrain((toUs(ch[CH_TUNE]) - 988) / 1024.0f, 0.0f, 1.0f); }
 // CH3 throttle (rests at bottom) -> 0..1 speed cap.
 static float   speed()   { float d = (toUs(ch[CH_SPEED]) - 988) / 1024.0f; if (d < 0.03f) d = 0; return constrain(d, 0.0f, 1.0f); }
-// Drive/turn (for the RC-drive step; unused until then). Up = +forward, right = +.
-static float drive() { float n = -(toUs(ch[CH_DRIVE]) - 1500.0f) / 512.0f; if (fabsf(n) < 0.03f) n = 0; return constrain(n, -1.0f, 1.0f); }
+// Drive/turn. Contract: UP = +forward, RIGHT = +.
+// HARDWARE-VERIFIED 2026-08-13: on THIS TX16S setup CH2 reads ABOVE 1500 when the
+// stick is pushed forward, so the raw (us-1500) term is already positive there and
+// needs NO negation. The extra minus that used to be here made drive() return -1.00
+// on a forward stick -- the opposite of the contract one line above -- which showed
+// up as TVEL -0.60 (a reverse command) while the pilot was pushing forward.
+// NOTE turn() below is a SEPARATE channel with its own TX direction setting; its
+// polarity does not follow from this one and has not been verified the same way.
+static float drive() { float n = (toUs(ch[CH_DRIVE]) - 1500.0f) / 512.0f; if (fabsf(n) < 0.03f) n = 0; return constrain(n, -1.0f, 1.0f); }
 static float turn()  { float n = -(toUs(ch[CH_TURN])  - 1500.0f) / 512.0f; if (fabsf(n) < 0.03f) n = 0; return constrain(n, -1.0f, 1.0f); }
 
 }  // namespace crsf

@@ -286,10 +286,14 @@ const int MAX_DEADBAND = (LEFT_DEADBAND > RIGHT_DEADBAND) ? LEFT_DEADBAND : RIGH
 
 // ---- RC drive (radio -> motion) --------------------------------------------
 // Drive stick sets a wheel VELOCITY target (rev/s), which is integrated into the
-// outer loop's position setpoint. crsf::drive() is already +1 for stick UP, and
-// forward is now +counts, so DRIVE_SIGN = +1 means stick-up -> forward.
-// VERIFY ON FIRST FLIGHT: push the stick up and read TVEL in telemetry -- it
-// must be POSITIVE and the robot must move forward. Flip DRIVE_SIGN if not.
+// outer loop's position setpoint. crsf::drive() is +1 for stick UP (fixed at the
+// source in crsf.h on 2026-08-13 -- it used to return -1), and forward is +counts,
+// so DRIVE_SIGN = +1 gives stick-up -> forward. Keep DRIVE_SIGN as a pure
+// CHASSIS-wiring knob; if the radio axis is ever inverted again, fix crsf.h, not
+// this, so the two negations can't quietly cancel.
+// STILL UNVERIFIED: the TURN direction. Push the stick RIGHT and confirm the robot
+// yaws right; if not, flip TURN_SIGN (turn is a separate channel with its own TX
+// direction setting, so it does not follow from the drive fix).
 const float DRIVE_MAX_VEL  = 0.6f;  // rev/s at full stick. Conservative on purpose: one encoder
                                     // count per 5 ms tick is already 0.366 rev/s (546 counts/rev),
                                     // so 0.6 rev/s is only ~1.6 counts/tick of resolution. Raise
