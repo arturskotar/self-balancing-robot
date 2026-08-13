@@ -360,15 +360,15 @@ const float TURN_SIGN      = +1.0f; // flip to -1 if the turn stick steers the w
 
 // ---- Drive launch assist ----------------------------------------------------
 // A hand push proves the cascade can drive once both wheels are rolling. Arm on
-// a fresh drive command, but WAIT until the outer loop has established the lean
-// and the body has caught that target. Only then give the axle a short pulse in
+// a fresh drive command, but WAIT until the body has physically established the
+// requested lean. Only then give the axle a short pulse in
 // the requested travel direction. Starting the pulse at the stick edge was too
 // early: it expired while the pitch loop was still moving the wheels backward
 // to create the lean, so telemetry always showed START - once the bot was stuck.
 // The pulse is one-shot, aborts on balance error/rate, and is never active while
 // standing or during pure rotation.
 const float         LAUNCH_ASSIST_EFFORT     = 4.0f;  // minimum effort beyond the static PWM floors
-const float         LAUNCH_READY_LEAN_DEG    = 1.5f;  // requested lean must be established first
+const float         LAUNCH_READY_LEAN_DEG    = 1.5f;  // measured body lean must be established first
 const float         LAUNCH_READY_ERROR_DEG   = 1.25f; // body must be close to the leaned target
 const float         LAUNCH_READY_RATE_DPS    = 10.0f; // do not launch in the fast part of a pitch swing
 const float         LAUNCH_ABORT_ERROR_DEG   = 2.5f;  // immediately return authority to balance
@@ -514,6 +514,7 @@ struct ControlTelemetry {
   bool dTermLimited = false;
   bool driving = false;
   char launchState = '-';                   // '-' idle, 'W' waiting for lean, 'P' axle pulse
+  char launchEvent = '-';                   // last transition: P pulse, T timeout, R rolling, E/G unsafe
   bool coasting = true;
 };
 ControlTelemetry controlLog;
@@ -944,6 +945,7 @@ void loop() {
     controlLog.pTerm = controlLog.iTerm = 0.0f;
     controlLog.dTermRaw = 0.0f;
     controlLog.dTermLimited = false;
+    controlLog.launchEvent = '-';
     controlLog.effortL = controlLog.effortR = 0.0f;
     controlLog.driveRaw = crsf::drive();
     controlLog.turnRaw = crsf::turn();
@@ -1028,6 +1030,7 @@ void loop() {
     launchAssistDirection = driveDirection;
     launchAssistArmedMs = millis();
     launchRollingTicks = 0;
+    controlLog.launchEvent = '-';
   } else if (!driving) {
     if (driveCommandPrev) posSetpoint = positionRev;
     launchAssistState = LAUNCH_IDLE;
@@ -1081,6 +1084,7 @@ void loop() {
     controlLog.posError = controlLog.velError = 0.0f;
     controlLog.launchBoost = 0.0f;
     controlLog.launchState = '-';
+    controlLog.launchEvent = '-';
     controlLog.coasting = true;
     posSetpoint = positionRev;   // park the target under the robot while it's down
     motorRaw(0);
@@ -1190,21 +1194,43 @@ void loop() {
   controlLog.launchBoost = 0.0f;
   if (launchAssistState == LAUNCH_WAIT_LEAN) {
     bool timedOut = (millis() - launchAssistArmedMs) >= LAUNCH_WAIT_MS;
-    bool leanReady = launchAssistDirection * leanCmd >= LAUNCH_READY_LEAN_DEG;
+    float actualLean = pitch - BALANCE_SETPOINT;
+    bool leanReady = launchAssistDirection * actualLean >= LAUNCH_READY_LEAN_DEG;
     bool bodyReady = fabs(error) <= LAUNCH_READY_ERROR_DEG &&
                      fabs(dRateFilt) <= LAUNCH_READY_RATE_DPS;
-    if (timedOut || driveRollingConfirmed || !driving) {
+    if (timedOut) {
+      controlLog.launchEvent = 'T';
+      launchAssistState = LAUNCH_IDLE;
+    } else if (driveRollingConfirmed) {
+      controlLog.launchEvent = 'R';
+      launchAssistState = LAUNCH_IDLE;
+    } else if (!driving) {
+      controlLog.launchEvent = 'N';
       launchAssistState = LAUNCH_IDLE;
     } else if (softStart >= 0.99f && leanReady && bodyReady) {
+      controlLog.launchEvent = 'P';
       launchAssistState = LAUNCH_PUSH;
       launchAssistStartedMs = millis();
     }
   }
   if (launchAssistState == LAUNCH_PUSH) {
     bool timedOut = (millis() - launchAssistStartedMs) >= LAUNCH_ASSIST_MS;
-    bool unsafe = fabs(error) > LAUNCH_ABORT_ERROR_DEG ||
-                  fabs(dRateFilt) > LAUNCH_ABORT_RATE_DPS;
-    if (timedOut || driveRollingConfirmed || unsafe || !driving) {
+    bool unsafeError = fabs(error) > LAUNCH_ABORT_ERROR_DEG;
+    bool unsafeRate = fabs(dRateFilt) > LAUNCH_ABORT_RATE_DPS;
+    if (timedOut) {
+      controlLog.launchEvent = 'T';
+      launchAssistState = LAUNCH_IDLE;
+    } else if (driveRollingConfirmed) {
+      controlLog.launchEvent = 'R';
+      launchAssistState = LAUNCH_IDLE;
+    } else if (unsafeError) {
+      controlLog.launchEvent = 'E';
+      launchAssistState = LAUNCH_IDLE;
+    } else if (unsafeRate) {
+      controlLog.launchEvent = 'G';
+      launchAssistState = LAUNCH_IDLE;
+    } else if (!driving) {
+      controlLog.launchEvent = 'N';
       launchAssistState = LAUNCH_IDLE;
     } else {
       // Negative motor effort is physical forward on this chassis; encoder and
@@ -1288,9 +1314,11 @@ void telemetry(float error, float rate, float u) {
   Serial.print(" VERR "); Serial.print(controlLog.velError, 2);
   Serial.print(" SOFT "); Serial.print(controlLog.softStart, 2);
   Serial.print(" START "); Serial.print(controlLog.launchState);
+  Serial.print(" EXIT "); Serial.print(controlLog.launchEvent);
   Serial.print(" BOOST "); Serial.print(controlLog.launchBoost, 1);
 
-  Serial.print(" | LEAN POS "); Serial.print(controlLog.positionLean, 2);
+  Serial.print(" | LEAN ACT "); Serial.print(pitch - BALANCE_SETPOINT, 2);
+  Serial.print(" POS "); Serial.print(controlLog.positionLean, 2);
   Serial.print(" VEL "); Serial.print(controlLog.velocityLean, 2);
   Serial.print(" RAW "); Serial.print(controlLog.leanRaw, 2);
   Serial.print(" CMD "); Serial.print(leanCmd, 2);
