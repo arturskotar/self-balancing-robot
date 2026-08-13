@@ -381,6 +381,14 @@ const float         LAUNCH_RELEASE_VEL       = 0.12f; // rev/s toward command me
 const unsigned int  LAUNCH_RELEASE_TICKS     = 20;    // require 100 ms at 200 Hz; reject oscillation spikes
 const unsigned int  LAUNCH_ASSIST_TICKS      = 40;    // 200 ms at 200 Hz, counted only while eligible
 
+// The angle cascade establishes the requested lean, but a PD angle loop has no
+// steady output once ACT reaches CMD. Give the velocity loop a small, persistent
+// axle-torque channel so non-zero VERR can keep accelerating the wheels. It is
+// enabled only after the body is safely leaned and settled; balance regains sole
+// authority immediately outside the existing launch error/rate gates.
+const float DRIVE_VELOCITY_EFFORT_GAIN  = 10.0f; // rev/s error -> PWM effort
+const float DRIVE_VELOCITY_EFFORT_LIMIT = 8.0f;  // below the tested launch floor
+
 // While the wheels are still breaking away, fast pitch-rate transients can make
 // D overwhelm P and reverse the axle before it establishes motion. Limit only
 // that drive-start condition. Full derivative damping returns after 100 ms of
@@ -513,7 +521,9 @@ struct ControlTelemetry {
   float posError = 0.0f, velError = 0.0f;   // outer-loop tracking errors
   float softStart = 0.0f;                   // 0..1 authority ramp after arming
   float launchBoost = 0.0f;                 // signed change needed to enforce the launch floor
+  float driveVelocityEffort = 0.0f;         // persistent, safety-gated velocity torque
   bool dTermLimited = false;
+  bool driveVelocityEffortActive = false;
   bool driving = false;
   char launchState = '-';                   // '-' idle, 'W' waiting for lean, 'P' axle pulse
   char launchEvent = '-';                   // P pulse, D deferred, T budget spent, R rolling, E/G unsafe
@@ -957,6 +967,8 @@ void loop() {
     controlLog.positionLean = controlLog.velocityLean = controlLog.leanRaw = 0.0f;
     controlLog.posError = controlLog.velError = controlLog.softStart = 0.0f;
     controlLog.launchBoost = 0.0f;
+    controlLog.driveVelocityEffort = 0.0f;
+    controlLog.driveVelocityEffortActive = false;
     controlLog.driving = false;
     controlLog.launchState = '-';
     controlLog.coasting = true;
@@ -1093,6 +1105,8 @@ void loop() {
     controlLog.positionLean = controlLog.velocityLean = controlLog.leanRaw = 0.0f;
     controlLog.posError = controlLog.velError = 0.0f;
     controlLog.launchBoost = 0.0f;
+    controlLog.driveVelocityEffort = 0.0f;
+    controlLog.driveVelocityEffortActive = false;
     controlLog.launchState = '-';
     controlLog.launchEvent = '-';
     controlLog.coasting = true;
@@ -1203,10 +1217,18 @@ void loop() {
   // but must NEVER reverse an opposite-direction balance correction. A large
   // error/rate aborts instead of fighting recovery.
   controlLog.launchBoost = 0.0f;
+  controlLog.driveVelocityEffort = 0.0f;
+  controlLog.driveVelocityEffortActive = false;
   float launchEffortSign = launchAssistDirection > 0 ? -1.0f : 1.0f;
   bool balanceCatchingTowardDrive = launchEffortSign * u > 0.0f;
+  float actualLean = pitch - BALANCE_SETPOINT;
+  bool velocityNeedsDrive = driveDirection * velError > 0.0f;
+  bool driveVelocityEffortReady = driving &&
+                                  velocityNeedsDrive &&
+                                  driveDirection * actualLean >= LAUNCH_READY_LEAN_DEG &&
+                                  fabs(error) <= LAUNCH_READY_ERROR_DEG &&
+                                  fabs(dRateFilt) <= LAUNCH_READY_RATE_DPS;
   if (launchAssistState == LAUNCH_WAIT_LEAN) {
-    float actualLean = pitch - BALANCE_SETPOINT;
     bool leanReady = launchAssistDirection * actualLean >= LAUNCH_READY_LEAN_DEG;
     bool bodyReady = fabs(error) <= LAUNCH_READY_ERROR_DEG &&
                      fabs(dRateFilt) <= LAUNCH_READY_RATE_DPS;
@@ -1260,6 +1282,18 @@ void loop() {
       }
       launchAssistTicksRemaining--;
     }
+  }
+
+  // Do not stack this with the stronger breakaway pulse. Once that pulse is
+  // inactive, velocity error supplies a bounded average torque instead of
+  // disappearing when the angle PD reaches zero tracking error.
+  if (launchAssistState != LAUNCH_PUSH && driveVelocityEffortReady) {
+    controlLog.driveVelocityEffort = constrain(-DRIVE_VELOCITY_EFFORT_GAIN * velError,
+                                                -DRIVE_VELOCITY_EFFORT_LIMIT,
+                                                 DRIVE_VELOCITY_EFFORT_LIMIT);
+    controlLog.driveVelocityEffortActive =
+        fabs(controlLog.driveVelocityEffort) > OUT_DEADZONE;
+    u += controlLog.driveVelocityEffort;
   }
   controlLog.launchState = launchAssistState == LAUNCH_WAIT_LEAN ? 'W' :
                            launchAssistState == LAUNCH_PUSH ? 'P' : '-';
@@ -1334,6 +1368,8 @@ void telemetry(float error, float rate, float u) {
   Serial.print(" EXIT "); Serial.print(controlLog.launchEvent);
   Serial.print(" BOOST "); Serial.print(controlLog.launchBoost, 1);
   Serial.print(" BTK "); Serial.print(launchAssistTicksRemaining);
+  Serial.print(" VTRQ "); Serial.print(controlLog.driveVelocityEffort, 2);
+  Serial.print(" VTG "); Serial.print(controlLog.driveVelocityEffortActive ? "Y" : "-");
 
   Serial.print(" | LEAN ACT "); Serial.print(pitch - BALANCE_SETPOINT, 2);
   Serial.print(" POS "); Serial.print(controlLog.positionLean, 2);
