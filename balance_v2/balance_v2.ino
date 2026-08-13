@@ -1189,9 +1189,12 @@ void loop() {
   // This is deliberately staged after the inner controller. WAIT_LEAN lets the
   // normal non-minimum-phase response create the requested body lean. PUSH then
   // holds only a small minimum axle effort in the requested travel direction,
-  // long enough to cross static friction. Stronger same-direction balance output
-  // is preserved. A large error/rate aborts instead of fighting recovery.
+  // long enough to cross static friction. It may strengthen an existing catch,
+  // but must NEVER reverse an opposite-direction balance correction. A large
+  // error/rate aborts instead of fighting recovery.
   controlLog.launchBoost = 0.0f;
+  float launchEffortSign = launchAssistDirection > 0 ? -1.0f : 1.0f;
+  bool balanceCatchingTowardDrive = launchEffortSign * u > 0.0f;
   if (launchAssistState == LAUNCH_WAIT_LEAN) {
     bool timedOut = (millis() - launchAssistArmedMs) >= LAUNCH_WAIT_MS;
     float actualLean = pitch - BALANCE_SETPOINT;
@@ -1207,7 +1210,8 @@ void loop() {
     } else if (!driving) {
       controlLog.launchEvent = 'N';
       launchAssistState = LAUNCH_IDLE;
-    } else if (softStart >= 0.99f && leanReady && bodyReady) {
+    } else if (softStart >= 0.99f && leanReady && bodyReady &&
+               balanceCatchingTowardDrive) {
       controlLog.launchEvent = 'P';
       launchAssistState = LAUNCH_PUSH;
       launchAssistStartedMs = millis();
@@ -1235,10 +1239,9 @@ void loop() {
     } else {
       // Negative motor effort is physical forward on this chassis; encoder and
       // target velocity use the opposite (+forward) convention.
-      float launchFloor = launchAssistDirection > 0
-                        ? -LAUNCH_ASSIST_EFFORT : LAUNCH_ASSIST_EFFORT;
-      bool belowFloor = launchAssistDirection > 0 ? u > launchFloor : u < launchFloor;
-      if (belowFloor) {
+      float launchFloor = launchEffortSign * LAUNCH_ASSIST_EFFORT;
+      bool belowFloor = fabs(u) < LAUNCH_ASSIST_EFFORT;
+      if (balanceCatchingTowardDrive && belowFloor) {
         controlLog.launchBoost = launchFloor - u;
         u = launchFloor;
       }
