@@ -174,7 +174,7 @@ float Kd = 0.3f;   // derivative    (deg/s    -> PWM)  RE-TUNED FROM SCRATCH 202
 float Ki = 0.0f;   // integral      (deg*s    -> PWM)  keep 0 until PD works
 // Translation needs turn-class common-mode authority, but neutral balance is
 // already tuned. Blend toward this proportional gain with commanded drive only.
-const float DRIVE_KP = 4.0f;
+const float DRIVE_KP = 6.0f;
 
 // ---- Cascade outer loop (position/velocity SETPOINT -> desired LEAN) -------
 // THE PILOT DRIVES THE SETPOINT, NEVER THE LEAN AND NEVER THE MOTORS.
