@@ -18,6 +18,23 @@
 //     its wheels), and a dead-zone moved OFF the sensor-noise floor.
 //   * Fixed-rate control loop (constant dt) for predictable gains.
 //   * Safety cutoff if it has clearly fallen.
+//
+// DRIVE ARCHITECTURE (rebuilt 2026-08-13 on branch cascade-setpoint-drive):
+//   The pilot drives the outer loop's SETPOINT, never the lean and never the
+//   motors. Stick -> wheel velocity -> integrated into a position setpoint ->
+//   the always-closed outer loop derives the lean -> the inner pitch loop
+//   chases it. This is the librobotcontrol / rc_balance (EduMiP) structure.
+//   Everything that failed before failed because it bypassed this: direct lean
+//   commands are ACCELERATION commands (constant speed needs zero lean), and
+//   motor feedforward gets cancelled by the balance loop.
+//
+// TWO HARDWARE FACTS THAT DROVE THIS REVISION (BTS7960 datasheet, rev 1.1):
+//   1. PWM FREQUENCY IS A CONTROL PARAMETER. The driver's turn-on delay swallows
+//      short pulses whole -- see the MOTOR_PWM_HZ comment. 20 kHz multiplied the
+//      effective motor deadband by 4.5x and was the real "stiction wall".
+//   2. 3.3 V LOGIC IS FINE. V_IN(H) is max 2.0 V (INH max 2.15 V), absolute and
+//      NOT ratiometric to Vcc, over -40..150 C. The planned 74HCT244 buffer is
+//      unnecessary and would not have fixed the drive problem.
 // =============================================================================
 
 MPU9250 imu;
@@ -29,7 +46,19 @@ MPU9250 imu;
 #define LEFT_MOTOR_REVERSE_PIN   9
 #define RIGHT_MOTOR_FORWARD_PIN  22
 #define RIGHT_MOTOR_REVERSE_PIN  23
-const int MOTOR_PWM_HZ = 20000;  // IBT-2/BTS7960 supports PWM up to 25 kHz
+// PWM FREQUENCY IS A CONTROL PARAMETER HERE, NOT A COSMETIC ONE. The BTS7960
+// has a large input->output TURN-ON DELAY (datasheet 4.2.3): with the IBT-2's
+// ~10k slew-rate resistor, tdr(HS) ~5.5 us + tr ~2.5 us ~= 8 us before the
+// output even reaches the rail. Any PWM pulse shorter than that produces NOTHING.
+//   @ 4482 Hz (223 us period): 1 PWM count = 0.875 us -> ~9 counts to clear 8 us
+//   @ 20000 Hz ( 50 us period): 1 PWM count = 0.196 us -> ~41 counts to clear 8 us
+// That matches both bench measurements exactly: the deadband measured 11 at
+// 4482 Hz, and the wheels needed ~40 to roll after someone set 20 kHz. Running
+// 20 kHz multiplied the electrical deadband by 4.46x and ate the entire low-PWM
+// band that smooth driving lives in. 4482 Hz is the Teensy default and the
+// frequency the known-good balance + MOTOR_DEADBAND=11 were measured at.
+// Set explicitly on all four pins so the value is documented, not inherited.
+const int MOTOR_PWM_HZ = 4482;   // do NOT raise without re-running DEADBAND_TEST
 const int MOTOR_PWM_BITS = 8;    // analogWrite range is explicitly 0..255 on every channel
 
 // ---- Encoder pins (Waveshare DCGM-3865, connector silkscreen "M V A B G M")-
@@ -45,12 +74,17 @@ const int MOTOR_PWM_BITS = 8;    // analogWrite range is explicitly 0..255 on ev
 #define RIGHT_ENC_A  4   // green
 #define RIGHT_ENC_B  5   // dir (yellow)
 
-// Per-side count direction. Validated on this chassis: physical forward logs as
-// negative wheel motion, physical reverse as positive. Keep both wheels using
-// the same chassis convention so the velocity loop can command forward as a
-// negative target and reverse as a positive target.
-#define ENC_LEFT_DIR   (+1)
-#define ENC_RIGHT_DIR  (-1)
+// Per-side count direction. The right motor/encoder is mirror-mounted, so its
+// raw counts run opposite the left. FLIPPED BOTH (was +1/-1): with the previous
+// pair, physical forward logged as NEGATIVE, and the sign was being cancelled
+// downstream by dropping the minus in the outer-loop law. That works but makes
+// every control expression read backwards. Fix it at the source instead:
+//   >>> FORWARD ROLL = POSITIVE COUNTS on both wheels. <<<
+// Everything downstream (positionRev, forwardVel, targetVel, posSetpoint) now
+// uses "+ = forward" and the control law reads as written. If a wheel counts the
+// wrong way after a re-mount/rewire, flip that side here and NOWHERE else.
+#define ENC_LEFT_DIR   (-1)
+#define ENC_RIGHT_DIR  (+1)
 
 // Encoder geometry (for when we convert ticks -> wheel velocity):
 //   13 PPR base (26-pole magnet ring) * 42:1 gearbox = 546 rising edges of A
@@ -115,24 +149,49 @@ float Kd = 0.3f;   // derivative    (deg/s    -> PWM)  RE-TUNED FROM SCRATCH 202
                    // lag (revert gyro DLPF 20->41 Hz + remove the phantom bias in software instead).
 float Ki = 0.0f;   // integral      (deg*s    -> PWM)  keep 0 until PD works
 
-// ---- Cascade outer loop (encoders -> desired LEAN) -------------------------
-// RC drive asks directly for a lean setpoint, and the inner pitch loop drives
-// the wheels to catch that lean. When not driving, position and velocity feed
-// back into lean so the robot returns home without drifting or overshooting.
-//   driveLean = -driveStick * driveMaxLean
-//   leanRaw   = driveLean + idlePositionLean + idleVelocityLean
-//   error   = pitch - (BALANCE_SETPOINT + leanCmd)
-// Physical forward encoder motion is negative on this chassis, so positive
-// Kpos/Kvel feedback produces the opposite (braking/returning) lean.
+// ---- Cascade outer loop (position/velocity SETPOINT -> desired LEAN) -------
+// THE PILOT DRIVES THE SETPOINT, NEVER THE LEAN AND NEVER THE MOTORS.
+// This is the structure every working reference uses (librobotcontrol's
+// rc_balance / EduMiP is the canonical one):
+//   posSetpoint += targetVel * DT                       <- stick integrates in
+//   leanRaw = Kpos*(posSetpoint - positionRev)
+//           + Kvel*(targetVel  - forwardVel)            <- loop ALWAYS closed
+//   error   = pitch - (BALANCE_SETPOINT + leanCmd)      <- inner loop untouched
+//
+// WHY NOT COMMAND LEAN DIRECTLY (the thing that kept failing): on flat ground a
+// constant forward VELOCITY needs ZERO lean -- lean commands ACCELERATION. So a
+// held drive-lean is a held acceleration command: it runs away until it hits the
+// clamp, a wall, or the floor. There is no lean value that means "cruise". The
+// outer loop must DERIVE whatever lean is needed. Same reason motor feedforward
+// failed: the balance loop cancels any common-mode wheel command.
+//
+// SAFETY PROPERTY: with targetVel = 0 and posSetpoint parked, this reduces
+// EXACTLY to the known-good baseline law  leanRaw = -(Kpos*positionRev +
+// Kvel*forwardVel). Standing still, this is the balancer that already worked.
+//
+// NOTE these gains have never actually run: the encoders were dead (wiring) for
+// the whole Teensy era, so positionRev/forwardVel were pinned at 0 and the outer
+// loop contributed nothing. Treat Kpos/Kvel as UNVALIDATED starting points.
 // If it limit-cycles, SLOW the outer loop (raise LEAN_LPF) before cutting gains.
-float Kpos = 1.0f;               // wheel position (rev from home -> deg of lean)
-float Kvel = 4.0f;               // wheel velocity (rev/s -> deg of braking lean), idle only
-float driveMaxLean = 2.0f;       // deg at full drive stick; tune with SC=2 + S1.
+float Kpos = 1.0f;               // wheel position error (rev -> deg of lean)
+float Kvel = 4.0f;               // wheel velocity error (rev/s -> deg of lean); tune with SC=2 + S1
 const float LEAN_CLAMP = 5.0f;   // deg : known-good outer-loop safety cap
 const float LEAN_LPF   = 0.99f;  // EMA on leanCmd (~500 ms). Higher = slower, safer outer loop.
-                                 // Keep direct stick-to-lean changes slower than the pitch loop so
-                                 // the robot eases into a commanded lean instead of stepping the
-                                 // balance target abruptly.
+                                 // 0.95 (~100 ms) RAN AWAY: faster than the pendulum's non-minimum-
+                                 // phase "wrong-way" transient (~100-300 ms), so the outer loop
+                                 // re-commanded lean while the inner loop was still driving the
+                                 // wheels the wrong way -> positive feedback. KEEP THIS SLOW: it is
+                                 // what stops the drive setpoint from exciting the same runaway.
+// Anti-windup: never let the setpoint run further than this ahead of where the
+// robot actually is. Without it, blocked wheels wind the setpoint up forever and
+// the robot lurches when they free up.
+// TRADE-OFF: this also caps the position term at Kpos * POS_ERROR_CLAMP degrees,
+// so it bounds station-keeping authority too. At Kpos = 1.0 that is 2 deg of the
+// 5 deg LEAN_CLAMP, and bounds any release-lurch to 2 wheel revs. Raising it to
+// 5.0 would let the position term alone saturate the lean (what the baseline law
+// would have done had its encoders been alive) -- but 2.0 is the safer first
+// flight. Raise it if station-keeping feels weak against a shove or a slope.
+const float POS_ERROR_CLAMP = 2.0f;   // rev
 
 // ---- Auto PID sweep (for recording) ----------------------------------------
 // Cycles Kp/Kd through a grid, holding each set for SWEEP_HOLD_MS so you can
@@ -163,11 +222,32 @@ const float OUT_DEADZONE   = 0.5f;  // ignore PD outputs smaller than this (PWM 
 const int MOTOR_DEADBAND = 11;
 
 // ---- RC drive (radio -> motion) --------------------------------------------
+// Drive stick sets a wheel VELOCITY target (rev/s), which is integrated into the
+// outer loop's position setpoint. crsf::drive() is already +1 for stick UP, and
+// forward is now +counts, so DRIVE_SIGN = +1 means stick-up -> forward.
+// VERIFY ON FIRST FLIGHT: push the stick up and read TVEL in telemetry -- it
+// must be POSITIVE and the robot must move forward. Flip DRIVE_SIGN if not.
+const float DRIVE_MAX_VEL  = 0.6f;  // rev/s at full stick. Conservative on purpose: one encoder
+                                    // count per 5 ms tick is already 0.366 rev/s (546 counts/rev),
+                                    // so 0.6 rev/s is only ~1.6 counts/tick of resolution. Raise
+                                    // this after the x4 hardware QuadEncoder upgrade (2184 cpr).
 const float TURN_AUTHORITY = 25.0f; // PWM-effort differential at full turn stick
 const float DRIVE_STICK_DEADZONE = 0.15f;
 const float TURN_STICK_DEADZONE  = 0.30f; // measured cross-axis reaches ~0.25 during straight drive
 const float DRIVE_SIGN     = +1.0f; // flip to -1 if the drive stick drives the wrong way
 const float TURN_SIGN      = +1.0f; // flip to -1 if the turn stick steers the wrong way
+
+// ---- Soft start + saturation latch (from the rc_balance reference) ---------
+// Soft start: ramp control authority in over SOFT_START_SEC after arming so a
+// mid-air / mid-tilt arm doesn't slam the motors to full.
+const float SOFT_START_SEC = 0.7f;
+// Saturation latch: if the INNER loop sits pinned at its ceiling this long, the
+// robot is not recovering -- stop cooking the motors and latch. Re-arm is keyed
+// off the absolute accel angle (same as the fall latch), so it CANNOT deadlock
+// the way the old STALL_CUTOFF did: only physically standing it up restarts it.
+#define SATURATION_LATCH 1
+const float         SAT_EFFORT_FRAC  = 0.95f;  // fraction of usable effort range that counts as pinned
+const unsigned long SAT_TIMEOUT_TICKS = 100;   // 0.5 s at 200 Hz
 
 // ---- Coast band (motor protection): rest the motors near balance -----------
 // Within ANGLE_DEADZONE of the (leaned) target AND wheels stopped -> command 0.
@@ -246,13 +326,18 @@ long  velLastTicksL = 0, velLastTicksR = 0;   // counts at the previous control 
 float wheelVelL = 0.0f, wheelVelR = 0.0f;     // per-wheel rev/s (filtered)
 float forwardVel = 0.0f;                      // chassis rev/s = mean of the two
 float rotationVel = 0.0f;                     // differential wheel speed; yaw/rotation proxy
-float positionRev = 0.0f;                     // avg wheel position, revs from home
-float driveLeanLog = 0.0f;                    // latest drive-requested lean angle
+float positionRev = 0.0f;                     // avg wheel position, revs from home (+ = forward)
+float posSetpoint = 0.0f;                     // OUTER-LOOP TARGET position (rev). The drive stick
+                                              // integrates into this; the loop always chases it.
+float targetVelLog = 0.0f;                    // latest commanded wheel velocity (rev/s)
 float turnCmdLog = 0.0f;                      // post-deadzone differential effort
 int   motorPwmL = 0, motorPwmR = 0;           // signed PWM actually sent to each IBT-2
 long  homeTicksSum = 0;                        // (leftTicks+rightTicks) defining "home" (0 = boot spot)
 bool  stalled = false;                         // true while the stall cutoff has the motors off
 bool  fallen = false;                          // true while the fall latch has the motors off
+bool  armedPrev = false;                       // edge-detect the arm transition (soft start)
+unsigned long armedAtMs = 0;                   // millis() at the moment we armed
+unsigned long satTicks = 0;                    // consecutive ticks with the inner loop pinned
 
 struct ControlTelemetry {
   float accelPitch = 0.0f;
@@ -267,6 +352,8 @@ struct ControlTelemetry {
   float driveCmd = 0.0f, turnCmd = 0.0f;
   float wheelVelRawL = 0.0f, wheelVelRawR = 0.0f;
   long encoderDeltaL = 0, encoderDeltaR = 0;
+  float posError = 0.0f, velError = 0.0f;   // outer-loop tracking errors
+  float softStart = 0.0f;                   // 0..1 authority ramp after arming
   bool driving = false;
   bool coasting = true;
 };
@@ -415,7 +502,7 @@ void driveControlDiff(float uL, float uR) {
   motorPerWheel(pwmL, pwmR);
 }
 
-// Live gain tuning from the radio. SC (CH7) picks Kp/Kd/driveMaxLean; the S1 knob (CH8)
+// Live gain tuning from the radio. SC (CH7) picks Kp/Kd/Kvel; the S1 knob (CH8)
 // sets it, mapped to a SAFE band centered on the shipped value (knob center =
 // shipped). "Pickup" style: switching SC does NOT jump a gain -- the knob only
 // takes over once you actually MOVE it -- so flipping SC never disturbs a gain.
@@ -432,7 +519,8 @@ void applyLiveTune() {
   switch (sel) {
     case 0: Kp   = 2.0f + 0.6f * x; break;   // 1.4 .. 2.6  (shipped 2.0)
     case 1: Kd   = 0.3f + 0.2f * x; break;   // 0.1 .. 0.5  (shipped 0.3)
-    case 2: driveMaxLean = 2.0f + 1.0f * x; break;   // 1.0 .. 3.0 deg (shipped 2.0)
+    case 2: Kvel = 4.0f + 2.0f * x; break;   // 2.0 .. 6.0  (shipped 4.0) -- the outer-loop
+                                             // velocity gain, now the main drive-tuning knob
   }
 }
 
@@ -657,7 +745,6 @@ void loop() {
     integral = 0.0f;
     dTermLog = 0.0f;
     leanCmd  = 0.0f;
-    driveLeanLog = 0.0f;
     turnCmdLog = 0.0f;
     controlLog.targetPitch = BALANCE_SETPOINT;
     controlLog.pTerm = controlLog.iTerm = 0.0f;
@@ -668,21 +755,39 @@ void loop() {
     controlLog.commandCap = 0.35f + 0.65f * controlLog.speedInput;
     controlLog.driveCmd = controlLog.turnCmd = 0.0f;
     controlLog.positionLean = controlLog.velocityLean = controlLog.leanRaw = 0.0f;
+    controlLog.posError = controlLog.velError = controlLog.softStart = 0.0f;
     controlLog.driving = false;
     controlLog.coasting = true;
     long hl, hr; readEncoders(hl, hr);
-    homeTicksSum = hl + hr;
+    homeTicksSum = hl + hr;      // re-home under the robot while it's parked...
+    posSetpoint  = 0.0f;         // ...and park the outer-loop target there too, so
+    targetVelLog = 0.0f;         // re-arming never lurches toward a stale setpoint.
+    satTicks     = 0;
+    armedPrev    = false;        // next armed tick re-triggers the soft start
     telemetry(pitch - BALANCE_SETPOINT, gyroRate, 0);
     return;
   }
+
+  // --- Arm transition: start the soft-start ramp from a clean slate -----------
+  if (!armedPrev) {
+    armedPrev   = true;
+    armedAtMs   = millis();
+    posSetpoint = 0.0f;      // homeTicksSum was just reset, so positionRev ~ 0
+    integral    = 0.0f;
+    leanCmd     = 0.0f;
+    satTicks    = 0;
+  }
+  float softStart = constrain((millis() - armedAtMs) / (SOFT_START_SEC * 1000.0f), 0.0f, 1.0f);
+  controlLog.softStart = softStart;
 
   // --- Live gain tuning from the radio (SC selects, S1 knob sets) -------------
   applyLiveTune();
 
   // --- RC drive/turn command from the radio ----------------------------------
-  // Drive stick -> target lean angle; turn stick -> differential. CH3 throttle
-  // caps both. With BOTH sticks centered these are 0 and the balancer behaves
-  // exactly as before.
+  // Drive stick -> target wheel VELOCITY (rev/s), which feeds the outer loop's
+  // setpoint below. Turn stick -> differential effort (balance is yaw-blind, so
+  // a pure differential passes straight through). CH3 throttle caps both. With
+  // BOTH sticks centered these are 0 and the balancer behaves exactly as before.
   float speedIn   = crsf::speed();
   float cap       = 0.35f + 0.65f * speedIn;                          // CH3 speed cap 0.35..1.0
   float driveRaw  = crsf::drive();
@@ -691,9 +796,9 @@ void loop() {
   float turnIn    = turnRaw;
   if (fabs(driveIn) < DRIVE_STICK_DEADZONE) driveIn = 0.0f;
   if (fabs(turnIn) < TURN_STICK_DEADZONE) turnIn = 0.0f;
-  float driveLean = -DRIVE_SIGN * driveIn * cap * driveMaxLean;       // deg; DRV -1 -> positive forward lean
+  float targetVel = DRIVE_SIGN * driveIn * cap * DRIVE_MAX_VEL;       // rev/s, + = forward
   float turnCmd   = TURN_SIGN  * turnIn  * cap * TURN_AUTHORITY;      // per-wheel PWM-effort diff
-  driveLeanLog = driveLean;
+  targetVelLog = targetVel;
   turnCmdLog = turnCmd;
   controlLog.speedInput = speedIn;
   controlLog.commandCap = cap;
@@ -702,16 +807,13 @@ void loop() {
   controlLog.driveCmd = driveIn;
   controlLog.turnCmd = turnIn;
 
-  // While driving, RELEASE the position hold: re-home under the robot so the
-  // station-keeping term (Kpos*positionRev) can't fight the pilot. positionRev
-  // stays ~0, leaving the outer loop as pure drive-lean control below. On release
-  // it holds wherever it stopped. (No moving-reference runaway.)
-  bool driving = fabs(driveLean) > 0.01f;
+  // NOTE: the position hold is NO LONGER released while driving. That was the
+  // core bug -- with Kpos and Kvel both zeroed, nothing closed the loop on
+  // translation and drive was open-loop acceleration. Driving now moves the
+  // TARGET (posSetpoint) and the loop keeps chasing it, exactly as rc_balance
+  // does. Releasing the stick simply freezes the target -> it holds position.
+  bool driving = fabs(targetVel) > 0.001f;
   controlLog.driving = driving;
-  if (driving) {
-    long dl, dr; readEncoders(dl, dr);
-    homeTicksSum = dl + dr;
-  }
 
   float error = pitch - BALANCE_SETPOINT;
 
@@ -726,8 +828,12 @@ void loop() {
     pitch = aPitch;                          // reseed the filter from the true angle
     long hl, hr; readEncoders(hl, hr);
     homeTicksSum = hl + hr;                  // re-home here so it doesn't drive off to the old spot
+    positionRev = 0.0f;                      // homeTicksSum just moved; don't use the stale value
+    posSetpoint = 0.0f;                      // and park the outer-loop target on top of it
     integral = 0.0f;
     leanCmd = 0.0f;                          // drop any stale lean from before the fall
+    satTicks = 0;
+    armedAtMs = millis();                    // soft-start the recovery too
   }
   if (fallen) {
     integral = 0.0f;
@@ -736,20 +842,35 @@ void loop() {
     controlLog.pTerm = controlLog.iTerm = 0.0f;
     controlLog.effortL = controlLog.effortR = 0.0f;
     controlLog.positionLean = controlLog.velocityLean = controlLog.leanRaw = 0.0f;
+    controlLog.posError = controlLog.velError = 0.0f;
     controlLog.coasting = true;
+    posSetpoint = positionRev;   // park the target under the robot while it's down
     motorRaw(0);
     telemetry(error, gyroRate, 0);
     return;
   }
 
-  // --- Cascade OUTER loop: drive stick -> target LEAN command ---
-  // While idle, restore the position spring and velocity damping. While driving,
-  // release both so direct lean remains the only movement request.
-  float positionLean = driving ? 0.0f : Kpos * positionRev;
-  float velocityLean = driving ? 0.0f : Kvel * forwardVel;
-  float leanRaw = driveLean + positionLean + velocityLean;
+  // --- Cascade OUTER loop: position/velocity SETPOINT -> target LEAN ---------
+  // Always closed. The stick integrates into posSetpoint; the loop derives
+  // whatever lean is needed to get there. Sign check: posError > 0 means the
+  // target is AHEAD of us -> we must travel forward -> lean FORWARD (+deg).
+  // With targetVel = 0 and posSetpoint parked this is identically the baseline
+  // law  leanRaw = -(Kpos*positionRev + Kvel*forwardVel).
+  posSetpoint += targetVel * DT;
+  // Anti-windup: clamp the setpoint to a bounded lead over the true position, so
+  // blocked wheels can't wind it up and lurch when they free.
+  posSetpoint = constrain(posSetpoint, positionRev - POS_ERROR_CLAMP,
+                                       positionRev + POS_ERROR_CLAMP);
+
+  float posError = posSetpoint - positionRev;   // rev   : + = must travel forward
+  float velError = targetVel   - forwardVel;    // rev/s : + = must speed up forward
+  float positionLean = Kpos * posError;
+  float velocityLean = Kvel * velError;
+  float leanRaw = positionLean + velocityLean;
   leanRaw = constrain(leanRaw, -LEAN_CLAMP, LEAN_CLAMP);
   leanCmd = LEAN_LPF * leanCmd + (1.0f - LEAN_LPF) * leanRaw;
+  controlLog.posError = posError;
+  controlLog.velError = velError;
   controlLog.positionLean = positionLean;
   controlLog.velocityLean = velocityLean;
   controlLog.leanRaw = leanRaw;
@@ -768,6 +889,7 @@ void loop() {
   controlLog.pTerm = Kp * error;
   controlLog.iTerm = Ki * integral;
   float u = -(controlLog.pTerm + dTermLog + controlLog.iTerm);
+  u *= softStart;   // ramp authority in over SOFT_START_SEC after arming
 
   // --- Coast band: rest the motors when essentially balanced ---
   // Gate on the FILTERED pitch (error) and wheel velocity (VF) -- the trustworthy
@@ -776,7 +898,7 @@ void loop() {
   // the band within a cycle or two and full control resumes before it can fall.
   // Only coast when truly IDLE -- not while the pilot commands drive/turn, or the
   // small drive lean (often < ANGLE_DEADZONE) gets zeroed here and nothing moves.
-  bool commanding = (fabs(driveLean) > 0.01f) || (fabs(turnCmd) > OUT_DEADZONE);
+  bool commanding = driving || (fabs(turnCmd) > OUT_DEADZONE);
   controlLog.coasting = false;
   if (!commanding && fabs(error) < ANGLE_DEADZONE && fabs(forwardVel) < VEL_DEADZONE) {
     u = 0.0f;
@@ -791,6 +913,20 @@ void loop() {
     motorRaw(0);
     telemetry(error, gyroRate, 0);
     return;
+  }
+#endif
+
+#if SATURATION_LATCH
+  // --- Inner-loop saturation latch -------------------------------------------
+  // mapEffortToPwm() tops out at MAX_PWM, so the usable effort range is
+  // (MAX_PWM - MOTOR_DEADBAND). Sitting at 95% of that for half a second means
+  // the inner loop is pinned and losing -- latch instead of stalling the motors.
+  if (fabs(u) > SAT_EFFORT_FRAC * (float)(MAX_PWM - MOTOR_DEADBAND)) satTicks++;
+  else                                                               satTicks = 0;
+  if (satTicks > SAT_TIMEOUT_TICKS) {
+    satTicks = 0;
+    fallen = true;   // re-arms off the ABSOLUTE accel angle, so this cannot deadlock
+    Serial.println("SAT: inner loop pinned -> latched (stand it up to re-arm)");
   }
 #endif
 
@@ -850,8 +986,16 @@ void telemetry(float error, float rate, float u) {
   Serial.print(" VROT "); Serial.print(rotationVel, 2);
   Serial.print(" POS "); Serial.print(positionRev, 3);
 
-  Serial.print(" | LEAN DRIVE "); Serial.print(driveLeanLog, 2);
-  Serial.print(" POS "); Serial.print(controlLog.positionLean, 2);
+  // Outer-loop tracking: TVEL is what the stick asked for, PSET/PERR is where the
+  // setpoint is vs the robot. On a forward stick TVEL must be POSITIVE and PERR
+  // must go positive -- if TVEL is negative on stick-up, flip DRIVE_SIGN.
+  Serial.print(" | TRK TVEL "); Serial.print(targetVelLog, 2);
+  Serial.print(" PSET "); Serial.print(posSetpoint, 3);
+  Serial.print(" PERR "); Serial.print(controlLog.posError, 3);
+  Serial.print(" VERR "); Serial.print(controlLog.velError, 2);
+  Serial.print(" SOFT "); Serial.print(controlLog.softStart, 2);
+
+  Serial.print(" | LEAN POS "); Serial.print(controlLog.positionLean, 2);
   Serial.print(" VEL "); Serial.print(controlLog.velocityLean, 2);
   Serial.print(" RAW "); Serial.print(controlLog.leanRaw, 2);
   Serial.print(" CMD "); Serial.print(leanCmd, 2);
@@ -868,7 +1012,7 @@ void telemetry(float error, float rate, float u) {
   Serial.print(" Kd "); Serial.print(Kd, 2);
   Serial.print(" Kpos "); Serial.print(Kpos, 2);
   Serial.print(" Kvel "); Serial.print(Kvel, 2);
-  Serial.print(" Dmax "); Serial.print(driveMaxLean, 2);
+  Serial.print(" Vmax "); Serial.print(DRIVE_MAX_VEL, 2);
   Serial.print(" GBIAS "); Serial.print(gyroYBias, 2);
   Serial.print(" DB "); Serial.print(MOTOR_DEADBAND);
   Serial.print(" PWMHZ "); Serial.print(MOTOR_PWM_HZ);

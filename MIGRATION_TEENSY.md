@@ -40,14 +40,50 @@ checked:
 |---|---|---|---|
 | **Encoder A/B (Hall)** | sensor → MCU (**input**) | **No — RESOLVED** | Datasheet rates the encoder **DC3.3V/DC5.0V** with a **built-in pull-up** ("directly connect to MCU"). **Power it from the Teensy 3V3 rail** → outputs are 3.3 V native. Direct connect, zero parts. ✅ *(The built-in pull-up ties to the encoder's own Vcc, so the "5 V power + external 3.3 V pull-up" trick does NOT work here — match Vcc to the logic rail instead.)* |
 | **MPU9250 I²C (SDA/SCL)** | bidirectional | Module usually has onboard regulator + level shifting; verify | Prefer a 3.3 V IMU breakout; if the module is 5 V-native, use an I²C level shifter. |
-| **IBT-2 RPWM/LPWM** | MCU → driver (**output**) | Threshold referenced to driver's 5 V Vcc | **Marginal at 3.3 V, not guaranteed by the BTS7960 spec.** Either bench-verify direct-drive across full duty + warm, or **buffer up to 5 V with a 74HCT244** (TTL thresholds, push-pull 5 V out). Only 4 signals (RPWM/LPWM ×2). |
+| **IBT-2 RPWM/LPWM** | MCU → driver (**output**) | **No — RESOLVED** | **3.3 V is fine. Direct connect, zero parts.** BTS7960 datasheet §4.4.6: `V_IN(H)` = **max 2.0 V** (`V_INH(H)` max 2.15 V) — these are **absolute** Schmitt-trigger thresholds, **NOT ratiometric to Vcc**, over −40…150 °C. §4.4.1 states the inputs are TTL/CMOS compatible and the part "can be interfaced directly to a microcontroller." 3.3 V clears worst-case by 1.15 V. ⚠️ **The real constraint on these pins is PWM FREQUENCY, not level — see §2.2.** |
 | **IBT-2 R_EN/L_EN** | MCU → driver (enable) | — | Just on/off — **tie straight to 5 V** (always enabled). No shifting. |
 | **CRSF (ELRS RX)** | RX → MCU | ELRS RX is **3.3 V** native | Direct connect. ✅ |
 | **LIDAR UART** | LIDAR → MCU | Most are 3.3 V; some 5 V | Check per unit; level-shift if 5 V. |
 
-Outputs (MCU → 5 V device) are lower risk — a 3.3 V high *usually* reads as logic-high — but
-the IBT-2 PWM inputs are the exception worth buffering (safety-critical), and
-**every input into the Teensy from a 5 V source needs a shifter or a re-power**.
+Outputs (MCU → 5 V device) are lower risk — a 3.3 V high *usually* reads as logic-high, and for
+the IBT-2 specifically the datasheet **guarantees** it (see the row above). The rule that still
+bites: **every input into the Teensy from a 5 V source needs a shifter or a re-power.**
+
+> **Correction (2026-08-13).** Earlier revisions of this document called the IBT-2 inputs
+> "marginal at 3.3 V" and specified a **74HCT244** buffer. That was wrong, and it cost real
+> debugging time: the entire forward-drive investigation was blocked on it as the presumed root
+> cause. The datasheet numbers above settle it — **no buffer is needed, and adding one would not
+> have fixed the drive problem.** The actual cause was §2.2.
+
+### 2.2 PWM frequency is a control parameter (BTS7960 turn-on delay)
+
+The BTS7960 has a large input→output **turn-on delay** that swallows short PWM pulses whole.
+From the datasheet §4.2.3 (Power Stages — Dynamic Characteristics), typical values:
+
+| R_SR | switch-on delay `tdr(HS)` | rise `tr(HS)` |
+|---|---|---|
+| 0 Ω | 3.1 µs | 1 µs |
+| 5.1 kΩ | 4.4 µs | 2 µs |
+| 51 kΩ | 14 µs | 7 µs |
+
+The IBT-2 sets `R_SR` with a resistor marked "103" (= 10 kΩ), so roughly **5.5 µs delay + 2.5 µs
+rise ≈ 8 µs before the output reaches the rail.** Any pulse shorter than that produces *nothing*.
+
+| PWM freq | period | µs per PWM count (8-bit) | counts needed to clear ~8 µs |
+|---|---|---|---|
+| **4482 Hz** (Teensy default) | 223 µs | 0.875 µs | **≈ 9** |
+| **20 000 Hz** | 50 µs | 0.196 µs | **≈ 41** |
+
+Both bench measurements land on this prediction: the motor deadband measured **11** at 4482 Hz,
+and the wheels needed **~40** to roll after the firmware was set to 20 kHz. Running 20 kHz
+multiplied the effective motor deadband by **4.46×** and ate the entire low-PWM band that smooth
+driving lives in — balancing survived (it dithers through the dead zone), driving did not.
+
+**Keep `MOTOR_PWM_HZ = 4482`.** Do not raise it without re-running `DEADBAND_TEST`. If quieter
+motors are wanted later, the trade is explicit: every doubling of PWM frequency doubles the
+minimum usable PWM count. *(The 10 kΩ `R_SR` is inferred from a third-party IBT-2 teardown, not
+an official schematic — but the conclusion holds even at `R_SR` = 0 Ω, where 20 kHz still kills
+everything below ~21 PWM.)*
 
 ### 2.1 Final power architecture (decided)
 
@@ -58,7 +94,7 @@ Two rails, single common ground:
 - **Motor high-current** (battery → IBT-2 B+/GND) stays on its own fat wiring, separate from the 5 V logic rail; the IBT-2 only draws logic-level current from 5 V.
 - **Single-point common ground:** battery/motor GND, 5 V logic GND, and 3V3/encoder GND all meet at one node.
 - **USB vs VIN:** `flash.sh` uploads over USB. **Cut the Teensy 4.1 VUSB↔VIN pad** so the 5 V rail (VIN) and USB 5 V don't back-feed each other — then USB powers only during flashing, the 5 V rail powers the robot.
-- **Open item:** IBT-2 PWM lines are 3.3 V from the Teensy into a 5 V-referenced input — buffer with a 74HCT244 or bench-verify direct-drive (see IBT-2 row above).
+- ~~**Open item:** IBT-2 PWM lines need a 74HCT244 buffer.~~ **CLOSED — not needed.** 3.3 V drives the BTS7960 inputs directly per datasheet (see the IBT-2 row above and §2.2).
 
 ---
 
@@ -67,7 +103,8 @@ Two rails, single common ground:
 - [x] ~~Confirm encoder supply/logic voltage.~~ **RESOLVED: rated DC3.3V/DC5.0V, built-in pull-up → power from 3V3, direct connect.**
 - [ ] ~~Level shifter for encoders~~ — **not needed** (powered at 3.3 V).
 - [ ] Choose 4 encoder pins on **hardware-quad-capable** Teensy pins (see `QuadEncoder` pin map).
-- [ ] IBT-2 PWM: either **bench-verify 3.3 V direct-drive** (full duty, warm board) **or** add a **74HCT244** buffer (3.3 → 5 V). Tie **R_EN/L_EN to 5 V**.
+- [x] ~~IBT-2 PWM: 74HCT244 buffer.~~ **RESOLVED: 3.3 V direct-drive is guaranteed by the datasheet — no buffer.** Tie **R_EN/L_EN to 5 V**.
+- [ ] Keep **`MOTOR_PWM_HZ = 4482`** in firmware; re-run `DEADBAND_TEST` before ever raising it (§2.2).
 - [ ] Wire the two rails: **5 V** → Teensy VIN + IBT-2 Vcc/enables; **3V3** (Teensy onboard reg) → Hall encoders.
 - [ ] **Cut the Teensy 4.1 VUSB↔VIN pad** so the 5 V rail and USB (for `flash.sh`) don't back-feed.
 - [ ] Motor high-current path (battery → IBT-2 B+/GND) on separate fat wiring from the 5 V logic rail.
@@ -87,10 +124,10 @@ UART pins free for the feature roadmap (CRSF, LIDAR), and (c) avoid the SPI bus 
 
 | Function | Signal | Uno pin | **Teensy 4.1 pin** | Teensy peripheral | Notes |
 |---|---|---:|---:|---|---|
-| Motor L | RPWM (fwd) | 5 | **6** | FlexPWM2.2 A | → 74HCT244 → IBT-2 |
-| Motor L | LPWM (rev) | 6 | **9** | FlexPWM2.2 B | shares submodule w/ 6 (one freq set) |
-| Motor R | RPWM (fwd) | 9 | **22** | FlexPWM4.0 A | → 74HCT244 → IBT-2 |
-| Motor R | LPWM (rev) | 10 | **23** | FlexPWM4.0 B | shares submodule w/ 22 |
+| Motor L | RPWM (fwd) | 5 | **6** | FlexPWM2.2 A | direct to IBT-2 (3.3 V is fine, §2.2) |
+| Motor L | LPWM (rev) | 6 | **9** | FlexPWM2.2 B | **shares submodule w/ pin 6** → one frequency for both |
+| Motor R | RPWM (fwd) | 9 | **22** | FlexPWM4.0 A | direct to IBT-2 |
+| Motor R | LPWM (rev) | 10 | **23** | FlexPWM4.**1** A | separate submodule from 22 (independent phase, same freq) |
 | Motor | R_EN / L_EN | — | **(none)** | — | tie to **5 V** (always on), not an MCU pin |
 | Encoder L | Phase A | 2 (INT0) | **2** | QuadEncoder ch1 A | hardware **x4** decode, zero CPU |
 | Encoder L | Phase B | 4 | **3** | QuadEncoder ch1 B | |
@@ -115,13 +152,20 @@ UART pins free for the feature roadmap (CRSF, LIDAR), and (c) avoid the SPI bus 
 channels** exist. XBAR-exclusive groups (can't use two from the same group): {0,5,37} and
 {1,36}. Our choice (2,3,4,5) touches only pin 5 from any group → safe.
 
-**PWM-capable pins (T4.1):** 0-15, 18, 19, 22-25, 28, 29, 33, 36, 37, 42-47, 51, 54. Set
-`analogWriteFrequency(6, 20000)` and `analogWriteFrequency(22, 20000)` (each covers its
-submodule partner) to move motor whine out of the audible/vibration band.
+**PWM-capable pins (T4.1):** 0-15, 18, 19, 22-25, 28, 29, 33, 36, 37, 42-47, 51, 54.
+
+> ⚠️ **Superseded.** This section used to say "set `analogWriteFrequency(6, 20000)` and
+> `analogWriteFrequency(22, 20000)` to move motor whine out of the audible band." **Do not.**
+> That change is what broke forward drive — see §2.2. Two errors in the old advice:
+> 1. **20 kHz is far too fast for the BTS7960** — it quadruples the minimum usable PWM count.
+> 2. **Pin 23 is FlexPWM4.1, not 4.0**, so setting pin 22 does *not* cover it. Set the frequency
+>    on **all four** motor pins explicitly (which `balance_v2` now does) so nothing is inherited.
+>
+> Keep **4482 Hz** (the Teensy default). Quiet motors are not worth losing the low-PWM band.
 
 **Code changes (the whole pin remap is just `#define`s + two constructors):**
 ```c
-// Motors (each pair -> 74HCT244 buffer -> IBT-2 RPWM/LPWM)
+// Motors: Teensy pin -> IBT-2 RPWM/LPWM directly (3.3 V is in spec, no buffer)
 #define LEFT_MOTOR_FORWARD_PIN   6
 #define LEFT_MOTOR_REVERSE_PIN   9
 #define RIGHT_MOTOR_FORWARD_PIN  22
