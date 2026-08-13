@@ -178,7 +178,7 @@ const float DRIVE_KP = 6.0f;
 // Motor vibration makes the rate term dominate near a commanded drive angle.
 // Reduce it smoothly only there; a larger tracking error restores the known-good
 // neutral Kd so push recovery and fall catching keep their original damping.
-const float DRIVE_KD = 0.10f;
+const float DRIVE_KD = 0.03f;
 const float DRIVE_KD_RESTORE_START_ERROR = 1.5f;
 const float DRIVE_KD_RESTORE_FULL_ERROR  = 3.0f;
 
