@@ -379,7 +379,6 @@ const float         LAUNCH_ABORT_ERROR_DEG   = 2.5f;  // immediately return auth
 const float         LAUNCH_ABORT_RATE_DPS    = 40.0f;
 const float         LAUNCH_RELEASE_VEL       = 0.12f; // rev/s toward command means breakaway succeeded
 const unsigned int  LAUNCH_RELEASE_TICKS     = 20;    // require 100 ms at 200 Hz; reject oscillation spikes
-const unsigned long LAUNCH_WAIT_MS           = 2000; // do not stay armed indefinitely
 const unsigned long LAUNCH_ASSIST_MS         = 200;  // bounded axle pulse, comparable to a hand nudge
 
 // While the wheels are still breaking away, fast pitch-rate transients can make
@@ -493,7 +492,6 @@ bool  driveCommandPrev = false;                // edge-detect a fresh non-zero d
 enum LaunchAssistState : uint8_t { LAUNCH_IDLE, LAUNCH_WAIT_LEAN, LAUNCH_PUSH };
 LaunchAssistState launchAssistState = LAUNCH_IDLE;
 int8_t launchAssistDirection = 0;              // +1 forward target, -1 reverse target
-unsigned long launchAssistArmedMs = 0;
 unsigned long launchAssistStartedMs = 0;
 unsigned int launchRollingTicks = 0;            // sustained commanded-direction motion confirmation
 unsigned long armedAtMs = 0;                   // millis() at the moment we armed
@@ -1032,7 +1030,6 @@ void loop() {
   if (driving && (!driveCommandPrev || driveDirection != launchAssistDirection)) {
     launchAssistState = LAUNCH_WAIT_LEAN;
     launchAssistDirection = driveDirection;
-    launchAssistArmedMs = millis();
     launchRollingTicks = 0;
     controlLog.launchEvent = '-';
   } else if (!driving) {
@@ -1200,15 +1197,14 @@ void loop() {
   float launchEffortSign = launchAssistDirection > 0 ? -1.0f : 1.0f;
   bool balanceCatchingTowardDrive = launchEffortSign * u > 0.0f;
   if (launchAssistState == LAUNCH_WAIT_LEAN) {
-    bool timedOut = (millis() - launchAssistArmedMs) >= LAUNCH_WAIT_MS;
     float actualLean = pitch - BALANCE_SETPOINT;
     bool leanReady = launchAssistDirection * actualLean >= LAUNCH_READY_LEAN_DEG;
     bool bodyReady = fabs(error) <= LAUNCH_READY_ERROR_DEG &&
                      fabs(dRateFilt) <= LAUNCH_READY_RATE_DPS;
-    if (timedOut) {
-      controlLog.launchEvent = 'T';
-      launchAssistState = LAUNCH_IDLE;
-    } else if (driveRollingConfirmed) {
+    // A held command may spend several seconds recovering from momentum in the
+    // opposite direction. Keep waiting safely; the lean/error/rate/direction
+    // gates below already prevent torque assist until balance has recovered.
+    if (driveRollingConfirmed) {
       controlLog.launchEvent = 'R';
       launchAssistState = LAUNCH_IDLE;
     } else if (!driving) {
