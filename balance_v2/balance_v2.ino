@@ -269,10 +269,11 @@ unsigned long sweepLastMs = 0;
 const int   MAX_PWM        = 110;   // ceiling, 0-255. Raised 80->110 for authority to recover large
                                     // backward falls. WATCH motor heat/current as you push this up.
 const float OUT_DEADZONE   = 0.5f;  // ignore PD outputs smaller than this (PWM units)
-// At a stalled drive target, do not magnify a tiny opposite-direction correction
-// into a full friction-floor reversal. Matching effort and every correction above
-// this threshold remain available, and the rule retires once the wheels roll.
-const float DRIVE_OPPOSING_EFFORT_DEADZONE = 3.0f;
+// At a stalled drive target, do not magnify a small opposite-direction correction
+// into a full friction-floor reversal. DRIVE_KP=6 turns one safe degree of tracking
+// error into about 6 effort, so this threshold must cover that normal recovery
+// pulse. The separate error gate still restores every correction beyond 1.25 deg.
+const float DRIVE_OPPOSING_EFFORT_DEADZONE = 7.0f;
 const float DRIVE_STALL_BIAS_EFFORT = 3.0f; // maps to ~18/30 PWM at the measured static floors
 
 // ---- Per-side stiction compensation ----------------------------------------
