@@ -150,22 +150,14 @@ unsigned long sweepLastMs = 0;
 // ---- Output mapping --------------------------------------------------------
 const int   MAX_PWM        = 110;   // ceiling, 0-255. Raised 80->110 for authority to recover large
                                     // backward falls. WATCH motor heat/current as you push this up.
-const int   MOTOR_DEADBAND = 11;    // feed-forward kick past stiction (free-spin floor ~11 L / ~13 R).
-                                    // Dropped 14->11: the larger kick made a ~28-PWM jump through zero
-                                    // that fed a sustained limit cycle. 11 softens that bang-bang while
-                                    // still moving the wheels (Kp adds on top for real corrections).
-                                    // Raise if small corrections stall; lower if it still bang-bangs.
 const float OUT_DEADZONE   = 0.5f;  // ignore PD outputs smaller than this (PWM units)
 
 // ---- Per-side stiction kick -------------------------------------------------
-// Forward-drive logs show the balance loop now asks for the correct lean, but
-// the resulting U=1..3 only produced PWM in the teens with the old 15/11 floor.
-// Full turn works because TURN_AUTHORITY 25 plus the old floor gives ~40/36 PWM.
-// Use that observed breakaway range as the minimum whenever the PID asks a wheel
-// to move. This is deadband compensation, not drive feedforward: PID still owns
-// the sign and timing.
-const int   LEFT_DEADBAND  = 35;    // pins 6/9
-const int   RIGHT_DEADBAND = 35;    // pins 22/23
+// Compensate only for the measured per-wheel dead zone. A larger permanent floor
+// turns small PID sign changes into full-power reversals and creates a limit cycle.
+// Any extra loaded breakaway authority must be a short pulse, not a steady floor.
+const int   LEFT_DEADBAND  = 15;    // pins 6/9 (stiffer wheel)
+const int   RIGHT_DEADBAND = 11;    // pins 22/23
 
 // ---- RC drive (radio -> motion) --------------------------------------------
 const float TURN_AUTHORITY = 25.0f; // PWM-effort differential at full turn stick
