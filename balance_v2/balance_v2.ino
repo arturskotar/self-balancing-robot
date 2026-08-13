@@ -273,7 +273,7 @@ const float OUT_DEADZONE   = 0.5f;  // ignore PD outputs smaller than this (PWM 
 // into a full friction-floor reversal. Matching effort and every correction above
 // this threshold remain available, and the rule retires once the wheels roll.
 const float DRIVE_OPPOSING_EFFORT_DEADZONE = 3.0f;
-const float DRIVE_STALL_BIAS_EFFORT = 1.0f; // maps to ~16/28 PWM at the measured static floors
+const float DRIVE_STALL_BIAS_EFFORT = 3.0f; // maps to ~18/30 PWM at the measured static floors
 
 // ---- Per-side stiction compensation ----------------------------------------
 // Every non-zero PID effort gets a static floor so the wheel actually moves.
