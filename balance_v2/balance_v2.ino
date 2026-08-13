@@ -75,16 +75,15 @@ const int MOTOR_PWM_BITS = 8;    // analogWrite range is explicitly 0..255 on ev
 #define RIGHT_ENC_B  5   // dir (yellow)
 
 // Per-side count direction. The right motor/encoder is mirror-mounted, so its
-// raw counts run opposite the left. RE-VALIDATED from the autonomous 2026-08-13
-// drive log: the inner loop's known forward catch (negative PWM) produced
-// negative counts with -1/+1. The earlier hand-tilt test could not establish
-// wheel polarity because the operator was also moving the chassis. Flip both so:
-//   >>> FORWARD ROLL = POSITIVE COUNTS on both wheels. <<<
+// raw counts run opposite the left. VALIDATED with the motors unpowered on
+// 2026-08-13: manually pushing the complete chassis physically forward produced
+// negative counts on both wheels with +1/-1. Flip both so:
+//   >>> PHYSICAL FORWARD ROLL = POSITIVE COUNTS on both wheels. <<<
 // Everything downstream (positionRev, forwardVel, targetVel, posSetpoint) now
 // uses "+ = forward" and the control law reads as written. If a wheel counts the
 // wrong way after a re-mount/rewire, flip that side here and NOWHERE else.
-#define ENC_LEFT_DIR   (+1)
-#define ENC_RIGHT_DIR  (-1)
+#define ENC_LEFT_DIR   (-1)
+#define ENC_RIGHT_DIR  (+1)
 
 // Encoder geometry (for when we convert ticks -> wheel velocity):
 //   13 PPR base (26-pole magnet ring) * 42:1 gearbox = 546 rising edges of A
