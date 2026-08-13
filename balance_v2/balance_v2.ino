@@ -24,11 +24,12 @@ MPU9250 imu;
 
 // ---- Motor driver pins (IBT-2 H-Bridge) ------------------------------------
 // Teensy 4.1 map (see MIGRATION_TEENSY.md §3.1): LEFT = 6/9 (FlexPWM2.2 A/B),
-// RIGHT = 22/23 (FlexPWM4.0 A/B). Each pair shares one FlexPWM submodule.
+// RIGHT = 22/23 (FlexPWM4.0 / FlexPWM4.1). Configure all four pins explicitly.
 #define LEFT_MOTOR_FORWARD_PIN   6
 #define LEFT_MOTOR_REVERSE_PIN   9
 #define RIGHT_MOTOR_FORWARD_PIN  22
 #define RIGHT_MOTOR_REVERSE_PIN  23
+const int MOTOR_PWM_HZ = 20000;  // IBT-2/BTS7960 supports PWM up to 25 kHz
 
 // ---- Encoder pins (Waveshare DCGM-3865, connector silkscreen "M V A B G M")-
 // Teensy 4.1 map (see MIGRATION_TEENSY.md §3.1). Per motor: A = Hall A (green),
@@ -257,6 +258,10 @@ void setup() {
   pinMode(LEFT_MOTOR_REVERSE_PIN, OUTPUT);
   pinMode(RIGHT_MOTOR_FORWARD_PIN, OUTPUT);
   pinMode(RIGHT_MOTOR_REVERSE_PIN, OUTPUT);
+  analogWriteFrequency(LEFT_MOTOR_FORWARD_PIN, MOTOR_PWM_HZ);
+  analogWriteFrequency(LEFT_MOTOR_REVERSE_PIN, MOTOR_PWM_HZ);
+  analogWriteFrequency(RIGHT_MOTOR_FORWARD_PIN, MOTOR_PWM_HZ);
+  analogWriteFrequency(RIGHT_MOTOR_REVERSE_PIN, MOTOR_PWM_HZ);
   motorRaw(0);
 
   // Encoders: inputs + interrupt on each A channel (Hall outputs are push-pull,
