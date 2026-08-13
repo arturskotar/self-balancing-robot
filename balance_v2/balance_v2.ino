@@ -388,6 +388,7 @@ const unsigned int  LAUNCH_ASSIST_TICKS      = 40;    // 200 ms at 200 Hz, count
 // authority immediately outside the existing launch error/rate gates.
 const float DRIVE_VELOCITY_EFFORT_GAIN  = 10.0f; // rev/s error -> PWM effort
 const float DRIVE_VELOCITY_EFFORT_LIMIT = 8.0f;  // below the tested launch floor
+const float DRIVE_VELOCITY_HOLD_LEAN_DEG = 0.75f; // hysteresis after the strict 1.5 deg engagement
 
 // While the wheels are still breaking away, fast pitch-rate transients can make
 // D overwhelm P and reverse the axle before it establishes motion. Limit only
@@ -497,6 +498,7 @@ bool  fallen = false;                          // true while the fall latch has 
 bool  wheelMovingL = false, wheelMovingR = false;  // wheel turned within WHEEL_STILL_TICKS
 bool  armedPrev = false;                       // edge-detect the arm transition (soft start)
 bool  driveCommandPrev = false;                // edge-detect a fresh non-zero drive-stick command
+bool  driveVelocityEffortLatched = false;      // strict engage, wider safety limits while active
 enum LaunchAssistState : uint8_t { LAUNCH_IDLE, LAUNCH_WAIT_LEAN, LAUNCH_PUSH };
 LaunchAssistState launchAssistState = LAUNCH_IDLE;
 int8_t launchAssistDirection = 0;              // +1 forward target, -1 reverse target
@@ -979,6 +981,7 @@ void loop() {
     satTicks     = 0;
     armedPrev    = false;        // next armed tick re-triggers the soft start
     driveCommandPrev = false;
+    driveVelocityEffortLatched = false;
     launchAssistState = LAUNCH_IDLE;
     launchAssistDirection = 0;
     launchAssistTicksRemaining = 0;
@@ -996,6 +999,7 @@ void loop() {
     leanCmd     = 0.0f;
     satTicks    = 0;
     driveCommandPrev = false;
+    driveVelocityEffortLatched = false;
     launchAssistState = LAUNCH_IDLE;
     launchAssistDirection = 0;
     launchAssistTicksRemaining = 0;
@@ -1046,6 +1050,7 @@ void loop() {
     // leave the parked target behind the robot, making position hold oppose the
     // requested direction until the velocity setpoint catches up.
     posSetpoint = positionRev;
+    driveVelocityEffortLatched = false;
     launchAssistState = LAUNCH_WAIT_LEAN;
     launchAssistDirection = driveDirection;
     launchAssistTicksRemaining = LAUNCH_ASSIST_TICKS;
@@ -1053,6 +1058,7 @@ void loop() {
     controlLog.launchEvent = '-';
   } else if (!driving) {
     if (driveCommandPrev) posSetpoint = positionRev;
+    driveVelocityEffortLatched = false;
     launchAssistState = LAUNCH_IDLE;
     launchAssistDirection = 0;
     launchAssistTicksRemaining = 0;
@@ -1088,6 +1094,7 @@ void loop() {
     integral = 0.0f;
     leanCmd = 0.0f;                          // drop any stale lean from before the fall
     satTicks = 0;
+    driveVelocityEffortLatched = false;
     launchAssistState = LAUNCH_IDLE;
     launchAssistDirection = 0;
     launchAssistTicksRemaining = 0;
@@ -1228,6 +1235,13 @@ void loop() {
                                   driveDirection * actualLean >= LAUNCH_READY_LEAN_DEG &&
                                   fabs(error) <= LAUNCH_READY_ERROR_DEG &&
                                   fabs(dRateFilt) <= LAUNCH_READY_RATE_DPS;
+  bool driveVelocityEffortSafeToHold = driving &&
+                                       velocityNeedsDrive &&
+                                       driveDirection * actualLean >= DRIVE_VELOCITY_HOLD_LEAN_DEG &&
+                                       fabs(error) <= LAUNCH_ABORT_ERROR_DEG &&
+                                       fabs(dRateFilt) <= LAUNCH_ABORT_RATE_DPS;
+  if (!driveVelocityEffortSafeToHold) driveVelocityEffortLatched = false;
+  else if (driveVelocityEffortReady)   driveVelocityEffortLatched = true;
   if (launchAssistState == LAUNCH_WAIT_LEAN) {
     bool leanReady = launchAssistDirection * actualLean >= LAUNCH_READY_LEAN_DEG;
     bool bodyReady = fabs(error) <= LAUNCH_READY_ERROR_DEG &&
@@ -1287,7 +1301,7 @@ void loop() {
   // Do not stack this with the stronger breakaway pulse. Once that pulse is
   // inactive, velocity error supplies a bounded average torque instead of
   // disappearing when the angle PD reaches zero tracking error.
-  if (launchAssistState != LAUNCH_PUSH && driveVelocityEffortReady) {
+  if (launchAssistState != LAUNCH_PUSH && driveVelocityEffortLatched) {
     controlLog.driveVelocityEffort = constrain(-DRIVE_VELOCITY_EFFORT_GAIN * velError,
                                                 -DRIVE_VELOCITY_EFFORT_LIMIT,
                                                  DRIVE_VELOCITY_EFFORT_LIMIT);
