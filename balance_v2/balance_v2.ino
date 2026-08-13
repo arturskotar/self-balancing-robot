@@ -100,12 +100,25 @@ const long ENC_COUNTS_PER_REV = 546;
 #define ENCODER_TEST 0
 
 // ---- Motor deadband test ---------------------------------------------------
-// Set to 1 to MEASURE the stiction PWM (the lowest PWM that actually turns each
-// loaded wheel). Put the robot on a stand so the wheels spin free, flash, and
-// watch the monitor: it ramps PWM up and reports "first-move L@<pwm> R@<pwm>".
-// The test reports each wheel separately -- set LEFT_DEADBAND from "first-move L@"
-// and RIGHT_DEADBAND from "R@". They are expected to DIFFER (right runs stiffer on
-// this chassis); don't average them. Then set this back to 0.
+// Measures the lowest PWM that actually turns each wheel, ramping 1 count every
+// 200 ms and reporting "first-move L@<pwm> R@<pwm>".
+//
+// >>> RUN IT LOADED. WHEELS ON THE FLOOR, ROBOT UPRIGHT, BEARING ITS OWN WEIGHT.
+// >>> Steady it by hand at the TOP so it cannot tip, but let the wheels roll.
+//
+// The old instruction here said "wheels off the ground", which measures the
+// FREE-SPIN floor (~11 L / 13 R on this chassis). That is the wrong number and it
+// has been wrong all along: through the 42:1 gearbox, breakaway under the robot's
+// own weight is 2-3x higher. The 2026-08-13 drive log brackets it -- PWM 15/17
+// produced ZERO encoder counts for seconds, while 34/39 (during a turn) rolled
+// the wheels freely. So the loaded value is somewhere in 17..34.
+//
+// This matters because the balance loop lives in exactly that band: once the
+// inner loop reaches its commanded lean, ERR ~ 0.7 deg -> u ~ -1.4 -> PWM ~ 12/14,
+// which is BELOW breakaway. The robot then leans and sticks instead of rolling.
+//
+// Set LEFT_DEADBAND / RIGHT_DEADBAND from each wheel's own first-move value; they
+// are expected to DIFFER (right runs stiffer here). Then set this back to 0.
 #define DEADBAND_TEST 0
 
 // ---- IMU sign/axis test ----------------------------------------------------
@@ -254,6 +267,17 @@ const float OUT_DEADZONE   = 0.5f;  // ignore PD outputs smaller than this (PWM 
 // Symptom if this is wrong: it VEERS while creeping but tracks straight at speed.
 // NOTE this is the opposite side from the comment in rc_drive.ino, which claims
 // the pins-6/9 (left) motor is stiffer. The measurement wins; rc_drive is stale.
+// ⚠️ THESE ARE FREE-SPIN VALUES AND ARE ALMOST CERTAINLY TOO LOW.
+// The 2026-08-13 drive log proves it: at PWM 15/17 the wheels produced ZERO
+// encoder counts for seconds while bearing the robot's weight, but at 34/39
+// (turn) they rolled freely. Loaded breakaway is somewhere in 17..34, not 11/13.
+// Re-measure with DEADBAND_TEST run LOADED (see its comment) and set them here.
+// EXPECT A TRADE-OFF: a higher floor means every small correction jumps straight
+// to that PWM, which historically fed a limit cycle ("the larger kick made a
+// ~28-PWM jump through zero"). If balancing degrades after raising these, the
+// principled fix is a velocity-dependent floor -- static breakaway only while the
+// wheel is stopped, a lower Coulomb value once it is already turning -- rather
+// than one static number serving both jobs.
 const int LEFT_DEADBAND  = 11;
 const int RIGHT_DEADBAND = 13;
 // Worst-case floor, used for the saturation-latch effort ceiling so the latch
