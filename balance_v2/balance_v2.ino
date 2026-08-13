@@ -121,7 +121,7 @@ const long ENC_COUNTS_PER_REV = 546;
 // RIGHT_DEADBAND_STATIC from each wheel's own first-move value. It does NOT
 // measure the *_MOVING floors -- those are the free-spin figures, taken with the
 // wheels off the ground. Then set this back to 0.
-#define DEADBAND_TEST 1
+#define DEADBAND_TEST 0
 
 // ---- IMU sign/axis test ----------------------------------------------------
 // Set to 1 to verify the gyro vs accelerometer convention (motors OFF). Hold the
@@ -516,9 +516,26 @@ void setup() {
   // offsets the complementary filter AND the D term, keeping the motors energized at the stiction
   // floor (buzz). Filtering at the sensor kills the vibration band before it can rectify. 20 Hz is
   // far above the balance dynamics (<5 Hz) so it adds negligible phase lag. Go DLPF_10HZ if needed.
+  // 20 Hz -> 10 Hz (2026-08-13). The 20 Hz corner sat directly ON the chassis
+  // resonance the motor kicks excite, so it passed straight through into the D
+  // term. Reconciling the drive-oscillation log: RATE/DFILT swung +/-35..45 deg/s
+  // and AP swung -15.5..+8.8 while the FILTERED pitch moved only +/-1 deg -- that
+  // is a real but tiny (~0.3 deg) oscillation at roughly 20 Hz, not body motion.
+  // It made |D| reach 11.3 against a P term of 0.4..3.2, i.e. 3x to 25x, so the
+  // output was essentially pure derivative and reversed sign every sample. The
+  // wheels then never got a sustained push in one direction and could not roll
+  // even at PWM 40, well past their measured 27 breakaway.
+  // COST: DLPF_10HZ adds ~14 ms of group delay vs ~9 ms at 20 Hz. At the balance
+  // bandwidth (~1-2 Hz) that is a few degrees of phase, which this plant should
+  // tolerate -- but it IS the lag-sensitive direction that made Kd 0.5->1.0 and
+  // D_LPF 0.60->0.80 regressions before. If balance degrades, this is the change
+  // to back out first, and the honest fix is the IMU soft-mount instead.
+  // Accel 21 -> 10 Hz too: it feeds the complementary filter at only 1% weight,
+  // but the fall-latch re-arm reads aPitch DIRECTLY, and +/-15 deg of vibration
+  // noise on that is enough to re-arm the motors spuriously.
   MPU9250Setting imuSetting;
-  imuSetting.gyro_dlpf_cfg  = GYRO_DLPF_CFG::DLPF_20HZ;
-  imuSetting.accel_dlpf_cfg = ACCEL_DLPF_CFG::DLPF_21HZ;
+  imuSetting.gyro_dlpf_cfg  = GYRO_DLPF_CFG::DLPF_10HZ;
+  imuSetting.accel_dlpf_cfg = ACCEL_DLPF_CFG::DLPF_10HZ;
   if (!imu.setup(0x68, imuSetting)) {
     Serial.println("ERROR: IMU init failed");
     while (1) { motorRaw(0); delay(1000); }
