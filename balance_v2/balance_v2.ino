@@ -121,7 +121,7 @@ const long ENC_COUNTS_PER_REV = 546;
 // RIGHT_DEADBAND_STATIC from each wheel's own first-move value. It does NOT
 // measure the *_MOVING floors -- those are the free-spin figures, taken with the
 // wheels off the ground. Then set this back to 0.
-#define DEADBAND_TEST 0
+#define DEADBAND_TEST 1
 
 // ---- IMU sign/axis test ----------------------------------------------------
 // Set to 1 to verify the gyro vs accelerometer convention (motors OFF). Hold the
@@ -294,15 +294,34 @@ const float OUT_DEADZONE   = 0.5f;  // ignore PD outputs smaller than this (PWM 
 // low floor (the wheels are nearly always dithering while balancing) and spends
 // the big kick only where it is actually needed -- breaking a stopped wheel free.
 //
-// ASYMMETRY IS UNRESOLVED. The 2026-08-13 log shows the LEFT wheel frozen at
-// PWM 19 while the right spun at 17..21, i.e. the OPPOSITE of the earlier
-// inference that the right side was stiffer. Both sides stick somewhere in
-// 15..19. The static values are therefore equal until a proper loaded
-// DEADBAND_TEST separates them; the per-side structure is kept so they can.
+// ASYMMETRY RESOLVED by a loaded DEADBAND_TEST, 2026-08-13. The right wheel
+// needs nearly DOUBLE the left to break away:
+//     PWM 14 -> dL -1   dR -1
+//     PWM 15 -> dL -6   dR -1     <- LEFT breaks free, then accelerates cleanly
+//     PWM 20 -> dL -39  dR -3
+//     PWM 26 -> dL -95  dR -4     <- right still dead
+//     PWM 27 -> dL -119 dR -8     <- RIGHT finally breaks free
+// The previous equal floors of 18/18 straddled that gap: the left was above its
+// threshold and the right below its own. That single fact explains the whole
+// drive history -- commands of 13..15 moved nothing, the stick-slip oscillation
+// was the LEFT wheel intermittently breaking free near 15..18 while the right
+// stayed locked, and turning worked only because the differential pushes one
+// side past 27.
+//
+// ⚠️ 15 vs 27 is NOT normal unit-to-unit variation -- suspect a MECHANICAL fault
+// on the right drivetrain (over-tight hub, rubbing tire, misaligned motor mount
+// side-loading the shaft, or the gearbox itself). These values compensate for it,
+// they do not fix it, and the cost of compensating is that every correction hands
+// the right wheel 12 more PWM than the left. If a mechanical fix brings the right
+// side back near 15, re-run this test and lower it.
+//
+// CAVEAT: DEADBAND_TEST ramps positive PWM only, so these are one-direction
+// figures. Breakaway can differ by direction (backlash, gearbox preload), and the
+// turn logs hint that it does. Worth measuring both ways eventually.
 const int LEFT_DEADBAND_MOVING  = 11;
 const int RIGHT_DEADBAND_MOVING = 13;
-const int LEFT_DEADBAND_STATIC  = 18;
-const int RIGHT_DEADBAND_STATIC = 18;
+const int LEFT_DEADBAND_STATIC  = 15;
+const int RIGHT_DEADBAND_STATIC = 27;
 // A wheel counts as "moving" only if it makes NET progress: at least
 // WHEEL_MOVE_COUNTS ticks in one direction across a WHEEL_WINDOW_TICKS window.
 // NOT "any tick recently" -- that was the first attempt and it was wrong. Under
