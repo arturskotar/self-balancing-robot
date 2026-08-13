@@ -259,6 +259,7 @@ float forwardVel = 0.0f;                      // chassis rev/s = mean of the two
 float rotationVel = 0.0f;                     // differential wheel speed; yaw/rotation proxy
 float positionRev = 0.0f;                     // avg wheel position, revs from home
 float driveLeanLog = 0.0f;                    // latest drive-requested lean angle
+float turnCmdLog = 0.0f;                      // post-deadzone differential effort
 int   motorPwmL = 0, motorPwmR = 0;           // signed PWM actually sent to each IBT-2
 long  homeTicksSum = 0;                        // (leftTicks+rightTicks) defining "home" (0 = boot spot)
 bool  stalled = false;                         // true while the stall cutoff has the motors off
@@ -659,6 +660,7 @@ void loop() {
     dTermLog = 0.0f;
     leanCmd  = 0.0f;
     driveLeanLog = 0.0f;
+    turnCmdLog = 0.0f;
     long hl, hr; readEncoders(hl, hr);
     homeTicksSum = hl + hr;
     telemetry(pitch - BALANCE_SETPOINT, gyroRate, 0);
@@ -680,6 +682,7 @@ void loop() {
   float driveLean = -DRIVE_SIGN * driveIn * cap * driveMaxLean;       // deg; DRV -1 -> positive forward lean
   float turnCmd   = TURN_SIGN  * turnIn  * cap * TURN_AUTHORITY;      // per-wheel PWM-effort diff
   driveLeanLog = driveLean;
+  turnCmdLog = turnCmd;
 
   // While driving, RELEASE the position hold: re-home under the robot so the
   // station-keeping term (Kpos*positionRev) can't fight the pilot. positionRev
@@ -784,6 +787,7 @@ void telemetry(float error, float rate, float u) {
   Serial.print(" VF ");   Serial.print(forwardVel, 2);    // chassis forward rev/s (mean)
   Serial.print(" VROT "); Serial.print(rotationVel, 2);    // differential rev/s (yaw proxy)
   Serial.print(" DLEAN "); Serial.print(driveLeanLog, 2);  // drive-stick requested lean angle
+  Serial.print(" TCMD "); Serial.print(turnCmdLog, 2);     // post-deadzone turn effort
   Serial.print(" LEAN "); Serial.print(leanCmd, 2);       // cascade outer-loop lean command (deg)
   Serial.print(" POS ");  Serial.print(positionRev, 2);   // avg wheel position, revs from home
   Serial.print(" | ARM "); Serial.print(crsf::armed() ? "Y" : "-");  // radio kill-switch state
