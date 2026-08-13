@@ -374,6 +374,7 @@ const float         LAUNCH_READY_RATE_DPS    = 10.0f; // do not launch in the fa
 const float         LAUNCH_ABORT_ERROR_DEG   = 2.5f;  // immediately return authority to balance
 const float         LAUNCH_ABORT_RATE_DPS    = 40.0f;
 const float         LAUNCH_RELEASE_VEL       = 0.12f; // rev/s toward command means breakaway succeeded
+const unsigned int  LAUNCH_RELEASE_TICKS     = 20;    // require 100 ms at 200 Hz; reject oscillation spikes
 const unsigned long LAUNCH_WAIT_MS           = 2000; // do not stay armed indefinitely
 const unsigned long LAUNCH_ASSIST_MS         = 200;  // bounded axle pulse, comparable to a hand nudge
 
@@ -398,6 +399,7 @@ const unsigned long SAT_TIMEOUT_TICKS = 100;   // 0.5 s at 200 Hz
 // COAST (motors fully off) when essentially balanced; it only kicks when it
 // drifts past 1 deg. Trade-off: a slow ~+/-1 deg rock instead of a constant
 // buzz. Raise toward 1.5 if it still buzzes; lower if the rock gets lurchy.
+// This setting has no effect in STATE DRIVE, where coasting is disabled.
 const float ANGLE_DEADZONE = 1.0f;  // deg : |error| below this (and wheels stopped) -> coast
 const float RATE_DEADZONE  = 5.0f;  // deg/s : NO LONGER gates the coast (gyro vibration would keep it
                                     // from ever engaging). Kept for reference / future use.
@@ -483,6 +485,7 @@ LaunchAssistState launchAssistState = LAUNCH_IDLE;
 int8_t launchAssistDirection = 0;              // +1 forward target, -1 reverse target
 unsigned long launchAssistArmedMs = 0;
 unsigned long launchAssistStartedMs = 0;
+unsigned int launchRollingTicks = 0;            // sustained commanded-direction motion confirmation
 unsigned long armedAtMs = 0;                   // millis() at the moment we armed
 unsigned long satTicks = 0;                    // consecutive ticks with the inner loop pinned
 
@@ -953,6 +956,7 @@ void loop() {
     driveCommandPrev = false;
     launchAssistState = LAUNCH_IDLE;
     launchAssistDirection = 0;
+    launchRollingTicks = 0;
     telemetry(pitch - BALANCE_SETPOINT, gyroRate, 0);
     return;
   }
@@ -968,6 +972,7 @@ void loop() {
     driveCommandPrev = false;
     launchAssistState = LAUNCH_IDLE;
     launchAssistDirection = 0;
+    launchRollingTicks = 0;
   }
   float softStart = constrain((millis() - armedAtMs) / (SOFT_START_SEC * 1000.0f), 0.0f, 1.0f);
   controlLog.softStart = softStart;
@@ -1003,7 +1008,9 @@ void loop() {
   // core bug -- with Kpos and Kvel both zeroed, nothing closed the loop on
   // translation and drive was open-loop acceleration. Driving now moves the
   // TARGET (posSetpoint) and the loop keeps chasing it, exactly as rc_balance
-  // does. Releasing the stick simply freezes the target -> it holds position.
+  // does. On release, re-anchor the target at the measured position. Otherwise
+  // a failed drive leaves PERR pinned at POS_ERROR_CLAMP and keeps commanding a
+  // lean after the pilot lets go instead of returning to neutral balance.
   bool driving = fabs(targetVel) > 0.001f;
   controlLog.driving = driving;
   int8_t driveDirection = targetVel > 0.0f ? +1 : -1;
@@ -1011,9 +1018,12 @@ void loop() {
     launchAssistState = LAUNCH_WAIT_LEAN;
     launchAssistDirection = driveDirection;
     launchAssistArmedMs = millis();
+    launchRollingTicks = 0;
   } else if (!driving) {
+    if (driveCommandPrev) posSetpoint = positionRev;
     launchAssistState = LAUNCH_IDLE;
     launchAssistDirection = 0;
+    launchRollingTicks = 0;
   }
   driveCommandPrev = driving;
 
@@ -1037,6 +1047,7 @@ void loop() {
     satTicks = 0;
     launchAssistState = LAUNCH_IDLE;
     launchAssistDirection = 0;
+    launchRollingTicks = 0;
     armedAtMs = millis();                    // soft-start the recovery too
   }
   if (fallen) {
@@ -1149,13 +1160,18 @@ void loop() {
   // is preserved. A large error/rate aborts instead of fighting recovery.
   controlLog.launchBoost = 0.0f;
   float launchVel = launchAssistDirection > 0 ? forwardVel : -forwardVel;
+  if (launchAssistState != LAUNCH_IDLE && launchVel >= LAUNCH_RELEASE_VEL) {
+    if (launchRollingTicks < LAUNCH_RELEASE_TICKS) launchRollingTicks++;
+  } else {
+    launchRollingTicks = 0;
+  }
+  bool launchRolling = launchRollingTicks >= LAUNCH_RELEASE_TICKS;
   if (launchAssistState == LAUNCH_WAIT_LEAN) {
     bool timedOut = (millis() - launchAssistArmedMs) >= LAUNCH_WAIT_MS;
-    bool rolling = launchVel >= LAUNCH_RELEASE_VEL;
     bool leanReady = launchAssistDirection * leanCmd >= LAUNCH_READY_LEAN_DEG;
     bool bodyReady = fabs(error) <= LAUNCH_READY_ERROR_DEG &&
                      fabs(dRateFilt) <= LAUNCH_READY_RATE_DPS;
-    if (timedOut || rolling || !driving) {
+    if (timedOut || launchRolling || !driving) {
       launchAssistState = LAUNCH_IDLE;
     } else if (softStart >= 0.99f && leanReady && bodyReady) {
       launchAssistState = LAUNCH_PUSH;
@@ -1164,10 +1180,9 @@ void loop() {
   }
   if (launchAssistState == LAUNCH_PUSH) {
     bool timedOut = (millis() - launchAssistStartedMs) >= LAUNCH_ASSIST_MS;
-    bool rolling = launchVel >= LAUNCH_RELEASE_VEL;
     bool unsafe = fabs(error) > LAUNCH_ABORT_ERROR_DEG ||
                   fabs(dRateFilt) > LAUNCH_ABORT_RATE_DPS;
-    if (timedOut || rolling || unsafe || !driving) {
+    if (timedOut || launchRolling || unsafe || !driving) {
       launchAssistState = LAUNCH_IDLE;
     } else {
       // Negative motor effort is physical forward on this chassis; encoder and
