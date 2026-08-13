@@ -68,7 +68,7 @@ const long ENC_COUNTS_PER_REV = 546;
 // Set to 1 to MEASURE the stiction PWM (the lowest PWM that actually turns each
 // loaded wheel). Put the robot on a stand so the wheels spin free, flash, and
 // watch the monitor: it ramps PWM up and reports "first-move L@<pwm> R@<pwm>".
-// Set MOTOR_DEADBAND to ~the larger of those two. Set back to 0 when done.
+// Set LEFT_DEADBAND/RIGHT_DEADBAND from their respective results, then disable.
 #define DEADBAND_TEST 0
 
 // ---- IMU sign/axis test ----------------------------------------------------
@@ -104,8 +104,8 @@ float BALANCE_SETPOINT = -3.22f;         // deg : measured after rigidly mountin
 // ---- PID gains -------------------------------------------------------------
 // Start as a PD controller (Ki = 0). Add a tiny Ki only after PD balances.
 float Kp = 2.00f;  // proportional  (deg -> PWM)  raised 0.85 -> 2.0: at low Kp a few-degree lean
-                   // produced a PWM below the wheels' stiction (see MOTOR_DEADBAND), so it never
-                   // caught itself. Re-tune AFTER setting MOTOR_DEADBAND from the deadband test.
+                   // produced a PWM below wheel stiction, so it never caught itself. Re-tune only
+                   // after measuring LEFT_DEADBAND and RIGHT_DEADBAND with the deadband test.
 float Kd = 0.3f;   // derivative    (deg/s    -> PWM)  RE-TUNED FROM SCRATCH 2026-06-30: old 3.5-4.5 was
                    // tuned vs a DEAD gyro. With the clean rate, RAISING Kd 0.5->1.0 made the ring WORSE,
                    // not better -> we're past peak damping into D-DESTABILIZATION: the 20 Hz on-chip
@@ -328,7 +328,7 @@ void setup() {
                  "(1 turn = ~546 counts = 1.00 rev).");
 #elif DEADBAND_TEST
   Serial.println("DEADBAND_TEST mode: wheels OFF THE GROUND. Ramping PWM; "
-                 "note 'first-move L@/R@' -> set MOTOR_DEADBAND to ~the larger.");
+                 "set LEFT_DEADBAND and RIGHT_DEADBAND from their own first-move values.");
 #elif IMU_TEST
   Serial.println("IMU_TEST mode: motors OFF. Hold + slowly tilt FORWARD then BACK. "
                  "aPitch & gX should rise together tilting forward (consistent sign).");
