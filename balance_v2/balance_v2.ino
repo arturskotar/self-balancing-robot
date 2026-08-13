@@ -159,6 +159,17 @@ const float OUT_DEADZONE   = 0.5f;  // ignore PD outputs smaller than this (PWM 
 // Any extra loaded breakaway authority must be a short pulse, not a steady floor.
 const int   LEFT_DEADBAND  = 15;    // pins 6/9 (stiffer wheel)
 const int   RIGHT_DEADBAND = 11;    // pins 22/23
+const int   BREAKAWAY_PWM  = 35;    // short loaded-wheel kick; never a steady minimum
+const unsigned long BREAKAWAY_TIME_US  = 70000;   // 70 ms kick
+const unsigned long BREAKAWAY_REARM_US = 120000;  // must be idle 120 ms before another kick
+
+struct BreakawayState {
+  bool active = false;
+  int kickSign = 0;
+  unsigned long idleSinceUs = 0;
+  unsigned long kickUntilUs = 0;
+};
+BreakawayState leftBreakaway, rightBreakaway;
 
 // ---- RC drive (radio -> motion) --------------------------------------------
 const float TURN_AUTHORITY = 25.0f; // PWM-effort differential at full turn stick
@@ -321,6 +332,13 @@ void motorRaw(int pwm) {
   pwm = constrain(pwm, -255, 255);
   motorPwmL = pwm;
   motorPwmR = pwm;
+  if (pwm == 0) {
+    unsigned long now = micros();
+    if (leftBreakaway.active) leftBreakaway.idleSinceUs = now;
+    if (rightBreakaway.active) rightBreakaway.idleSinceUs = now;
+    leftBreakaway.active = rightBreakaway.active = false;
+    leftBreakaway.kickUntilUs = rightBreakaway.kickUntilUs = 0;
+  }
   if (pwm > 0) {
     analogWrite(LEFT_MOTOR_FORWARD_PIN, pwm);  analogWrite(LEFT_MOTOR_REVERSE_PIN, 0);
     analogWrite(RIGHT_MOTOR_FORWARD_PIN, pwm); analogWrite(RIGHT_MOTOR_REVERSE_PIN, 0);
@@ -370,10 +388,34 @@ void motorPerWheel(int pwmL, int pwmR) {
 
 // Map per-wheel efforts (balance +/- turn) to PWM, each past its own stiction
 // dead band. Below OUT_DEADZONE a wheel is left at 0 (lets the coast band rest it).
+int mapEffortToPwm(float effort, int deadband, BreakawayState &state, unsigned long now) {
+  if (fabs(effort) <= OUT_DEADZONE) {
+    if (state.active) state.idleSinceUs = now;
+    state.active = false;
+    state.kickUntilUs = 0;
+    return 0;
+  }
+
+  int sign = effort > 0.0f ? 1 : -1;
+  if (!state.active) {
+    if (now - state.idleSinceUs >= BREAKAWAY_REARM_US) {
+      state.kickSign = sign;
+      state.kickUntilUs = now + BREAKAWAY_TIME_US;
+    }
+    state.active = true;
+  }
+
+  int pwm = (int)constrain(deadband + fabs(effort), 0.0f, (float)MAX_PWM);
+  bool kickActive = (long)(state.kickUntilUs - now) > 0;
+  if (kickActive && sign == state.kickSign) pwm = max(pwm, BREAKAWAY_PWM);
+  if (sign != state.kickSign) state.kickUntilUs = 0;
+  return sign * pwm;
+}
+
 void driveControlDiff(float uL, float uR) {
-  int pwmL = 0, pwmR = 0;
-  if (fabs(uL) > OUT_DEADZONE) { pwmL = (int)constrain(LEFT_DEADBAND  + fabs(uL), 0.0f, (float)MAX_PWM); if (uL < 0) pwmL = -pwmL; }
-  if (fabs(uR) > OUT_DEADZONE) { pwmR = (int)constrain(RIGHT_DEADBAND + fabs(uR), 0.0f, (float)MAX_PWM); if (uR < 0) pwmR = -pwmR; }
+  unsigned long now = micros();
+  int pwmL = mapEffortToPwm(uL, LEFT_DEADBAND, leftBreakaway, now);
+  int pwmR = mapEffortToPwm(uR, RIGHT_DEADBAND, rightBreakaway, now);
   motorPerWheel(pwmL, pwmR);
 }
 
