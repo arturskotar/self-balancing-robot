@@ -161,8 +161,8 @@ const float OUT_DEADZONE   = 0.5f;  // ignore PD outputs smaller than this (PWM 
 // Any extra loaded breakaway authority must be a short pulse, not a steady floor.
 const int   LEFT_DEADBAND  = 11;    // pins 6/9; keep sides equal until loaded response is measured
 const int   RIGHT_DEADBAND = 11;    // pins 22/23
-const int   BREAKAWAY_PWM  = 42;    // short loaded-wheel kick; never a steady minimum
-const unsigned long BREAKAWAY_TIME_US  = 120000;  // 120 ms kick
+const int   BREAKAWAY_PWM  = 35;    // short loaded-wheel kick; never a steady minimum
+const unsigned long BREAKAWAY_TIME_US  = 70000;   // 70 ms kick
 const unsigned long BREAKAWAY_REARM_US = 120000;  // must be idle 120 ms before another kick
 
 struct BreakawayState {
@@ -264,7 +264,6 @@ int   motorPwmL = 0, motorPwmR = 0;           // signed PWM actually sent to eac
 long  homeTicksSum = 0;                        // (leftTicks+rightTicks) defining "home" (0 = boot spot)
 bool  stalled = false;                         // true while the stall cutoff has the motors off
 bool  fallen = false;                          // true while the fall latch has the motors off
-int   lastDriveSign = 0;                       // re-arm breakaway when a new drive direction is requested
 
 // =============================================================================
 void setup() {
@@ -422,15 +421,6 @@ int mapEffortToPwm(float effort, int deadband, BreakawayState &state, unsigned l
   if (kickActive && sign == state.kickSign) pwm = max(pwm, BREAKAWAY_PWM);
   if (sign != state.kickSign) state.kickUntilUs = 0;
   return sign * pwm;
-}
-
-void armDriveBreakaway(unsigned long now) {
-  leftBreakaway.active = false;
-  rightBreakaway.active = false;
-  leftBreakaway.idleSinceUs = now - BREAKAWAY_REARM_US;
-  rightBreakaway.idleSinceUs = now - BREAKAWAY_REARM_US;
-  leftBreakaway.kickUntilUs = 0;
-  rightBreakaway.kickUntilUs = 0;
 }
 
 void driveControlDiff(float uL, float uR) {
@@ -671,7 +661,6 @@ void loop() {
     leanCmd  = 0.0f;
     driveLeanLog = 0.0f;
     turnCmdLog = 0.0f;
-    lastDriveSign = 0;
     long hl, hr; readEncoders(hl, hr);
     homeTicksSum = hl + hr;
     telemetry(pitch - BALANCE_SETPOINT, gyroRate, 0);
@@ -700,9 +689,6 @@ void loop() {
   // stays ~0, leaving the outer loop as pure drive-lean control below. On release
   // it holds wherever it stopped. (No moving-reference runaway.)
   bool driving = fabs(driveLean) > 0.01f;
-  int driveSign = (driveLean > 0.01f) - (driveLean < -0.01f);
-  if (driveSign != 0 && driveSign != lastDriveSign) armDriveBreakaway(micros());
-  lastDriveSign = driveSign;
   if (driving) {
     long dl, dr; readEncoders(dl, dr);
     homeTicksSum = dl + dr;
