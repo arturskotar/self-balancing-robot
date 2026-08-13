@@ -221,6 +221,8 @@ const float DRIVE_KD_RESTORE_FULL_ERROR  = 3.0f;
 
 float Kpos = 1.0f;               // wheel position error (rev -> deg of lean)
 float Kvel = 4.0f;               // neutral wheel-velocity damping; tune with SC=2 + S1
+const float KVEL_I = 0.8f;       // slow velocity-error memory (rev/s*s -> deg lean)
+const float VEL_I_CLAMP = 1.0f;  // deg; enough to break a stall, too small to run away
 // Keep drive velocity feedback at the neutral-loop gain. Doubling it drove
 // leanRaw into the +/-5 deg clamp for most held-stick samples, so encoder ripple
 // could only move the command away from saturation and was fed back asymmetrically.
@@ -473,6 +475,7 @@ float integral = 0.0f;
 float dRateFilt = 0.0f;   // low-pass-filtered gyro rate for the D term (angle est. uses the raw rate)
 float dTermLog = 0.0f;    // derivative contribution, for telemetry
 float leanCmd   = 0.0f;   // cascade outer-loop output: the desired lean (deg) added to BALANCE_SETPOINT
+float velocityLeanI = 0.0f;
 unsigned long lastControlMicros = 0;
 int controlHz = 0;   // measured control-loop frequency (should read ~200; if lower, we're falling behind)
 
@@ -517,7 +520,7 @@ struct ControlTelemetry {
   float pTerm = 0.0f, iTerm = 0.0f, dTermRaw = 0.0f;
   float effectiveKp = 0.0f, effectiveKd = 0.0f;
   float effortL = 0.0f, effortR = 0.0f;
-  float positionLean = 0.0f, velocityLean = 0.0f, leanRaw = 0.0f;
+  float positionLean = 0.0f, velocityLean = 0.0f, velocityLeanIntegral = 0.0f, leanRaw = 0.0f;
   float effectiveKvel = 0.0f;
   float speedInput = 0.0f, commandCap = 0.35f;
   float driveRaw = 0.0f, turnRaw = 0.0f;
@@ -958,6 +961,7 @@ void loop() {
     integral = 0.0f;
     dTermLog = 0.0f;
     leanCmd  = 0.0f;
+    velocityLeanI = 0.0f;
     turnCmdLog = 0.0f;
     controlLog.targetPitch = BALANCE_SETPOINT;
     controlLog.pTerm = controlLog.iTerm = 0.0f;
@@ -972,7 +976,7 @@ void loop() {
     controlLog.speedInput = crsf::speed();
     controlLog.commandCap = 0.35f + 0.65f * controlLog.speedInput;
     controlLog.driveCmd = controlLog.turnCmd = 0.0f;
-    controlLog.positionLean = controlLog.velocityLean = controlLog.leanRaw = 0.0f;
+    controlLog.positionLean = controlLog.velocityLean = controlLog.velocityLeanIntegral = controlLog.leanRaw = 0.0f;
     controlLog.effectiveKvel = Kvel;
     controlLog.posError = controlLog.velError = controlLog.softStart = 0.0f;
     controlLog.launchBoost = 0.0f;
@@ -1057,6 +1061,7 @@ void loop() {
     // leave the parked target behind the robot, making position hold oppose the
     // requested direction until the velocity setpoint catches up.
     posSetpoint = positionRev;
+    velocityLeanI = 0.0f;
     driveVelocityEffortLatched = false;
 #if DRIVE_LAUNCH_ASSIST
     // RC input ramps through small values on the way to full stick. Arm now and
@@ -1109,6 +1114,7 @@ void loop() {
     posSetpoint = 0.0f;                      // and park the outer-loop target on top of it
     integral = 0.0f;
     leanCmd = 0.0f;                          // drop any stale lean from before the fall
+    velocityLeanI = 0.0f;
     satTicks = 0;
     driveVelocityEffortLatched = false;
     launchAssistState = LAUNCH_IDLE;
@@ -1120,6 +1126,7 @@ void loop() {
   if (fallen) {
     integral = 0.0f;
     dTermLog = 0.0f;
+    velocityLeanI = 0.0f;
     controlLog.targetPitch = BALANCE_SETPOINT;
     controlLog.pTerm = controlLog.iTerm = 0.0f;
     controlLog.effectiveKp = Kp;
@@ -1127,7 +1134,7 @@ void loop() {
     controlLog.dTermRaw = 0.0f;
     controlLog.dTermLimited = false;
     controlLog.effortL = controlLog.effortR = 0.0f;
-    controlLog.positionLean = controlLog.velocityLean = controlLog.leanRaw = 0.0f;
+    controlLog.positionLean = controlLog.velocityLean = controlLog.velocityLeanIntegral = controlLog.leanRaw = 0.0f;
     controlLog.effectiveKvel = Kvel;
     controlLog.posError = controlLog.velError = 0.0f;
     controlLog.launchBoost = 0.0f;
@@ -1160,18 +1167,28 @@ void loop() {
   float effectiveKvel = Kvel * (driving ? DRIVE_KVEL_MULTIPLIER : 1.0f);
   float positionLean = Kpos * posError;
   float velocityLean = effectiveKvel * velError;
+  if (driving) {
+    velocityLeanI += KVEL_I * velError * DT;
+    velocityLeanI = constrain(velocityLeanI, -VEL_I_CLAMP, VEL_I_CLAMP);
+  } else {
+    velocityLeanI = 0.0f;
+  }
+  float velocityLeanIntegral = velocityLeanI;
 #else
   float effectiveKvel = 0.0f;
   float positionLean = 0.0f;   // DIAGNOSTIC: outer loop disabled -> pure baseline inner loop
   float velocityLean = 0.0f;
+  velocityLeanI = 0.0f;
+  float velocityLeanIntegral = 0.0f;
 #endif
-  float leanRaw = positionLean + velocityLean;
+  float leanRaw = positionLean + velocityLean + velocityLeanIntegral;
   leanRaw = constrain(leanRaw, -LEAN_CLAMP, LEAN_CLAMP);
   leanCmd = LEAN_LPF * leanCmd + (1.0f - LEAN_LPF) * leanRaw;
   controlLog.posError = posError;
   controlLog.velError = velError;
   controlLog.positionLean = positionLean;
   controlLog.velocityLean = velocityLean;
+  controlLog.velocityLeanIntegral = velocityLeanIntegral;
   controlLog.effectiveKvel = effectiveKvel;
   controlLog.leanRaw = leanRaw;
   controlLog.targetPitch = BALANCE_SETPOINT + leanCmd;
@@ -1303,7 +1320,8 @@ void loop() {
   }
   if (launchAssistState == LAUNCH_PUSH) {
     bool unsafeError = fabs(error) > LAUNCH_ABORT_ERROR_DEG;
-    bool unsafeLean = launchAssistDirection * actualLean < LAUNCH_ABORT_LEAN_DEG;
+    float launchAbortLean = min(LAUNCH_ABORT_LEAN_DEG, 0.50f * fabs(leanRaw));
+    bool unsafeLean = launchAssistDirection * actualLean < launchAbortLean;
     bool strongCommand = fabs(targetVel) >= LAUNCH_MIN_TARGET_VEL;
     if (driveRollingConfirmed) {
       controlLog.launchEvent = 'R';
@@ -1429,6 +1447,7 @@ void telemetry(float error, float rate, float u) {
   Serial.print(" | LEAN ACT "); Serial.print(pitch - BALANCE_SETPOINT, 2);
   Serial.print(" POS "); Serial.print(controlLog.positionLean, 2);
   Serial.print(" VEL "); Serial.print(controlLog.velocityLean, 2);
+  Serial.print(" VELI "); Serial.print(controlLog.velocityLeanIntegral, 2);
   Serial.print(" RAW "); Serial.print(controlLog.leanRaw, 2);
   Serial.print(" CMD "); Serial.print(leanCmd, 2);
 
