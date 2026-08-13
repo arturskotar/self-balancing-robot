@@ -1052,8 +1052,10 @@ void loop() {
     posSetpoint = positionRev;
     driveVelocityEffortLatched = false;
 #if DRIVE_LAUNCH_ASSIST
-    launchAssistState = fabs(targetVel) >= LAUNCH_MIN_TARGET_VEL
-                      ? LAUNCH_WAIT_LEAN : LAUNCH_DONE;
+    // RC input ramps through small values on the way to full stick. Arm now and
+    // let WAIT_LEAN hold until LAUNCH_MIN_TARGET_VEL is actually reached; marking
+    // a small first sample DONE would suppress the pulse for the whole gesture.
+    launchAssistState = LAUNCH_WAIT_LEAN;
 #else
     launchAssistState = LAUNCH_IDLE;
 #endif
@@ -1270,10 +1272,10 @@ void loop() {
     if (driveRollingConfirmed) {
       controlLog.launchEvent = 'R';
       launchAssistState = LAUNCH_DONE;
-    } else if (!driving || !strongCommand) {
+    } else if (!driving) {
       controlLog.launchEvent = 'N';
       launchAssistState = LAUNCH_DONE;
-    } else if (softStart >= 0.99f && leanReady && bodyReady && stopped) {
+    } else if (strongCommand && softStart >= 0.99f && leanReady && bodyReady && stopped) {
       controlLog.launchEvent = 'P';
       launchAssistState = LAUNCH_PUSH;
     }
