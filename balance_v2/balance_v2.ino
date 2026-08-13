@@ -368,9 +368,10 @@ const float TURN_SIGN      = +1.0f; // flip to -1 if the turn stick steers the w
 // standing or during pure rotation.
 // The first gated ground test proved 4 was not authority: it produced only
 // -19/-31 PWM for the forward catch and neither encoder advanced. Ten maps to
-// roughly -25/-37 with the measured loaded floors, still below the differential
-// output already exercised safely during rotation. It remains body-lean gated,
-// direction-gated, abortable, and limited to LAUNCH_ASSIST_TICKS eligible ticks.
+// roughly -25/-37 with the measured loaded floors. The latest inertia test
+// showed this pulse re-firing after the normal controller had already recovered
+// wheel speed, so keep the state machine only for controlled A/B tests.
+#define DRIVE_LAUNCH_ASSIST 0       // superseded by the persistent velocity-effort path
 const float         LAUNCH_ASSIST_EFFORT     = 10.0f; // minimum effort beyond the static PWM floors
 const float         LAUNCH_READY_LEAN_DEG    = 1.5f;  // measured body lean must be established first
 const float         LAUNCH_READY_ERROR_DEG   = 1.25f; // body must be close to the leaned target
@@ -1045,9 +1046,13 @@ void loop() {
     // requested direction until the velocity setpoint catches up.
     posSetpoint = positionRev;
     driveVelocityEffortLatched = false;
+#if DRIVE_LAUNCH_ASSIST
     launchAssistState = LAUNCH_WAIT_LEAN;
+#else
+    launchAssistState = LAUNCH_IDLE;
+#endif
     launchAssistDirection = driveDirection;
-    launchAssistTicksRemaining = LAUNCH_ASSIST_TICKS;
+    launchAssistTicksRemaining = DRIVE_LAUNCH_ASSIST ? LAUNCH_ASSIST_TICKS : 0;
     launchRollingTicks = 0;
     controlLog.launchEvent = '-';
   } else if (!driving) {
@@ -1061,7 +1066,8 @@ void loop() {
   driveCommandPrev = driving;
 
   // Confirm real rolling over a window instead of trusting a one-tick encoder
-  // burst. This state also controls when full derivative damping is restored.
+  // burst when the legacy launch-assist A/B test is enabled.
+#if DRIVE_LAUNCH_ASSIST
   float driveVelTowardTarget = driveDirection * forwardVel;
   if (driving && driveVelTowardTarget >= LAUNCH_RELEASE_VEL) {
     if (launchRollingTicks < LAUNCH_RELEASE_TICKS) launchRollingTicks++;
@@ -1069,6 +1075,7 @@ void loop() {
     launchRollingTicks = 0;
   }
   bool driveRollingConfirmed = launchRollingTicks >= LAUNCH_RELEASE_TICKS;
+#endif
 
   float error = pitch - BALANCE_SETPOINT;
 
@@ -1214,8 +1221,10 @@ void loop() {
   controlLog.launchBoost = 0.0f;
   controlLog.driveVelocityEffort = 0.0f;
   controlLog.driveVelocityEffortActive = false;
+#if DRIVE_LAUNCH_ASSIST
   float launchEffortSign = launchAssistDirection > 0 ? -1.0f : 1.0f;
   bool balanceCatchingTowardDrive = launchEffortSign * u > 0.0f;
+#endif
   float actualLean = pitch - BALANCE_SETPOINT;
   bool velocityNeedsDrive = driveDirection * velError > 0.0f;
   bool driveVelocityEffortReady = driving &&
@@ -1230,6 +1239,7 @@ void loop() {
                                        fabs(dRateFilt) <= LAUNCH_ABORT_RATE_DPS;
   if (!driveVelocityEffortSafeToHold) driveVelocityEffortLatched = false;
   else if (driveVelocityEffortReady)   driveVelocityEffortLatched = true;
+#if DRIVE_LAUNCH_ASSIST
   if (launchAssistState == LAUNCH_WAIT_LEAN) {
     bool leanReady = launchAssistDirection * actualLean >= LAUNCH_READY_LEAN_DEG;
     bool bodyReady = fabs(error) <= LAUNCH_READY_ERROR_DEG &&
@@ -1285,6 +1295,7 @@ void loop() {
       launchAssistTicksRemaining--;
     }
   }
+#endif
 
   // Do not stack this with the stronger breakaway pulse. Once that pulse is
   // inactive, velocity error supplies a bounded average torque instead of
