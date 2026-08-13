@@ -390,12 +390,6 @@ const float DRIVE_VELOCITY_EFFORT_GAIN  = 10.0f; // rev/s error -> PWM effort
 const float DRIVE_VELOCITY_EFFORT_LIMIT = 8.0f;  // below the tested launch floor
 const float DRIVE_VELOCITY_HOLD_LEAN_DEG = 0.75f; // hysteresis after the strict 1.5 deg engagement
 
-// While the wheels are still breaking away, fast pitch-rate transients can make
-// D overwhelm P and reverse the axle before it establishes motion. Limit only
-// that drive-start condition. Full derivative damping returns after 100 ms of
-// commanded-direction rolling, and immediately for a larger balance error.
-const float DRIVE_BREAKAWAY_DTERM_LIMIT = 3.0f;
-
 // ---- Soft start + saturation latch (from the rc_balance reference) ---------
 // Soft start: ramp control authority in over SOFT_START_SEC after arming so a
 // mid-air / mid-tilt arm doesn't slam the motors to full.
@@ -1164,14 +1158,8 @@ void loop() {
   // --- PID INNER loop (D on the low-passed rate so gyro spikes don't kick) ---
   // Encoder position/velocity act through leanCmd; no direct motor feedforward.
   controlLog.dTermRaw = Kd * dRateFilt;
-  bool limitingDriveDerivative = driving && !driveRollingConfirmed &&
-                                 fabs(error) <= LAUNCH_ABORT_ERROR_DEG;
-  dTermLog = limitingDriveDerivative
-           ? constrain(controlLog.dTermRaw, -DRIVE_BREAKAWAY_DTERM_LIMIT,
-                                            DRIVE_BREAKAWAY_DTERM_LIMIT)
-           : controlLog.dTermRaw;
-  controlLog.dTermLimited = limitingDriveDerivative &&
-                            fabs(dTermLog - controlLog.dTermRaw) > 0.001f;
+  dTermLog = controlLog.dTermRaw;
+  controlLog.dTermLimited = false;
   controlLog.pTerm = Kp * error;
   controlLog.iTerm = Ki * integral;
   float u = -(controlLog.pTerm + dTermLog + controlLog.iTerm);
