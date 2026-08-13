@@ -380,7 +380,7 @@ const float         LAUNCH_ABORT_LEAN_DEG    = 2.0f;  // pulse stops if the esta
 const float         LAUNCH_MAX_START_VEL     = 0.06f; // already rolling means the pulse is unnecessary
 const float         LAUNCH_RELEASE_VEL       = 0.12f; // rev/s toward command means breakaway succeeded
 const unsigned int  LAUNCH_RELEASE_TICKS     = 20;    // require 100 ms at 200 Hz; reject oscillation spikes
-const unsigned int  LAUNCH_ASSIST_TICKS      = 40;    // 200 ms at 200 Hz, counted only while eligible
+const unsigned int  LAUNCH_ASSIST_TICKS      = 40;    // one bounded 200 ms window at 200 Hz
 
 // Legacy A/B path. Adding velocity effort after the angle PD makes the inner loop
 // cancel that effort by developing an opposing angle error. In the 2026-08-14
@@ -498,7 +498,7 @@ bool  driveVelocityEffortLatched = false;      // strict engage, wider safety li
 enum LaunchAssistState : uint8_t { LAUNCH_IDLE, LAUNCH_WAIT_LEAN, LAUNCH_PUSH, LAUNCH_DONE };
 LaunchAssistState launchAssistState = LAUNCH_IDLE;
 int8_t launchAssistDirection = 0;              // +1 forward target, -1 reverse target
-unsigned int launchAssistTicksRemaining = 0;   // bounded budget pauses while PID must catch the other way
+unsigned int launchAssistTicksRemaining = 0;   // wall-clock ticks remaining in the bounded push window
 unsigned int launchRollingTicks = 0;            // sustained commanded-direction motion confirmation
 unsigned long armedAtMs = 0;                   // millis() at the moment we armed
 unsigned long satTicks = 0;                    // consecutive ticks with the inner loop pinned
@@ -1235,9 +1235,9 @@ void loop() {
 
   // --- Bounded drive-launch assist ------------------------------------------
   // WAIT_LEAN lets the normal non-minimum-phase response establish the requested
-  // lean. PUSH may override the small alternating PD effort for at most 200 ms;
-  // that is the point of breakaway compensation. Angle and lean gates abort it,
-  // and LAUNCH_DONE prevents repeated kicks during a held command.
+  // lean. PUSH may strengthen an already matching PD effort for at most 200 ms,
+  // but never reverses an opposing balance correction. Angle and lean gates abort
+  // it, and LAUNCH_DONE prevents repeated kicks during a held command.
   controlLog.launchBoost = 0.0f;
   controlLog.launchEvent = '-';
   controlLog.driveVelocityEffort = 0.0f;
@@ -1303,14 +1303,18 @@ void loop() {
       controlLog.launchEvent = 'T';
       launchAssistState = LAUNCH_DONE;
     } else {
+      launchAssistTicksRemaining--;
       // Negative motor effort is physical forward on this chassis; encoder and
       // target velocity use the opposite (+forward) convention.
       float launchFloor = launchEffortSign * LAUNCH_ASSIST_EFFORT;
-      if (launchEffortSign * u < LAUNCH_ASSIST_EFFORT) {
+      // The inner loop owns safety. Apply breakaway compensation only when it is
+      // already trying to move in the requested direction; never force it through
+      // an opposite-sign catch like the observed +23.3 -> -20 launch reversal.
+      if (launchEffortSign * u > OUT_DEADZONE &&
+          launchEffortSign * u < LAUNCH_ASSIST_EFFORT) {
         controlLog.launchBoost = launchFloor - u;
         u = launchFloor;
       }
-      launchAssistTicksRemaining--;
     }
   }
 #endif
