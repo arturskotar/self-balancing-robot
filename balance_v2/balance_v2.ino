@@ -377,8 +377,8 @@ const float TURN_SIGN      = +1.0f; // flip to -1 if the turn stick steers the w
 // a fresh pulse is impossible until the stick is released or changes direction.
 #define DRIVE_LAUNCH_ASSIST 1
 const float         LAUNCH_ASSIST_EFFORT     = 20.0f; // -35/-47 PWM with measured static floors
-const float         LAUNCH_MIN_TARGET_VEL    = 0.30f; // no full breakaway pulse for small stick inputs
-const float         LAUNCH_READY_LEAN_DEG    = 2.5f;  // reachable with Kvel=4, Vmax=0.6, Kpos=1 before stiction
+const float         LAUNCH_MIN_TARGET_VEL    = 0.12f; // allow launch at the low CH3 speed cap (0.35*Vmax ~= 0.21)
+const float         LAUNCH_READY_LEAN_DEG    = 2.5f;  // max required lean; scaled down for smaller requested speeds
 const float         LAUNCH_READY_ERROR_DEG   = 1.25f; // body must be close to the leaned target
 const float         LAUNCH_READY_RATE_DPS    = 10.0f; // do not launch in the fast part of a pitch swing
 const float         LAUNCH_ABORT_ERROR_DEG   = 2.5f;  // immediately return authority to balance
@@ -1260,7 +1260,7 @@ void loop() {
   controlLog.driveVelocityEffort = 0.0f;
   controlLog.driveVelocityEffortActive = false;
 #if DRIVE_LAUNCH_ASSIST
-  float launchEffortSign = (float)launchAssistDirection;
+  float launchEffortSign = -(float)launchAssistDirection; // SIGN_CFG: physical forward is negative PWM effort
 #endif
 #if DRIVE_LAUNCH_ASSIST || DRIVE_VELOCITY_EFFORT
   float actualLean = pitch - BALANCE_SETPOINT;
@@ -1284,7 +1284,8 @@ void loop() {
 #endif
 #if DRIVE_LAUNCH_ASSIST
   if (launchAssistState == LAUNCH_WAIT_LEAN) {
-    bool leanReady = launchAssistDirection * actualLean >= LAUNCH_READY_LEAN_DEG;
+    float launchReadyLean = min(LAUNCH_READY_LEAN_DEG, 0.75f * fabs(leanRaw));
+    bool leanReady = launchAssistDirection * actualLean >= launchReadyLean;
     bool bodyReady = fabs(error) <= LAUNCH_READY_ERROR_DEG &&
                      fabs(dRateFilt) <= LAUNCH_READY_RATE_DPS;
     bool strongCommand = fabs(targetVel) >= LAUNCH_MIN_TARGET_VEL;
@@ -1321,7 +1322,7 @@ void loop() {
       launchAssistState = LAUNCH_DONE;
     } else {
       launchAssistTicksRemaining--;
-      // Effort and encoder velocity now share the same chassis-forward sign.
+      // Physical forward PWM is negative while encoder/target forward is positive.
       float launchFloor = launchEffortSign * LAUNCH_ASSIST_EFFORT;
       // The inner loop owns safety. Apply breakaway compensation only when it is
       // already trying to move in the requested direction; never force it through
