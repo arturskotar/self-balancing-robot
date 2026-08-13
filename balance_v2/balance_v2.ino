@@ -326,14 +326,36 @@ void motorRaw(int pwm) {
   }
 }
 
+// Change direction through coast so RPWM and LPWM are never active together.
+// The blanking delay is used only for a true powered reversal, not every update.
+void motorWriteWheel(int forwardPin, int reversePin, int pwm, int &lastSign) {
+  int sign = (pwm > 0) - (pwm < 0);
+  if (sign != 0 && lastSign != 0 && sign != lastSign) {
+    analogWrite(forwardPin, 0);
+    analogWrite(reversePin, 0);
+    delayMicroseconds(2);
+  }
+
+  if (pwm > 0) {
+    analogWrite(reversePin, 0);
+    analogWrite(forwardPin, pwm);
+  } else if (pwm < 0) {
+    analogWrite(forwardPin, 0);
+    analogWrite(reversePin, -pwm);
+  } else {
+    analogWrite(forwardPin, 0);
+    analogWrite(reversePin, 0);
+  }
+  lastSign = sign;
+}
+
 // Per-wheel PWM (left/right differ for steering). Same polarity as motorRaw(+).
 void motorPerWheel(int pwmL, int pwmR) {
+  static int lastSignL = 0, lastSignR = 0;
   pwmL = constrain(pwmL, -MAX_PWM, MAX_PWM);
   pwmR = constrain(pwmR, -MAX_PWM, MAX_PWM);
-  if (pwmL >= 0) { analogWrite(LEFT_MOTOR_FORWARD_PIN, pwmL); analogWrite(LEFT_MOTOR_REVERSE_PIN, 0); }
-  else           { analogWrite(LEFT_MOTOR_FORWARD_PIN, 0);    analogWrite(LEFT_MOTOR_REVERSE_PIN, -pwmL); }
-  if (pwmR >= 0) { analogWrite(RIGHT_MOTOR_FORWARD_PIN, pwmR); analogWrite(RIGHT_MOTOR_REVERSE_PIN, 0); }
-  else           { analogWrite(RIGHT_MOTOR_FORWARD_PIN, 0);    analogWrite(RIGHT_MOTOR_REVERSE_PIN, -pwmR); }
+  motorWriteWheel(LEFT_MOTOR_FORWARD_PIN, LEFT_MOTOR_REVERSE_PIN, pwmL, lastSignL);
+  motorWriteWheel(RIGHT_MOTOR_FORWARD_PIN, RIGHT_MOTOR_REVERSE_PIN, pwmR, lastSignR);
 }
 
 // Map per-wheel efforts (balance +/- turn) to PWM, each past its own stiction
