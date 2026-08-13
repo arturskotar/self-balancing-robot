@@ -370,7 +370,7 @@ const float TURN_SIGN      = +1.0f; // flip to -1 if the turn stick steers the w
 // -19/-31 PWM for the forward catch and neither encoder advanced. Ten maps to
 // roughly -25/-37 with the measured loaded floors, still below the differential
 // output already exercised safely during rotation. It remains body-lean gated,
-// direction-gated, abortable, and limited to LAUNCH_ASSIST_MS.
+// direction-gated, abortable, and limited to LAUNCH_ASSIST_TICKS eligible ticks.
 const float         LAUNCH_ASSIST_EFFORT     = 10.0f; // minimum effort beyond the static PWM floors
 const float         LAUNCH_READY_LEAN_DEG    = 1.5f;  // measured body lean must be established first
 const float         LAUNCH_READY_ERROR_DEG   = 1.25f; // body must be close to the leaned target
@@ -379,7 +379,7 @@ const float         LAUNCH_ABORT_ERROR_DEG   = 2.5f;  // immediately return auth
 const float         LAUNCH_ABORT_RATE_DPS    = 40.0f;
 const float         LAUNCH_RELEASE_VEL       = 0.12f; // rev/s toward command means breakaway succeeded
 const unsigned int  LAUNCH_RELEASE_TICKS     = 20;    // require 100 ms at 200 Hz; reject oscillation spikes
-const unsigned long LAUNCH_ASSIST_MS         = 200;  // bounded axle pulse, comparable to a hand nudge
+const unsigned int  LAUNCH_ASSIST_TICKS      = 40;    // 200 ms at 200 Hz, counted only while eligible
 
 // While the wheels are still breaking away, fast pitch-rate transients can make
 // D overwhelm P and reverse the axle before it establishes motion. Limit only
@@ -492,7 +492,7 @@ bool  driveCommandPrev = false;                // edge-detect a fresh non-zero d
 enum LaunchAssistState : uint8_t { LAUNCH_IDLE, LAUNCH_WAIT_LEAN, LAUNCH_PUSH };
 LaunchAssistState launchAssistState = LAUNCH_IDLE;
 int8_t launchAssistDirection = 0;              // +1 forward target, -1 reverse target
-unsigned long launchAssistStartedMs = 0;
+unsigned int launchAssistTicksRemaining = 0;   // bounded budget pauses while PID must catch the other way
 unsigned int launchRollingTicks = 0;            // sustained commanded-direction motion confirmation
 unsigned long armedAtMs = 0;                   // millis() at the moment we armed
 unsigned long satTicks = 0;                    // consecutive ticks with the inner loop pinned
@@ -516,7 +516,7 @@ struct ControlTelemetry {
   bool dTermLimited = false;
   bool driving = false;
   char launchState = '-';                   // '-' idle, 'W' waiting for lean, 'P' axle pulse
-  char launchEvent = '-';                   // last transition: P pulse, T timeout, R rolling, E/G unsafe
+  char launchEvent = '-';                   // P pulse, D deferred, T budget spent, R rolling, E/G unsafe
   bool coasting = true;
 };
 ControlTelemetry controlLog;
@@ -969,6 +969,7 @@ void loop() {
     driveCommandPrev = false;
     launchAssistState = LAUNCH_IDLE;
     launchAssistDirection = 0;
+    launchAssistTicksRemaining = 0;
     launchRollingTicks = 0;
     telemetry(pitch - BALANCE_SETPOINT, gyroRate, 0);
     return;
@@ -985,6 +986,7 @@ void loop() {
     driveCommandPrev = false;
     launchAssistState = LAUNCH_IDLE;
     launchAssistDirection = 0;
+    launchAssistTicksRemaining = 0;
     launchRollingTicks = 0;
   }
   float softStart = constrain((millis() - armedAtMs) / (SOFT_START_SEC * 1000.0f), 0.0f, 1.0f);
@@ -1030,12 +1032,14 @@ void loop() {
   if (driving && (!driveCommandPrev || driveDirection != launchAssistDirection)) {
     launchAssistState = LAUNCH_WAIT_LEAN;
     launchAssistDirection = driveDirection;
+    launchAssistTicksRemaining = LAUNCH_ASSIST_TICKS;
     launchRollingTicks = 0;
     controlLog.launchEvent = '-';
   } else if (!driving) {
     if (driveCommandPrev) posSetpoint = positionRev;
     launchAssistState = LAUNCH_IDLE;
     launchAssistDirection = 0;
+    launchAssistTicksRemaining = 0;
     launchRollingTicks = 0;
   }
   driveCommandPrev = driving;
@@ -1070,6 +1074,7 @@ void loop() {
     satTicks = 0;
     launchAssistState = LAUNCH_IDLE;
     launchAssistDirection = 0;
+    launchAssistTicksRemaining = 0;
     launchRollingTicks = 0;
     armedAtMs = millis();                    // soft-start the recovery too
   }
@@ -1214,17 +1219,12 @@ void loop() {
                balanceCatchingTowardDrive) {
       controlLog.launchEvent = 'P';
       launchAssistState = LAUNCH_PUSH;
-      launchAssistStartedMs = millis();
     }
   }
   if (launchAssistState == LAUNCH_PUSH) {
-    bool timedOut = (millis() - launchAssistStartedMs) >= LAUNCH_ASSIST_MS;
     bool unsafeError = fabs(error) > LAUNCH_ABORT_ERROR_DEG;
     bool unsafeRate = fabs(dRateFilt) > LAUNCH_ABORT_RATE_DPS;
-    if (timedOut) {
-      controlLog.launchEvent = 'T';
-      launchAssistState = LAUNCH_IDLE;
-    } else if (driveRollingConfirmed) {
+    if (driveRollingConfirmed) {
       controlLog.launchEvent = 'R';
       launchAssistState = LAUNCH_IDLE;
     } else if (unsafeError) {
@@ -1236,6 +1236,15 @@ void loop() {
     } else if (!driving) {
       controlLog.launchEvent = 'N';
       launchAssistState = LAUNCH_IDLE;
+    } else if (!balanceCatchingTowardDrive) {
+      // Do not spend the one-shot budget while balance must still catch in the
+      // opposite direction. Return to the gated wait state and resume only when
+      // the inner PID itself points toward the requested travel direction.
+      controlLog.launchEvent = 'D';
+      launchAssistState = LAUNCH_WAIT_LEAN;
+    } else if (launchAssistTicksRemaining == 0) {
+      controlLog.launchEvent = 'T';
+      launchAssistState = LAUNCH_IDLE;
     } else {
       // Negative motor effort is physical forward on this chassis; encoder and
       // target velocity use the opposite (+forward) convention.
@@ -1245,6 +1254,7 @@ void loop() {
         controlLog.launchBoost = launchFloor - u;
         u = launchFloor;
       }
+      launchAssistTicksRemaining--;
     }
   }
   controlLog.launchState = launchAssistState == LAUNCH_WAIT_LEAN ? 'W' :
@@ -1319,6 +1329,7 @@ void telemetry(float error, float rate, float u) {
   Serial.print(" START "); Serial.print(controlLog.launchState);
   Serial.print(" EXIT "); Serial.print(controlLog.launchEvent);
   Serial.print(" BOOST "); Serial.print(controlLog.launchBoost, 1);
+  Serial.print(" BTK "); Serial.print(launchAssistTicksRemaining);
 
   Serial.print(" | LEAN ACT "); Serial.print(pitch - BALANCE_SETPOINT, 2);
   Serial.print(" POS "); Serial.print(controlLog.positionLean, 2);
