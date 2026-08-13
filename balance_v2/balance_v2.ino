@@ -234,11 +234,13 @@ const float D_LPF        = 0.60f;   // EMA weight on the previous filtered rate 
                                     // reason high Kd destabilizes). Back to 0.60 = the known-good inner
                                     // loop. The residual fast wiggle is real gyro vibration; the genuine
                                     // cure is a foam/rubber soft-mount under the IMU, not more filtering.
+const float D_TERM_LIMIT = 8.0f;    // PWM effort: motor vibration must not dominate proportional recovery
 
 // ---- State -----------------------------------------------------------------
 float pitch = 0.0f;
 float integral = 0.0f;
 float dRateFilt = 0.0f;   // low-pass-filtered gyro rate for the D term (angle est. uses the raw rate)
+float dTermLog = 0.0f;    // bounded derivative contribution, for telemetry
 float leanCmd   = 0.0f;   // cascade outer-loop output: the desired lean (deg) added to BALANCE_SETPOINT
 unsigned long lastControlMicros = 0;
 int controlHz = 0;   // measured control-loop frequency (should read ~200; if lower, we're falling behind)
@@ -654,6 +656,7 @@ void loop() {
   if (!crsf::armed()) {
     motorRaw(0);
     integral = 0.0f;
+    dTermLog = 0.0f;
     leanCmd  = 0.0f;
     driveLeanLog = 0.0f;
     long hl, hr; readEncoders(hl, hr);
@@ -706,6 +709,7 @@ void loop() {
   }
   if (fallen) {
     integral = 0.0f;
+    dTermLog = 0.0f;
     motorRaw(0);
     telemetry(error, gyroRate, 0);
     return;
@@ -728,7 +732,8 @@ void loop() {
 
   // --- PID INNER loop (D on the low-passed rate so gyro spikes don't kick) ---
   // No direct Kv/Kx anymore -- the encoders act through leanCmd above.
-  float u = -(Kp * error + Kd * dRateFilt + Ki * integral);
+  dTermLog = constrain(Kd * dRateFilt, -D_TERM_LIMIT, D_TERM_LIMIT);
+  float u = -(Kp * error + dTermLog + Ki * integral);
 
   // --- Coast band: rest the motors when essentially balanced ---
   // Gate on the FILTERED pitch (error) and wheel velocity (VF) -- the trustworthy
@@ -765,6 +770,7 @@ void telemetry(float error, float rate, float u) {
   Serial.print(" ERR ");  Serial.print(error, 2);
   Serial.print(" RATE "); Serial.print(rate, 2);
   Serial.print(" DFILT "); Serial.print(dRateFilt, 2);
+  Serial.print(" DTERM "); Serial.print(dTermLog, 2);
   Serial.print(" U ");    Serial.print(u, 2);
   Serial.print(" PWML "); Serial.print(motorPwmL);
   Serial.print(" PWMR "); Serial.print(motorPwmR);
