@@ -1260,7 +1260,7 @@ void loop() {
   controlLog.driveVelocityEffort = 0.0f;
   controlLog.driveVelocityEffortActive = false;
 #if DRIVE_LAUNCH_ASSIST
-  float launchEffortSign = launchAssistDirection > 0 ? -1.0f : 1.0f;
+  float launchEffortSign = (float)launchAssistDirection;
 #endif
 #if DRIVE_LAUNCH_ASSIST || DRIVE_VELOCITY_EFFORT
   float actualLean = pitch - BALANCE_SETPOINT;
@@ -1321,8 +1321,7 @@ void loop() {
       launchAssistState = LAUNCH_DONE;
     } else {
       launchAssistTicksRemaining--;
-      // Negative motor effort is physical forward on this chassis; encoder and
-      // target velocity use the opposite (+forward) convention.
+      // Effort and encoder velocity now share the same chassis-forward sign.
       float launchFloor = launchEffortSign * LAUNCH_ASSIST_EFFORT;
       // The inner loop owns safety. Apply breakaway compensation only when it is
       // already trying to move in the requested direction; never force it through
