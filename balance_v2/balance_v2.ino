@@ -175,7 +175,8 @@ BreakawayState leftBreakaway, rightBreakaway;
 
 // ---- RC drive (radio -> motion) --------------------------------------------
 const float TURN_AUTHORITY = 25.0f; // PWM-effort differential at full turn stick
-const float RC_STICK_DEADZONE = 0.15f; // ignore small stick noise around center.
+const float DRIVE_STICK_DEADZONE = 0.15f;
+const float TURN_STICK_DEADZONE  = 0.30f; // measured cross-axis reaches ~0.25 during straight drive
 const float DRIVE_SIGN     = +1.0f; // flip to -1 if the drive stick drives the wrong way
 const float TURN_SIGN      = +1.0f; // flip to -1 if the turn stick steers the wrong way
 
@@ -674,8 +675,8 @@ void loop() {
   float cap       = 0.35f + 0.65f * crsf::speed();                    // CH3 speed cap 0.35..1.0
   float driveIn   = crsf::drive();
   float turnIn    = crsf::turn();
-  if (fabs(driveIn) < RC_STICK_DEADZONE) driveIn = 0.0f;
-  if (fabs(turnIn) < RC_STICK_DEADZONE) turnIn = 0.0f;
+  if (fabs(driveIn) < DRIVE_STICK_DEADZONE) driveIn = 0.0f;
+  if (fabs(turnIn) < TURN_STICK_DEADZONE) turnIn = 0.0f;
   float driveLean = -DRIVE_SIGN * driveIn * cap * driveMaxLean;       // deg; DRV -1 -> positive forward lean
   float turnCmd   = TURN_SIGN  * turnIn  * cap * TURN_AUTHORITY;      // per-wheel PWM-effort diff
   driveLeanLog = driveLean;
