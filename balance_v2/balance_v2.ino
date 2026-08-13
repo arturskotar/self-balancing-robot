@@ -135,15 +135,14 @@ const float PITCH_ZERO_OFFSET = -9.20f;  // deg, makes accel-pitch ~0 at mechani
 // tuning notes) and put it here.
 float BALANCE_SETPOINT = -3.22f;         // deg : measured after rigidly mounting the IMU (now steady &
                                          // repeatable, ~0.2deg wander). Fine-tune: forward lower, back raise.
-// ⚠️ SUSPECT — 2026-08-13 telemetry. With the motors OFF (coast band) the robot sat
-// dead still at PITCH ~ -4.03 for 4.5 s. That is the angle it ACTUALLY balances at,
-// but the setpoint says -3.22 -- a 0.8 deg FORWARD bias. Inside the coast band that
-// is invisible (|ERR| 0.81 < ANGLE_DEADZONE 1.0, motors off). The moment anything
-// knocks it out of the band the controller starts chasing a target 0.8 deg forward
-// of true balance, which is a standing order to accelerate forward forever.
-// ACTION: re-measure the rest angle (disarmed, upright, motors off, read PITCH) and
-// set this to it. Not changed here -- it is a hand-calibrated constant and one log
-// could have been taken on a slope or against an obstruction.
+// ⚠️ WORTH RE-MEASURING — 2026-08-13 telemetry. With the motors OFF (coast band) the
+// robot sat at PITCH ~ -4.03 for 4.5 s, vs this setpoint of -3.22: a 0.8 deg forward
+// bias. Inside the coast band that is invisible (|ERR| 0.81 < ANGLE_DEADZONE 1.0,
+// motors off), so it only bites once something knocks it out of the band -- then the
+// controller chases a target 0.8 deg forward of balance, i.e. creeps forward.
+// CAVEAT: that log was a hand-held test, so the robot may have been supported rather
+// than free-standing, which would make -4.03 meaningless. Re-measure deliberately:
+// FREE-STANDING, disarmed, motors off, undisturbed -- then set this to the rest PITCH.
 
 // ---- PID gains -------------------------------------------------------------
 // Start as a PD controller (Ki = 0). Add a tiny Ki only after PD balances.
@@ -182,15 +181,16 @@ float Ki = 0.0f;   // integral      (deg*s    -> PWM)  keep 0 until PD works
 // the whole Teensy era, so positionRev/forwardVel were pinned at 0 and the outer
 // loop contributed nothing. Treat Kpos/Kvel as UNVALIDATED starting points.
 // If it limit-cycles, SLOW the outer loop (raise LEAN_LPF) before cutting gains.
-// >>> DIAGNOSTIC SWITCH <<<
-// 0 = outer loop OFF: leanCmd is forced to 0, so TARGET == BALANCE_SETPOINT and
-//     this is EXACTLY the known-good baseline controller (which ran with dead
-//     encoders, i.e. with the outer loop inert) -- but at the corrected 4482 Hz.
-// 1 = outer loop ON (normal cascade).
-// Run with 0 FIRST. If it balances like the old baseline, the inner loop and the
-// motor polarity are fine and the fault is in the outer loop. If it ALSO runs
-// away, the fault is in the inner loop / motor direction, which the old 20 kHz
-// deadband was hiding (small corrections produced no output at all back then).
+// >>> DIAGNOSTIC SWITCH (bisection tool, not a fix) <<<
+// 0 = outer loop OFF: leanCmd forced to 0, so TARGET == BALANCE_SETPOINT. That is
+//     EXACTLY the known-good baseline controller (which also ran with the outer
+//     loop inert, since the encoders were dead) but at the corrected 4482 Hz.
+// 1 = outer loop ON (normal cascade). DEFAULT.
+// Use this to bisect ANY future instability: if it misbehaves with 1 and is clean
+// with 0, the fault is in the outer loop; if it misbehaves with both, the fault is
+// in the inner loop / motor direction.
+// NOTE: all four sign chains (encoder, inner loop, motor polarity, outer loop) were
+// verified correct against the 2026-08-13 hand-tilt telemetry -- see git log.
 #define OUTER_LOOP 1
 
 float Kpos = 1.0f;               // wheel position error (rev -> deg of lean)
