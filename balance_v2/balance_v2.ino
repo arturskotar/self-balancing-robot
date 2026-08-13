@@ -1183,7 +1183,10 @@ void loop() {
   // The outer loop owns only the angle target; the inner loop remains the sole
   // source of common-mode motor power. Raise only its proportional authority in
   // proportion to pilot translation, leaving neutral balance and Kd unchanged.
-  float driveAuthority = driving ? constrain(fabs(driveIn) * cap, 0.0f, 1.0f) : 0.0f;
+  // The speed knob limits the requested velocity, not the balance loop's ability
+  // to catch the requested lean. Full stick must retain full DRIVE_KP authority
+  // even when the pilot deliberately selects a low speed cap.
+  float driveAuthority = driving ? constrain(fabs(driveIn), 0.0f, 1.0f) : 0.0f;
   float driveKpTarget = Kp < DRIVE_KP ? DRIVE_KP : Kp;
   controlLog.effectiveKp = Kp + driveAuthority * (driveKpTarget - Kp);
   controlLog.pTerm = controlLog.effectiveKp * error;
