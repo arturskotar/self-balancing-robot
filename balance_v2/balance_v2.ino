@@ -303,10 +303,17 @@ const int LEFT_DEADBAND_MOVING  = 11;
 const int RIGHT_DEADBAND_MOVING = 13;
 const int LEFT_DEADBAND_STATIC  = 18;
 const int RIGHT_DEADBAND_STATIC = 18;
-// A wheel counts as "moving" if its encoder changed within this many control
-// ticks (10 = 50 ms). Keyed off raw tick deltas rather than the filtered
-// velocity so the VEL_LPF lag can't leave a stopped wheel on the low floor.
-const int WHEEL_STILL_TICKS = 10;
+// A wheel counts as "moving" only if it makes NET progress: at least
+// WHEEL_MOVE_COUNTS ticks in one direction across a WHEEL_WINDOW_TICKS window.
+// NOT "any tick recently" -- that was the first attempt and it was wrong. Under
+// stick-slip the encoder emits a steady stream of +1/-1 ticks that sum to zero;
+// an any-tick test reads that as "moving" and drops to the low Coulomb floor at
+// exactly the moment the wheel is stuck and needs the static breakaway kick.
+// Confirmed in the 2026-08-13 oscillation log: DL alternated -1/+1 for four
+// seconds, ENC L moved -21 to -31 total, and DBL read 11M the whole time.
+// 20 ticks = 100 ms; 3 counts over that window is ~0.055 rev/s of real rolling.
+const int WHEEL_WINDOW_TICKS = 20;
+const int WHEEL_MOVE_COUNTS  = 3;
 // Worst-case floor, used for the saturation-latch effort ceiling so the latch
 // can't false-trip on whichever wheel has the smaller usable effort range.
 const int MAX_DEADBAND = (LEFT_DEADBAND_STATIC > RIGHT_DEADBAND_STATIC)
@@ -708,14 +715,18 @@ void updateVelocity() {
   float vR_raw = deltaR / (float)ENC_COUNTS_PER_REV / DT;
   velLastTicksL = l;
   velLastTicksR = r;
-  // Per-wheel "is it turning?" for the friction-floor selection. Uses raw tick
-  // deltas, not the filtered velocity, so VEL_LPF lag can't leave a wheel that
-  // has actually stopped sitting on the low (Coulomb) floor.
-  static int stillTicksL = WHEEL_STILL_TICKS, stillTicksR = WHEEL_STILL_TICKS;
-  if (deltaL != 0) stillTicksL = 0; else if (stillTicksL <= WHEEL_STILL_TICKS) stillTicksL++;
-  if (deltaR != 0) stillTicksR = 0; else if (stillTicksR <= WHEEL_STILL_TICKS) stillTicksR++;
-  wheelMovingL = (stillTicksL < WHEEL_STILL_TICKS);
-  wheelMovingR = (stillTicksR < WHEEL_STILL_TICKS);
+  // Per-wheel "is it turning?" for the friction-floor selection, judged on NET
+  // displacement across a window so stick-slip dither (which sums to zero) is not
+  // mistaken for rolling. See WHEEL_WINDOW_TICKS.
+  static long winStartL = 0, winStartR = 0;
+  static int  winTicks  = 0;
+  if (++winTicks >= WHEEL_WINDOW_TICKS) {
+    wheelMovingL = labs(l - winStartL) >= WHEEL_MOVE_COUNTS;
+    wheelMovingR = labs(r - winStartR) >= WHEEL_MOVE_COUNTS;
+    winStartL = l;
+    winStartR = r;
+    winTicks  = 0;
+  }
 
   controlLog.encoderDeltaL += deltaL;
   controlLog.encoderDeltaR += deltaR;
