@@ -86,9 +86,11 @@ const long ENC_COUNTS_PER_REV = 546;
 // PITCH-AXIS GYRO: the MPU9250 lib (0.4.8) reports pitch-axis rotation on the Y
 // gyro, inverted vs the accel-pitch convention (confirmed with IMU_TEST: tilting
 // forward, aPitch rises while gY goes negative; gX stays ~0). So the rate is
-// -getGyroY(). GYRO_Y_BIAS = the raw getGyroY() reading when the robot is DEAD
-// STILL (~-9 here). RECALIBRATE per unit: run IMU_TEST, hold still, read gY.
-const float GYRO_Y_BIAS = -9.0f;   // deg/s : raw getGyroY() at rest
+// -getGyroY(). Measure its zero-rate bias at startup while the motors are off.
+const float GYRO_Y_BIAS_FALLBACK = -9.0f;
+const int   GYRO_CAL_SAMPLES = 400;
+const float GYRO_CAL_MAX_STDDEV = 2.0f;  // reject calibration if the robot is moving
+float gyroYBias = GYRO_Y_BIAS_FALLBACK;
 const float PITCH_ZERO_OFFSET = -9.20f;  // deg, makes accel-pitch ~0 at mechanical level
 
 // ---- Control setpoint ------------------------------------------------------
@@ -303,6 +305,12 @@ void setup() {
   }
 
   delay(500);
+  if (calibrateGyroBias()) {
+    Serial.print("Gyro Y bias calibrated: "); Serial.println(gyroYBias, 3);
+  } else {
+    Serial.print("Gyro calibration rejected; using fallback: ");
+    Serial.println(gyroYBias, 3);
+  }
   while (!imu.update()) {}
 
   // Seed the filter from the accelerometer so we don't start from 0.
@@ -560,6 +568,26 @@ float accelPitch() {
   return a - PITCH_ZERO_OFFSET;
 }
 
+bool calibrateGyroBias() {
+  float sum = 0.0f, sumSq = 0.0f;
+  int samples = 0;
+  unsigned long startedMs = millis();
+  while (samples < GYRO_CAL_SAMPLES && millis() - startedMs < 3000) {
+    if (!imu.update()) continue;
+    float sample = imu.getGyroY();
+    sum += sample;
+    sumSq += sample * sample;
+    samples++;
+  }
+  if (samples < GYRO_CAL_SAMPLES) return false;
+
+  float mean = sum / samples;
+  float variance = max(0.0f, sumSq / samples - mean * mean);
+  if (sqrtf(variance) > GYRO_CAL_MAX_STDDEV) return false;
+  gyroYBias = mean;
+  return true;
+}
+
 // =============================================================================
 // Auto PID sweep: swap in the next gain set every SWEEP_HOLD_MS (for recording)
 // =============================================================================
@@ -612,8 +640,8 @@ void loop() {
   updateVelocity(); // refresh filtered wheel velocities (every tick, before the safety return)
 
   // --- Estimate ---
-  float gyroRate = -(imu.getGyroY() - GYRO_Y_BIAS);          // deg/s, forward-lean +. Pitch rate is on
-                                                             // the Y gyro (negated) -- see GYRO_Y_BIAS.
+  float gyroRate = -(imu.getGyroY() - gyroYBias);             // deg/s, forward-lean +. Pitch rate is on
+                                                             // the Y gyro (negated) -- see gyroYBias.
   float aPitch   = accelPitch();
   pitch = 0.99f * (pitch + gyroRate * DT) + 0.01f * aPitch;   // complementary filter (raw rate)
   dRateFilt = D_LPF * dRateFilt + (1.0f - D_LPF) * gyroRate;  // smoothed rate for the D term only
@@ -755,6 +783,7 @@ void telemetry(float error, float rate, float u) {
   Serial.print(" | ARM "); Serial.print(crsf::armed() ? "Y" : "-");  // radio kill-switch state
   Serial.print(" Kp ");    Serial.print(Kp, 2);           // live gains (tune with SC + S1 knob)
   Serial.print(" Kd ");    Serial.print(Kd, 2);
+  Serial.print(" GBIAS "); Serial.print(gyroYBias, 2);
   Serial.print(" Dmax ");  Serial.print(driveMaxLean, 2);
   Serial.print(" DRV ");   Serial.print(crsf::drive(), 2);   // CH2 drive stick (should move when pushed)
   Serial.print(" TRN ");   Serial.println(crsf::turn(), 2);  // CH1 turn stick
