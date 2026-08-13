@@ -244,6 +244,7 @@ float forwardVel = 0.0f;                      // chassis rev/s = mean of the two
 float rotationVel = 0.0f;                     // differential wheel speed; yaw/rotation proxy
 float positionRev = 0.0f;                     // avg wheel position, revs from home
 float driveLeanLog = 0.0f;                    // latest drive-requested lean angle
+int   motorPwmL = 0, motorPwmR = 0;           // signed PWM actually sent to each IBT-2
 long  homeTicksSum = 0;                        // (leftTicks+rightTicks) defining "home" (0 = boot spot)
 bool  stalled = false;                         // true while the stall cutoff has the motors off
 bool  fallen = false;                          // true while the fall latch has the motors off
@@ -318,6 +319,8 @@ void setup() {
 // =============================================================================
 void motorRaw(int pwm) {
   pwm = constrain(pwm, -255, 255);
+  motorPwmL = pwm;
+  motorPwmR = pwm;
   if (pwm > 0) {
     analogWrite(LEFT_MOTOR_FORWARD_PIN, pwm);  analogWrite(LEFT_MOTOR_REVERSE_PIN, 0);
     analogWrite(RIGHT_MOTOR_FORWARD_PIN, pwm); analogWrite(RIGHT_MOTOR_REVERSE_PIN, 0);
@@ -359,6 +362,8 @@ void motorPerWheel(int pwmL, int pwmR) {
   static int lastSignL = 0, lastSignR = 0;
   pwmL = constrain(pwmL, -MAX_PWM, MAX_PWM);
   pwmR = constrain(pwmR, -MAX_PWM, MAX_PWM);
+  motorPwmL = pwmL;
+  motorPwmR = pwmR;
   motorWriteWheel(LEFT_MOTOR_FORWARD_PIN, LEFT_MOTOR_REVERSE_PIN, pwmL, lastSignL);
   motorWriteWheel(RIGHT_MOTOR_FORWARD_PIN, RIGHT_MOTOR_REVERSE_PIN, pwmR, lastSignR);
 }
@@ -678,18 +683,21 @@ void loop() {
 #endif
 
   driveControlDiff(u + turnCmd, u - turnCmd);   // balance effort +/- steering (drive is via the lean)
-  telemetry(error, gyroRate, (int)u);
+  telemetry(error, gyroRate, u);
 }
 
 // =============================================================================
-void telemetry(float error, float rate, int u) {
+void telemetry(float error, float rate, float u) {
   static unsigned long lastPrint = 0;
   if (millis() - lastPrint < 100) return;
   lastPrint = millis();
   Serial.print("PITCH "); Serial.print(pitch, 2);
   Serial.print(" ERR ");  Serial.print(error, 2);
   Serial.print(" RATE "); Serial.print(rate, 2);
-  Serial.print(" U ");    Serial.print(u);
+  Serial.print(" DFILT "); Serial.print(dRateFilt, 2);
+  Serial.print(" U ");    Serial.print(u, 2);
+  Serial.print(" PWML "); Serial.print(motorPwmL);
+  Serial.print(" PWMR "); Serial.print(motorPwmR);
   Serial.print(" SET ");  Serial.print(sweepIdx + 1);  // active sweep set (0 if sweep disabled)
   Serial.print(" HZ ");   Serial.print(controlHz);     // achieved loop rate; expect ~200
   long lEnc, rEnc; readEncoders(lEnc, rEnc);            // wheel ticks since boot (sanity-check wiring)
