@@ -172,6 +172,9 @@ float Kd = 0.3f;   // derivative    (deg/s    -> PWM)  RE-TUNED FROM SCRATCH 202
                    // 0.3 to get below the ring. If a low-Kd ring persists, the culprit is angle-estimate
                    // lag (revert gyro DLPF 20->41 Hz + remove the phantom bias in software instead).
 float Ki = 0.0f;   // integral      (deg*s    -> PWM)  keep 0 until PD works
+// Translation needs turn-class common-mode authority, but neutral balance is
+// already tuned. Blend toward this proportional gain with commanded drive only.
+const float DRIVE_KP = 4.0f;
 
 // ---- Cascade outer loop (position/velocity SETPOINT -> desired LEAN) -------
 // THE PILOT DRIVES THE SETPOINT, NEVER THE LEAN AND NEVER THE MOTORS.
@@ -506,6 +509,7 @@ struct ControlTelemetry {
   float accelX = 0.0f, accelY = 0.0f, accelZ = 0.0f;
   float targetPitch = BALANCE_SETPOINT;
   float pTerm = 0.0f, iTerm = 0.0f, dTermRaw = 0.0f;
+  float effectiveKp = 0.0f;
   float effortL = 0.0f, effortR = 0.0f;
   float positionLean = 0.0f, velocityLean = 0.0f, leanRaw = 0.0f;
   float effectiveKvel = 0.0f;
@@ -951,6 +955,7 @@ void loop() {
     turnCmdLog = 0.0f;
     controlLog.targetPitch = BALANCE_SETPOINT;
     controlLog.pTerm = controlLog.iTerm = 0.0f;
+    controlLog.effectiveKp = Kp;
     controlLog.dTermRaw = 0.0f;
     controlLog.dTermLimited = false;
     controlLog.launchEvent = '-';
@@ -1108,6 +1113,7 @@ void loop() {
     dTermLog = 0.0f;
     controlLog.targetPitch = BALANCE_SETPOINT;
     controlLog.pTerm = controlLog.iTerm = 0.0f;
+    controlLog.effectiveKp = Kp;
     controlLog.dTermRaw = 0.0f;
     controlLog.dTermLimited = false;
     controlLog.effortL = controlLog.effortR = 0.0f;
@@ -1172,7 +1178,13 @@ void loop() {
   controlLog.dTermRaw = Kd * dRateFilt;
   dTermLog = controlLog.dTermRaw;
   controlLog.dTermLimited = false;
-  controlLog.pTerm = Kp * error;
+  // The outer loop owns only the angle target; the inner loop remains the sole
+  // source of common-mode motor power. Raise only its proportional authority in
+  // proportion to pilot translation, leaving neutral balance and Kd unchanged.
+  float driveAuthority = driving ? constrain(fabs(driveIn) * cap, 0.0f, 1.0f) : 0.0f;
+  float driveKpTarget = Kp < DRIVE_KP ? DRIVE_KP : Kp;
+  controlLog.effectiveKp = Kp + driveAuthority * (driveKpTarget - Kp);
+  controlLog.pTerm = controlLog.effectiveKp * error;
   controlLog.iTerm = Ki * integral;
   float u = -(controlLog.pTerm + dTermLog + controlLog.iTerm);
   u *= softStart;   // ramp authority in over SOFT_START_SEC after arming
@@ -1402,6 +1414,7 @@ void telemetry(float error, float rate, float u) {
   Serial.print(" TEFF "); Serial.print(turnCmdLog, 2);
 
   Serial.print(" | CFG Kp "); Serial.print(Kp, 2);
+  Serial.print(" Kpeff "); Serial.print(controlLog.effectiveKp, 2);
   Serial.print(" Kd "); Serial.print(Kd, 2);
   Serial.print(" Kpos "); Serial.print(Kpos, 2);
   Serial.print(" Kvel "); Serial.print(Kvel, 2);
