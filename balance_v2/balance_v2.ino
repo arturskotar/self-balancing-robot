@@ -75,16 +75,16 @@ const int MOTOR_PWM_BITS = 8;    // analogWrite range is explicitly 0..255 on ev
 #define RIGHT_ENC_B  5   // dir (yellow)
 
 // Per-side count direction. The right motor/encoder is mirror-mounted, so its
-// raw counts run opposite the left. FLIPPED BOTH (was +1/-1): with the previous
-// pair, physical forward logged as NEGATIVE, and the sign was being cancelled
-// downstream by dropping the minus in the outer-loop law. That works but makes
-// every control expression read backwards. Fix it at the source instead:
+// raw counts run opposite the left. RE-VALIDATED from the autonomous 2026-08-13
+// drive log: the inner loop's known forward catch (negative PWM) produced
+// negative counts with -1/+1. The earlier hand-tilt test could not establish
+// wheel polarity because the operator was also moving the chassis. Flip both so:
 //   >>> FORWARD ROLL = POSITIVE COUNTS on both wheels. <<<
 // Everything downstream (positionRev, forwardVel, targetVel, posSetpoint) now
 // uses "+ = forward" and the control law reads as written. If a wheel counts the
 // wrong way after a re-mount/rewire, flip that side here and NOWHERE else.
-#define ENC_LEFT_DIR   (-1)
-#define ENC_RIGHT_DIR  (+1)
+#define ENC_LEFT_DIR   (+1)
+#define ENC_RIGHT_DIR  (-1)
 
 // Encoder geometry (for when we convert ticks -> wheel velocity):
 //   13 PPR base (26-pole magnet ring) * 42:1 gearbox = 546 rising edges of A
@@ -588,6 +588,7 @@ void setup() {
   Serial.print("PWM_CFG HZ "); Serial.print(MOTOR_PWM_HZ);
   Serial.print(" BITS "); Serial.print(MOTOR_PWM_BITS);
   Serial.println(" | L 6/9 FlexPWM2_2 A/B | R 22 FlexPWM4_0A 23 FlexPWM4_1A");
+  Serial.println("SIGN_CFG TARGET_FWD + ENC_FWD + PWM_FWD -");
 #if ENCODER_TEST
   Serial.println("ENCODER_TEST mode: motors OFF. Roll each wheel by hand "
                  "(1 turn = ~546 counts = 1.00 rev).");
@@ -700,7 +701,7 @@ void applyLiveTune() {
 // Keep ISRs tiny: one digitalRead + one increment. On the Uno a digitalRead is
 // a few microseconds, fine at these pulse rates. B gives the raw direction;
 // ENC_*_DIR flips it per side so both wheels share the chassis convention:
-// physical forward = negative, physical reverse = positive.
+// physical forward = positive, physical reverse = negative.
 void leftEncISR()  { leftTicks  += ENC_LEFT_DIR  * (digitalRead(LEFT_ENC_B)  ? -1 : +1); }
 void rightEncISR() { rightTicks += ENC_RIGHT_DIR * (digitalRead(RIGHT_ENC_B) ? -1 : +1); }
 
