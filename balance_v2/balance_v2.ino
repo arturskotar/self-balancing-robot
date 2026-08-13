@@ -56,7 +56,7 @@ MPU9250 imu;
 // 4482 Hz, and the wheels needed ~40 to roll after someone set 20 kHz. Running
 // 20 kHz multiplied the electrical deadband by 4.46x and ate the entire low-PWM
 // band that smooth driving lives in. 4482 Hz is the Teensy default and the
-// frequency the known-good balance + MOTOR_DEADBAND=11 were measured at.
+// frequency the known-good balance + the 11/13 deadbands were measured at.
 // Set explicitly on all four pins so the value is documented, not inherited.
 const int MOTOR_PWM_HZ = 4482;   // do NOT raise without re-running DEADBAND_TEST
 const int MOTOR_PWM_BITS = 8;    // analogWrite range is explicitly 0..255 on every channel
@@ -103,7 +103,9 @@ const long ENC_COUNTS_PER_REV = 546;
 // Set to 1 to MEASURE the stiction PWM (the lowest PWM that actually turns each
 // loaded wheel). Put the robot on a stand so the wheels spin free, flash, and
 // watch the monitor: it ramps PWM up and reports "first-move L@<pwm> R@<pwm>".
-// Set MOTOR_DEADBAND from the larger first-move result, then disable.
+// The test reports each wheel separately -- set LEFT_DEADBAND from "first-move L@"
+// and RIGHT_DEADBAND from "R@". They are expected to DIFFER (right runs stiffer on
+// this chassis); don't average them. Then set this back to 0.
 #define DEADBAND_TEST 0
 
 // ---- IMU sign/axis test ----------------------------------------------------
@@ -148,7 +150,7 @@ float BALANCE_SETPOINT = -3.22f;         // deg : measured after rigidly mountin
 // Start as a PD controller (Ki = 0). Add a tiny Ki only after PD balances.
 float Kp = 2.00f;  // proportional  (deg -> PWM)  raised 0.85 -> 2.0: at low Kp a few-degree lean
                    // produced a PWM below wheel stiction, so it never caught itself. Re-tune only
-                   // after measuring MOTOR_DEADBAND with the deadband test.
+                   // after measuring the per-side deadbands with the deadband test.
 float Kd = 0.3f;   // derivative    (deg/s    -> PWM)  RE-TUNED FROM SCRATCH 2026-06-30: old 3.5-4.5 was
                    // tuned vs a DEAD gyro. With the clean rate, RAISING Kd 0.5->1.0 made the ring WORSE,
                    // not better -> we're past peak damping into D-DESTABILIZATION: the 20 Hz on-chip
@@ -238,11 +240,25 @@ const int   MAX_PWM        = 110;   // ceiling, 0-255. Raised 80->110 for author
                                     // backward falls. WATCH motor heat/current as you push this up.
 const float OUT_DEADZONE   = 0.5f;  // ignore PD outputs smaller than this (PWM units)
 
-// ---- Symmetric stiction compensation ---------------------------------------
-// Preserve the known-good balance behavior: every non-zero PID effort gets the
-// same measured floor on both wheels. Do not inject time-dependent breakaway
-// pulses into the pitch loop; they turn small post-coast corrections into kicks.
-const int MOTOR_DEADBAND = 11;
+// ---- Per-side stiction compensation ----------------------------------------
+// Every non-zero PID effort gets a static floor so the wheel actually moves.
+// STILL STATIC, NOT TIME-DEPENDENT: do not reintroduce breakaway pulses into the
+// pitch loop -- they turn small post-coast corrections into kicks (that was the
+// abandoned `balancing-tuned` branch).
+//
+// The two wheels do NOT need the same floor. Evidence from the 2026-08-13 log:
+// summing per-window encoder deltas, the LEFT wheel ran 21% ahead of the right
+// below ~23 PWM, falling to 4% above ~30 PWM -- i.e. the RIGHT wheel needs more
+// PWM to break away, and the gap closes once both are moving. That is exactly a
+// deadband difference, and it matches the old bench measurement of ~11 L / 13 R.
+// Symptom if this is wrong: it VEERS while creeping but tracks straight at speed.
+// NOTE this is the opposite side from the comment in rc_drive.ino, which claims
+// the pins-6/9 (left) motor is stiffer. The measurement wins; rc_drive is stale.
+const int LEFT_DEADBAND  = 11;
+const int RIGHT_DEADBAND = 13;
+// Worst-case floor, used for the saturation-latch effort ceiling so the latch
+// can't false-trip on whichever wheel has the smaller usable effort range.
+const int MAX_DEADBAND = (LEFT_DEADBAND > RIGHT_DEADBAND) ? LEFT_DEADBAND : RIGHT_DEADBAND;
 
 // ---- RC drive (radio -> motion) --------------------------------------------
 // Drive stick sets a wheel VELOCITY target (rev/s), which is integrated into the
@@ -450,7 +466,7 @@ void setup() {
                  "(1 turn = ~546 counts = 1.00 rev).");
 #elif DEADBAND_TEST
   Serial.println("DEADBAND_TEST mode: wheels OFF THE GROUND. Ramping PWM; "
-                 "set MOTOR_DEADBAND from the larger first-move value.");
+                 "set LEFT_DEADBAND from 'first-move L@' and RIGHT_DEADBAND from 'R@'.");
 #elif IMU_TEST
   Serial.println("IMU_TEST mode: motors OFF. Hold + slowly tilt FORWARD then BACK. "
                  "aPitch & gX should rise together tilting forward (consistent sign).");
@@ -511,17 +527,17 @@ void motorPerWheel(int pwmL, int pwmR) {
   motorWriteWheel(RIGHT_MOTOR_FORWARD_PIN, RIGHT_MOTOR_REVERSE_PIN, pwmR, lastSignR);
 }
 
-// Map either wheel's effort through the same static deadband compensation.
-// Below OUT_DEADZONE the wheel coasts; otherwise PID retains sign and timing.
-int mapEffortToPwm(float effort) {
+// Map a wheel's effort through ITS OWN static deadband compensation.
+// Below OUT_DEADZONE the wheel rests; otherwise PID retains sign and timing.
+int mapEffortToPwm(float effort, int deadband) {
   if (fabs(effort) <= OUT_DEADZONE) return 0;
-  int pwm = (int)constrain(MOTOR_DEADBAND + fabs(effort), 0.0f, (float)MAX_PWM);
+  int pwm = (int)constrain(deadband + fabs(effort), 0.0f, (float)MAX_PWM);
   return effort > 0.0f ? pwm : -pwm;
 }
 
 void driveControlDiff(float uL, float uR) {
-  int pwmL = mapEffortToPwm(uL);
-  int pwmR = mapEffortToPwm(uR);
+  int pwmL = mapEffortToPwm(uL, LEFT_DEADBAND);
+  int pwmR = mapEffortToPwm(uR, RIGHT_DEADBAND);
   motorPerWheel(pwmL, pwmR);
 }
 
@@ -949,10 +965,10 @@ void loop() {
 #if SATURATION_LATCH
   // --- Inner-loop saturation latch -------------------------------------------
   // mapEffortToPwm() tops out at MAX_PWM, so the usable effort range is
-  // (MAX_PWM - MOTOR_DEADBAND). Sitting at 95% of that for half a second means
+  // (MAX_PWM - MAX_DEADBAND). Sitting at 95% of that for half a second means
   // the inner loop is pinned and losing -- latch instead of stalling the motors.
-  if (fabs(u) > SAT_EFFORT_FRAC * (float)(MAX_PWM - MOTOR_DEADBAND)) satTicks++;
-  else                                                               satTicks = 0;
+  if (fabs(u) > SAT_EFFORT_FRAC * (float)(MAX_PWM - MAX_DEADBAND)) satTicks++;
+  else                                                             satTicks = 0;
   if (satTicks > SAT_TIMEOUT_TICKS) {
     satTicks = 0;
     fallen = true;   // re-arms off the ABSOLUTE accel angle, so this cannot deadlock
@@ -1044,7 +1060,8 @@ void telemetry(float error, float rate, float u) {
   Serial.print(" Kvel "); Serial.print(Kvel, 2);
   Serial.print(" Vmax "); Serial.print(DRIVE_MAX_VEL, 2);
   Serial.print(" GBIAS "); Serial.print(gyroYBias, 2);
-  Serial.print(" DB "); Serial.print(MOTOR_DEADBAND);
+  Serial.print(" DBL "); Serial.print(LEFT_DEADBAND);
+  Serial.print(" DBR "); Serial.print(RIGHT_DEADBAND);
   Serial.print(" PWMHZ "); Serial.print(MOTOR_PWM_HZ);
   Serial.print(" SET "); Serial.println(sweepIdx + 1);
   controlLog.encoderDeltaL = 0;
