@@ -360,26 +360,21 @@ const float DRIVE_SIGN     = +1.0f; // flip to -1 if the drive stick drives the 
 const float TURN_SIGN      = +1.0f; // flip to -1 if the turn stick steers the wrong way
 
 // ---- Drive launch assist ----------------------------------------------------
-// A hand push proves the cascade can drive once both wheels are rolling. Arm on
-// a fresh drive command, but WAIT until the body has physically established the
-// requested lean. Only then give the axle a short pulse in
-// the requested travel direction. Starting the pulse at the stick edge was too
-// early: it expired while the pitch loop was still moving the wheels backward
-// to create the lean, so telemetry always showed START - once the bot was stuck.
-// The pulse is one-shot, aborts on balance error/rate, and is never active while
-// standing or during pure rotation.
-// The first gated ground test proved 4 was not authority: it produced only
-// -19/-31 PWM for the forward catch and neither encoder advanced. Ten maps to
-// roughly -25/-37 with the measured loaded floors. The latest inertia test
-// showed this pulse re-firing after the normal controller had already recovered
-// wheel speed, so keep the state machine only for controlled A/B tests.
-#define DRIVE_LAUNCH_ASSIST 0       // superseded by the persistent velocity-effort path
-const float         LAUNCH_ASSIST_EFFORT     = 10.0f; // minimum effort beyond the static PWM floors
-const float         LAUNCH_READY_LEAN_DEG    = 1.5f;  // measured body lean must be established first
+// A hand push proves the cascade drives correctly once the wheels are rolling,
+// while a stopped launch reaches its 5 deg target and merely rocks around it.
+// Wait until that lean is established and nearly stationary, then apply one
+// bounded 200 ms axle pulse to cross static friction. Unlike the retired
+// velocity-effort path, this cannot persist: every exit enters LAUNCH_DONE and
+// a fresh pulse is impossible until the stick is released or changes direction.
+#define DRIVE_LAUNCH_ASSIST 1
+const float         LAUNCH_ASSIST_EFFORT     = 20.0f; // -35/-47 PWM with measured static floors
+const float         LAUNCH_MIN_TARGET_VEL    = 0.30f; // no full breakaway pulse for small stick inputs
+const float         LAUNCH_READY_LEAN_DEG    = 3.5f;  // most of the 5 deg drive lean must exist first
 const float         LAUNCH_READY_ERROR_DEG   = 1.25f; // body must be close to the leaned target
 const float         LAUNCH_READY_RATE_DPS    = 10.0f; // do not launch in the fast part of a pitch swing
 const float         LAUNCH_ABORT_ERROR_DEG   = 2.5f;  // immediately return authority to balance
-const float         LAUNCH_ABORT_RATE_DPS    = 40.0f;
+const float         LAUNCH_ABORT_LEAN_DEG    = 2.0f;  // pulse stops if the established lean is lost
+const float         LAUNCH_MAX_START_VEL     = 0.06f; // already rolling means the pulse is unnecessary
 const float         LAUNCH_RELEASE_VEL       = 0.12f; // rev/s toward command means breakaway succeeded
 const unsigned int  LAUNCH_RELEASE_TICKS     = 20;    // require 100 ms at 200 Hz; reject oscillation spikes
 const unsigned int  LAUNCH_ASSIST_TICKS      = 40;    // 200 ms at 200 Hz, counted only while eligible
@@ -497,7 +492,7 @@ bool  wheelMovingL = false, wheelMovingR = false;  // wheel turned within WHEEL_
 bool  armedPrev = false;                       // edge-detect the arm transition (soft start)
 bool  driveCommandPrev = false;                // edge-detect a fresh non-zero drive-stick command
 bool  driveVelocityEffortLatched = false;      // strict engage, wider safety limits while active
-enum LaunchAssistState : uint8_t { LAUNCH_IDLE, LAUNCH_WAIT_LEAN, LAUNCH_PUSH };
+enum LaunchAssistState : uint8_t { LAUNCH_IDLE, LAUNCH_WAIT_LEAN, LAUNCH_PUSH, LAUNCH_DONE };
 LaunchAssistState launchAssistState = LAUNCH_IDLE;
 int8_t launchAssistDirection = 0;              // +1 forward target, -1 reverse target
 unsigned int launchAssistTicksRemaining = 0;   // bounded budget pauses while PID must catch the other way
@@ -526,8 +521,8 @@ struct ControlTelemetry {
   bool dTermLimited = false;
   bool driveVelocityEffortActive = false;
   bool driving = false;
-  char launchState = '-';                   // '-' idle, 'W' waiting for lean, 'P' axle pulse
-  char launchEvent = '-';                   // P pulse, D deferred, T budget spent, R rolling, E/G unsafe
+  char launchState = '-';                   // '-' idle, W waiting, P pulse, C completed until release
+  char launchEvent = '-';                   // P pulse, T timeout, R rolling, E/B unsafe, N neutral
   bool coasting = true;
 };
 ControlTelemetry controlLog;
@@ -1052,7 +1047,8 @@ void loop() {
     posSetpoint = positionRev;
     driveVelocityEffortLatched = false;
 #if DRIVE_LAUNCH_ASSIST
-    launchAssistState = LAUNCH_WAIT_LEAN;
+    launchAssistState = fabs(targetVel) >= LAUNCH_MIN_TARGET_VEL
+                      ? LAUNCH_WAIT_LEAN : LAUNCH_DONE;
 #else
     launchAssistState = LAUNCH_IDLE;
 #endif
@@ -1071,7 +1067,7 @@ void loop() {
   driveCommandPrev = driving;
 
   // Confirm real rolling over a window instead of trusting a one-tick encoder
-  // burst when the legacy launch-assist A/B test is enabled.
+  // burst. Sustained motion retires the pulse before its fixed budget expires.
 #if DRIVE_LAUNCH_ASSIST
   float driveVelTowardTarget = driveDirection * forwardVel;
   if (driving && driveVelTowardTarget >= LAUNCH_RELEASE_VEL) {
@@ -1221,18 +1217,16 @@ void loop() {
 #endif
 
   // --- Bounded drive-launch assist ------------------------------------------
-  // This is deliberately staged after the inner controller. WAIT_LEAN lets the
-  // normal non-minimum-phase response create the requested body lean. PUSH then
-  // holds only a small minimum axle effort in the requested travel direction,
-  // long enough to cross static friction. It may strengthen an existing catch,
-  // but must NEVER reverse an opposite-direction balance correction. A large
-  // error/rate aborts instead of fighting recovery.
+  // WAIT_LEAN lets the normal non-minimum-phase response establish the requested
+  // lean. PUSH may override the small alternating PD effort for at most 200 ms;
+  // that is the point of breakaway compensation. Angle and lean gates abort it,
+  // and LAUNCH_DONE prevents repeated kicks during a held command.
   controlLog.launchBoost = 0.0f;
+  controlLog.launchEvent = '-';
   controlLog.driveVelocityEffort = 0.0f;
   controlLog.driveVelocityEffortActive = false;
 #if DRIVE_LAUNCH_ASSIST
   float launchEffortSign = launchAssistDirection > 0 ? -1.0f : 1.0f;
-  bool balanceCatchingTowardDrive = launchEffortSign * u > 0.0f;
 #endif
 #if DRIVE_LAUNCH_ASSIST || DRIVE_VELOCITY_EFFORT
   float actualLean = pitch - BALANCE_SETPOINT;
@@ -1259,51 +1253,43 @@ void loop() {
     bool leanReady = launchAssistDirection * actualLean >= LAUNCH_READY_LEAN_DEG;
     bool bodyReady = fabs(error) <= LAUNCH_READY_ERROR_DEG &&
                      fabs(dRateFilt) <= LAUNCH_READY_RATE_DPS;
-    // A held command may spend several seconds recovering from momentum in the
-    // opposite direction. Keep waiting safely; the lean/error/rate/direction
-    // gates below already prevent torque assist until balance has recovered.
+    bool strongCommand = fabs(targetVel) >= LAUNCH_MIN_TARGET_VEL;
+    bool stopped = fabs(forwardVel) <= LAUNCH_MAX_START_VEL;
     if (driveRollingConfirmed) {
       controlLog.launchEvent = 'R';
-      launchAssistState = LAUNCH_IDLE;
-    } else if (!driving) {
+      launchAssistState = LAUNCH_DONE;
+    } else if (!driving || !strongCommand) {
       controlLog.launchEvent = 'N';
-      launchAssistState = LAUNCH_IDLE;
-    } else if (softStart >= 0.99f && leanReady && bodyReady &&
-               balanceCatchingTowardDrive) {
+      launchAssistState = LAUNCH_DONE;
+    } else if (softStart >= 0.99f && leanReady && bodyReady && stopped) {
       controlLog.launchEvent = 'P';
       launchAssistState = LAUNCH_PUSH;
     }
   }
   if (launchAssistState == LAUNCH_PUSH) {
     bool unsafeError = fabs(error) > LAUNCH_ABORT_ERROR_DEG;
-    bool unsafeRate = fabs(dRateFilt) > LAUNCH_ABORT_RATE_DPS;
+    bool unsafeLean = launchAssistDirection * actualLean < LAUNCH_ABORT_LEAN_DEG;
+    bool strongCommand = fabs(targetVel) >= LAUNCH_MIN_TARGET_VEL;
     if (driveRollingConfirmed) {
       controlLog.launchEvent = 'R';
-      launchAssistState = LAUNCH_IDLE;
+      launchAssistState = LAUNCH_DONE;
     } else if (unsafeError) {
       controlLog.launchEvent = 'E';
-      launchAssistState = LAUNCH_IDLE;
-    } else if (unsafeRate) {
-      controlLog.launchEvent = 'G';
-      launchAssistState = LAUNCH_IDLE;
-    } else if (!driving) {
+      launchAssistState = LAUNCH_DONE;
+    } else if (unsafeLean) {
+      controlLog.launchEvent = 'B';
+      launchAssistState = LAUNCH_DONE;
+    } else if (!driving || !strongCommand) {
       controlLog.launchEvent = 'N';
-      launchAssistState = LAUNCH_IDLE;
-    } else if (!balanceCatchingTowardDrive) {
-      // Do not spend the one-shot budget while balance must still catch in the
-      // opposite direction. Return to the gated wait state and resume only when
-      // the inner PID itself points toward the requested travel direction.
-      controlLog.launchEvent = 'D';
-      launchAssistState = LAUNCH_WAIT_LEAN;
+      launchAssistState = LAUNCH_DONE;
     } else if (launchAssistTicksRemaining == 0) {
       controlLog.launchEvent = 'T';
-      launchAssistState = LAUNCH_IDLE;
+      launchAssistState = LAUNCH_DONE;
     } else {
       // Negative motor effort is physical forward on this chassis; encoder and
       // target velocity use the opposite (+forward) convention.
       float launchFloor = launchEffortSign * LAUNCH_ASSIST_EFFORT;
-      bool belowFloor = fabs(u) < LAUNCH_ASSIST_EFFORT;
-      if (balanceCatchingTowardDrive && belowFloor) {
+      if (launchEffortSign * u < LAUNCH_ASSIST_EFFORT) {
         controlLog.launchBoost = launchFloor - u;
         u = launchFloor;
       }
@@ -1325,7 +1311,8 @@ void loop() {
   }
 #endif
   controlLog.launchState = launchAssistState == LAUNCH_WAIT_LEAN ? 'W' :
-                           launchAssistState == LAUNCH_PUSH ? 'P' : '-';
+                           launchAssistState == LAUNCH_PUSH ? 'P' :
+                           launchAssistState == LAUNCH_DONE ? 'C' : '-';
 
   controlLog.effortL = u + turnCmd;
   controlLog.effortR = u - turnCmd;
