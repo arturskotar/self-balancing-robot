@@ -1030,6 +1030,10 @@ void loop() {
   controlLog.driving = driving;
   int8_t driveDirection = targetVel > 0.0f ? +1 : -1;
   if (driving && (!driveCommandPrev || driveDirection != launchAssistDirection)) {
+    // Start pilot control from the measured wheel position. A manual push can
+    // leave the parked target behind the robot, making position hold oppose the
+    // requested direction until the velocity setpoint catches up.
+    posSetpoint = positionRev;
     launchAssistState = LAUNCH_WAIT_LEAN;
     launchAssistDirection = driveDirection;
     launchAssistTicksRemaining = LAUNCH_ASSIST_TICKS;
