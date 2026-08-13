@@ -68,7 +68,7 @@ const long ENC_COUNTS_PER_REV = 546;
 // Set to 1 to MEASURE the stiction PWM (the lowest PWM that actually turns each
 // loaded wheel). Put the robot on a stand so the wheels spin free, flash, and
 // watch the monitor: it ramps PWM up and reports "first-move L@<pwm> R@<pwm>".
-// Set LEFT_DEADBAND/RIGHT_DEADBAND from their respective results, then disable.
+// Set MOTOR_DEADBAND from the larger first-move result, then disable.
 #define DEADBAND_TEST 0
 
 // ---- IMU sign/axis test ----------------------------------------------------
@@ -105,7 +105,7 @@ float BALANCE_SETPOINT = -3.22f;         // deg : measured after rigidly mountin
 // Start as a PD controller (Ki = 0). Add a tiny Ki only after PD balances.
 float Kp = 2.00f;  // proportional  (deg -> PWM)  raised 0.85 -> 2.0: at low Kp a few-degree lean
                    // produced a PWM below wheel stiction, so it never caught itself. Re-tune only
-                   // after measuring LEFT_DEADBAND and RIGHT_DEADBAND with the deadband test.
+                   // after measuring MOTOR_DEADBAND with the deadband test.
 float Kd = 0.3f;   // derivative    (deg/s    -> PWM)  RE-TUNED FROM SCRATCH 2026-06-30: old 3.5-4.5 was
                    // tuned vs a DEAD gyro. With the clean rate, RAISING Kd 0.5->1.0 made the ring WORSE,
                    // not better -> we're past peak damping into D-DESTABILIZATION: the 20 Hz on-chip
@@ -155,23 +155,11 @@ const int   MAX_PWM        = 110;   // ceiling, 0-255. Raised 80->110 for author
                                     // backward falls. WATCH motor heat/current as you push this up.
 const float OUT_DEADZONE   = 0.5f;  // ignore PD outputs smaller than this (PWM units)
 
-// ---- Per-side stiction kick -------------------------------------------------
-// Compensate only for the measured per-wheel dead zone. A larger permanent floor
-// turns small PID sign changes into full-power reversals and creates a limit cycle.
-// Any extra loaded breakaway authority must be a short pulse, not a steady floor.
-const int   LEFT_DEADBAND  = 11;    // pins 6/9; keep sides equal until loaded response is measured
-const int   RIGHT_DEADBAND = 11;    // pins 22/23
-const int   BREAKAWAY_PWM  = 35;    // short loaded-wheel kick; never a steady minimum
-const unsigned long BREAKAWAY_TIME_US  = 70000;   // 70 ms kick
-const unsigned long BREAKAWAY_REARM_US = 120000;  // must be idle 120 ms before another kick
-
-struct BreakawayState {
-  bool active = false;
-  int kickSign = 0;
-  unsigned long idleSinceUs = 0;
-  unsigned long kickUntilUs = 0;
-};
-BreakawayState leftBreakaway, rightBreakaway;
+// ---- Symmetric stiction compensation ---------------------------------------
+// Preserve the known-good balance behavior: every non-zero PID effort gets the
+// same measured floor on both wheels. Do not inject time-dependent breakaway
+// pulses into the pitch loop; they turn small post-coast corrections into kicks.
+const int MOTOR_DEADBAND = 11;
 
 // ---- RC drive (radio -> motion) --------------------------------------------
 const float TURN_AUTHORITY = 25.0f; // PWM-effort differential at full turn stick
@@ -329,7 +317,7 @@ void setup() {
                  "(1 turn = ~546 counts = 1.00 rev).");
 #elif DEADBAND_TEST
   Serial.println("DEADBAND_TEST mode: wheels OFF THE GROUND. Ramping PWM; "
-                 "set LEFT_DEADBAND and RIGHT_DEADBAND from their own first-move values.");
+                 "set MOTOR_DEADBAND from the larger first-move value.");
 #elif IMU_TEST
   Serial.println("IMU_TEST mode: motors OFF. Hold + slowly tilt FORWARD then BACK. "
                  "aPitch & gX should rise together tilting forward (consistent sign).");
@@ -343,13 +331,6 @@ void motorRaw(int pwm) {
   pwm = constrain(pwm, -255, 255);
   motorPwmL = pwm;
   motorPwmR = pwm;
-  if (pwm == 0) {
-    unsigned long now = micros();
-    if (leftBreakaway.active) leftBreakaway.idleSinceUs = now;
-    if (rightBreakaway.active) rightBreakaway.idleSinceUs = now;
-    leftBreakaway.active = rightBreakaway.active = false;
-    leftBreakaway.kickUntilUs = rightBreakaway.kickUntilUs = 0;
-  }
   if (pwm > 0) {
     analogWrite(LEFT_MOTOR_FORWARD_PIN, pwm);  analogWrite(LEFT_MOTOR_REVERSE_PIN, 0);
     analogWrite(RIGHT_MOTOR_FORWARD_PIN, pwm); analogWrite(RIGHT_MOTOR_REVERSE_PIN, 0);
@@ -397,36 +378,17 @@ void motorPerWheel(int pwmL, int pwmR) {
   motorWriteWheel(RIGHT_MOTOR_FORWARD_PIN, RIGHT_MOTOR_REVERSE_PIN, pwmR, lastSignR);
 }
 
-// Map per-wheel efforts (balance +/- turn) to PWM, each past its own stiction
-// dead band. Below OUT_DEADZONE a wheel is left at 0 (lets the coast band rest it).
-int mapEffortToPwm(float effort, int deadband, BreakawayState &state, unsigned long now) {
-  if (fabs(effort) <= OUT_DEADZONE) {
-    if (state.active) state.idleSinceUs = now;
-    state.active = false;
-    state.kickUntilUs = 0;
-    return 0;
-  }
-
-  int sign = effort > 0.0f ? 1 : -1;
-  if (!state.active) {
-    if (now - state.idleSinceUs >= BREAKAWAY_REARM_US) {
-      state.kickSign = sign;
-      state.kickUntilUs = now + BREAKAWAY_TIME_US;
-    }
-    state.active = true;
-  }
-
-  int pwm = (int)constrain(deadband + fabs(effort), 0.0f, (float)MAX_PWM);
-  bool kickActive = (long)(state.kickUntilUs - now) > 0;
-  if (kickActive && sign == state.kickSign) pwm = max(pwm, BREAKAWAY_PWM);
-  if (sign != state.kickSign) state.kickUntilUs = 0;
-  return sign * pwm;
+// Map either wheel's effort through the same static deadband compensation.
+// Below OUT_DEADZONE the wheel coasts; otherwise PID retains sign and timing.
+int mapEffortToPwm(float effort) {
+  if (fabs(effort) <= OUT_DEADZONE) return 0;
+  int pwm = (int)constrain(MOTOR_DEADBAND + fabs(effort), 0.0f, (float)MAX_PWM);
+  return effort > 0.0f ? pwm : -pwm;
 }
 
 void driveControlDiff(float uL, float uR) {
-  unsigned long now = micros();
-  int pwmL = mapEffortToPwm(uL, LEFT_DEADBAND, leftBreakaway, now);
-  int pwmR = mapEffortToPwm(uR, RIGHT_DEADBAND, rightBreakaway, now);
+  int pwmL = mapEffortToPwm(uL);
+  int pwmR = mapEffortToPwm(uR);
   motorPerWheel(pwmL, pwmR);
 }
 
