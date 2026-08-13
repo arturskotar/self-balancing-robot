@@ -210,10 +210,12 @@ float Ki = 0.0f;   // integral      (deg*s    -> PWM)  keep 0 until PD works
 #define OUTER_LOOP 1
 
 float Kpos = 1.0f;               // wheel position error (rev -> deg of lean)
-float Kvel = 4.0f;               // wheel velocity error (rev/s -> deg of lean); tune with SC=2 + S1.
-                                 // SUSPECT: 4.0 means 0.68 rev/s alone commands 2.7 deg of lean, over
-                                 // half the LEAN_CLAMP. Never validated (encoders were dead). If the
-                                 // outer loop is the culprit, start around 1.0, not 4.0.
+float Kvel = 4.0f;               // neutral wheel-velocity damping; tune with SC=2 + S1
+// The 2026-08-14 stalled-drive log held VERR near +0.6 rev/s but requested only
+// ~3 deg, leaving the angle P term smaller than the measured drivetrain ring.
+// Double velocity-to-lean authority only while the pilot commands translation.
+// LEAN_CLAMP still bounds the request at the existing 5 deg safety limit.
+const float DRIVE_KVEL_MULTIPLIER = 2.0f;
 const float LEAN_CLAMP = 5.0f;   // deg : known-good outer-loop safety cap
 const float LEAN_LPF   = 0.99f;  // EMA on leanCmd (~500 ms). Higher = slower, safer outer loop.
                                  // 0.95 (~100 ms) RAN AWAY: faster than the pendulum's non-minimum-
@@ -511,6 +513,7 @@ struct ControlTelemetry {
   float pTerm = 0.0f, iTerm = 0.0f, dTermRaw = 0.0f;
   float effortL = 0.0f, effortR = 0.0f;
   float positionLean = 0.0f, velocityLean = 0.0f, leanRaw = 0.0f;
+  float effectiveKvel = 0.0f;
   float speedInput = 0.0f, commandCap = 0.35f;
   float driveRaw = 0.0f, turnRaw = 0.0f;
   float driveCmd = 0.0f, turnCmd = 0.0f;
@@ -963,6 +966,7 @@ void loop() {
     controlLog.commandCap = 0.35f + 0.65f * controlLog.speedInput;
     controlLog.driveCmd = controlLog.turnCmd = 0.0f;
     controlLog.positionLean = controlLog.velocityLean = controlLog.leanRaw = 0.0f;
+    controlLog.effectiveKvel = Kvel;
     controlLog.posError = controlLog.velError = controlLog.softStart = 0.0f;
     controlLog.launchBoost = 0.0f;
     controlLog.driveVelocityEffort = 0.0f;
@@ -1112,6 +1116,7 @@ void loop() {
     controlLog.dTermLimited = false;
     controlLog.effortL = controlLog.effortR = 0.0f;
     controlLog.positionLean = controlLog.velocityLean = controlLog.leanRaw = 0.0f;
+    controlLog.effectiveKvel = Kvel;
     controlLog.posError = controlLog.velError = 0.0f;
     controlLog.launchBoost = 0.0f;
     controlLog.driveVelocityEffort = 0.0f;
@@ -1140,9 +1145,11 @@ void loop() {
   float posError = posSetpoint - positionRev;   // rev   : + = must travel forward
   float velError = targetVel   - forwardVel;    // rev/s : + = must speed up forward
 #if OUTER_LOOP
+  float effectiveKvel = Kvel * (driving ? DRIVE_KVEL_MULTIPLIER : 1.0f);
   float positionLean = Kpos * posError;
-  float velocityLean = Kvel * velError;
+  float velocityLean = effectiveKvel * velError;
 #else
+  float effectiveKvel = 0.0f;
   float positionLean = 0.0f;   // DIAGNOSTIC: outer loop disabled -> pure baseline inner loop
   float velocityLean = 0.0f;
 #endif
@@ -1153,6 +1160,7 @@ void loop() {
   controlLog.velError = velError;
   controlLog.positionLean = positionLean;
   controlLog.velocityLean = velocityLean;
+  controlLog.effectiveKvel = effectiveKvel;
   controlLog.leanRaw = leanRaw;
   controlLog.targetPitch = BALANCE_SETPOINT + leanCmd;
 
@@ -1410,6 +1418,7 @@ void telemetry(float error, float rate, float u) {
   Serial.print(" Kd "); Serial.print(Kd, 2);
   Serial.print(" Kpos "); Serial.print(Kpos, 2);
   Serial.print(" Kvel "); Serial.print(Kvel, 2);
+  Serial.print(" Kveff "); Serial.print(controlLog.effectiveKvel, 2);
   Serial.print(" Vmax "); Serial.print(DRIVE_MAX_VEL, 2);
   Serial.print(" Bstart "); Serial.print(LAUNCH_ASSIST_EFFORT, 1);
   Serial.print(" GBIAS "); Serial.print(gyroYBias, 2);
