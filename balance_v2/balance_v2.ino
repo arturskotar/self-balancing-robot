@@ -358,6 +358,16 @@ const float TURN_STICK_DEADZONE  = 0.30f; // measured cross-axis reaches ~0.25 d
 const float DRIVE_SIGN     = +1.0f; // flip to -1 if the drive stick drives the wrong way
 const float TURN_SIGN      = +1.0f; // flip to -1 if the turn stick steers the wrong way
 
+// ---- Drive launch assist ----------------------------------------------------
+// A hand push proves the cascade can drive once both wheels are rolling. Give a
+// fresh drive command a short, bounded common-mode effort margin to cross loaded
+// static friction. The boost follows the INNER loop's sign, so the pitch loop
+// still decides whether the wheels must create the lean or catch it; this never
+// commands a motor direction independently of balance. It ends as soon as both
+// encoders confirm net motion, or after the timeout, and is inactive at neutral.
+const float         LAUNCH_ASSIST_EFFORT = 4.0f;  // added PWM-effort above the measured static floors
+const unsigned long LAUNCH_ASSIST_MS     = 250;   // bounded to the drive-onset transient
+
 // ---- Soft start + saturation latch (from the rc_balance reference) ---------
 // Soft start: ramp control authority in over SOFT_START_SEC after arming so a
 // mid-air / mid-tilt arm doesn't slam the motors to full.
@@ -458,6 +468,9 @@ bool  stalled = false;                         // true while the stall cutoff ha
 bool  fallen = false;                          // true while the fall latch has the motors off
 bool  wheelMovingL = false, wheelMovingR = false;  // wheel turned within WHEEL_STILL_TICKS
 bool  armedPrev = false;                       // edge-detect the arm transition (soft start)
+bool  driveCommandPrev = false;                // edge-detect a fresh non-zero drive-stick command
+bool  launchAssistActive = false;              // bounded common-mode boost during drive breakaway
+unsigned long launchAssistStartedMs = 0;
 unsigned long armedAtMs = 0;                   // millis() at the moment we armed
 unsigned long satTicks = 0;                    // consecutive ticks with the inner loop pinned
 
@@ -476,7 +489,9 @@ struct ControlTelemetry {
   long encoderDeltaL = 0, encoderDeltaR = 0;
   float posError = 0.0f, velError = 0.0f;   // outer-loop tracking errors
   float softStart = 0.0f;                   // 0..1 authority ramp after arming
+  float launchBoost = 0.0f;                 // signed effort added during drive onset
   bool driving = false;
+  bool launching = false;
   bool coasting = true;
 };
 ControlTelemetry controlLog;
@@ -912,7 +927,9 @@ void loop() {
     controlLog.driveCmd = controlLog.turnCmd = 0.0f;
     controlLog.positionLean = controlLog.velocityLean = controlLog.leanRaw = 0.0f;
     controlLog.posError = controlLog.velError = controlLog.softStart = 0.0f;
+    controlLog.launchBoost = 0.0f;
     controlLog.driving = false;
+    controlLog.launching = false;
     controlLog.coasting = true;
     long hl, hr; readEncoders(hl, hr);
     homeTicksSum = hl + hr;      // re-home under the robot while it's parked...
@@ -920,6 +937,8 @@ void loop() {
     targetVelLog = 0.0f;         // re-arming never lurches toward a stale setpoint.
     satTicks     = 0;
     armedPrev    = false;        // next armed tick re-triggers the soft start
+    driveCommandPrev = false;
+    launchAssistActive = false;
     telemetry(pitch - BALANCE_SETPOINT, gyroRate, 0);
     return;
   }
@@ -932,6 +951,8 @@ void loop() {
     integral    = 0.0f;
     leanCmd     = 0.0f;
     satTicks    = 0;
+    driveCommandPrev = false;
+    launchAssistActive = false;
   }
   float softStart = constrain((millis() - armedAtMs) / (SOFT_START_SEC * 1000.0f), 0.0f, 1.0f);
   controlLog.softStart = softStart;
@@ -970,6 +991,13 @@ void loop() {
   // does. Releasing the stick simply freezes the target -> it holds position.
   bool driving = fabs(targetVel) > 0.001f;
   controlLog.driving = driving;
+  if (driving && !driveCommandPrev) {
+    launchAssistActive = true;
+    launchAssistStartedMs = millis();
+  } else if (!driving) {
+    launchAssistActive = false;
+  }
+  driveCommandPrev = driving;
 
   float error = pitch - BALANCE_SETPOINT;
 
@@ -989,6 +1017,7 @@ void loop() {
     integral = 0.0f;
     leanCmd = 0.0f;                          // drop any stale lean from before the fall
     satTicks = 0;
+    launchAssistActive = false;
     armedAtMs = millis();                    // soft-start the recovery too
   }
   if (fallen) {
@@ -999,6 +1028,8 @@ void loop() {
     controlLog.effortL = controlLog.effortR = 0.0f;
     controlLog.positionLean = controlLog.velocityLean = controlLog.leanRaw = 0.0f;
     controlLog.posError = controlLog.velError = 0.0f;
+    controlLog.launchBoost = 0.0f;
+    controlLog.launching = false;
     controlLog.coasting = true;
     posSetpoint = positionRev;   // park the target under the robot while it's down
     motorRaw(0);
@@ -1091,6 +1122,24 @@ void loop() {
   }
 #endif
 
+  // --- Bounded drive-launch assist ------------------------------------------
+  // Preserve the pitch controller as the authority over direction. We only add
+  // magnitude to its current common-mode effort while a fresh drive command is
+  // trying to start two stationary wheels. Once both wheels make sustained net
+  // progress, the normal cascade takes over immediately.
+  controlLog.launchBoost = 0.0f;
+  if (launchAssistActive) {
+    bool timedOut = (millis() - launchAssistStartedMs) >= LAUNCH_ASSIST_MS;
+    bool bothMoving = wheelMovingL && wheelMovingR;
+    if (timedOut || bothMoving || !driving) {
+      launchAssistActive = false;
+    } else if (fabs(u) > OUT_DEADZONE) {
+      controlLog.launchBoost = copysignf(LAUNCH_ASSIST_EFFORT, u);
+      u += controlLog.launchBoost;
+    }
+  }
+  controlLog.launching = launchAssistActive;
+
   controlLog.effortL = u + turnCmd;
   controlLog.effortR = u - turnCmd;
   driveControlDiff(controlLog.effortL, controlLog.effortR);   // balance +/- steering
@@ -1155,6 +1204,8 @@ void telemetry(float error, float rate, float u) {
   Serial.print(" PERR "); Serial.print(controlLog.posError, 3);
   Serial.print(" VERR "); Serial.print(controlLog.velError, 2);
   Serial.print(" SOFT "); Serial.print(controlLog.softStart, 2);
+  Serial.print(" START "); Serial.print(controlLog.launching ? "Y" : "-");
+  Serial.print(" BOOST "); Serial.print(controlLog.launchBoost, 1);
 
   Serial.print(" | LEAN POS "); Serial.print(controlLog.positionLean, 2);
   Serial.print(" VEL "); Serial.print(controlLog.velocityLean, 2);
@@ -1174,6 +1225,7 @@ void telemetry(float error, float rate, float u) {
   Serial.print(" Kpos "); Serial.print(Kpos, 2);
   Serial.print(" Kvel "); Serial.print(Kvel, 2);
   Serial.print(" Vmax "); Serial.print(DRIVE_MAX_VEL, 2);
+  Serial.print(" Bstart "); Serial.print(LAUNCH_ASSIST_EFFORT, 1);
   Serial.print(" GBIAS "); Serial.print(gyroYBias, 2);
   // Floors actually in force this tick (M = moving/Coulomb, S = static breakaway).
   Serial.print(" DBL "); Serial.print(wheelMovingL ? LEFT_DEADBAND_MOVING : LEFT_DEADBAND_STATIC);
