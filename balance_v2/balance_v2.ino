@@ -366,7 +366,12 @@ const float TURN_SIGN      = +1.0f; // flip to -1 if the turn stick steers the w
 // to create the lean, so telemetry always showed START - once the bot was stuck.
 // The pulse is one-shot, aborts on balance error/rate, and is never active while
 // standing or during pure rotation.
-const float         LAUNCH_ASSIST_EFFORT     = 4.0f;  // minimum effort beyond the static PWM floors
+// The first gated ground test proved 4 was not authority: it produced only
+// -19/-31 PWM for the forward catch and neither encoder advanced. Ten maps to
+// roughly -25/-37 with the measured loaded floors, still below the differential
+// output already exercised safely during rotation. It remains body-lean gated,
+// direction-gated, abortable, and limited to LAUNCH_ASSIST_MS.
+const float         LAUNCH_ASSIST_EFFORT     = 10.0f; // minimum effort beyond the static PWM floors
 const float         LAUNCH_READY_LEAN_DEG    = 1.5f;  // measured body lean must be established first
 const float         LAUNCH_READY_ERROR_DEG   = 1.25f; // body must be close to the leaned target
 const float         LAUNCH_READY_RATE_DPS    = 10.0f; // do not launch in the fast part of a pitch swing
