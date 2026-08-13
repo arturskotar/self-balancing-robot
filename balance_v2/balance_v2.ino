@@ -269,6 +269,10 @@ unsigned long sweepLastMs = 0;
 const int   MAX_PWM        = 110;   // ceiling, 0-255. Raised 80->110 for authority to recover large
                                     // backward falls. WATCH motor heat/current as you push this up.
 const float OUT_DEADZONE   = 0.5f;  // ignore PD outputs smaller than this (PWM units)
+// While translating, a tiny sign-changing effort must not become a full
+// +/-15/27 PWM friction-floor reversal. Launch assist is exempt, and larger
+// balance corrections still pass unchanged.
+const float DRIVE_OUTPUT_DEADZONE = 3.0f;
 
 // ---- Per-side stiction compensation ----------------------------------------
 // Every non-zero PID effort gets a static floor so the wheel actually moves.
@@ -529,6 +533,7 @@ struct ControlTelemetry {
   float launchBoost = 0.0f;                 // signed change needed to enforce the launch floor
   float driveVelocityEffort = 0.0f;         // persistent, safety-gated velocity torque
   bool dTermLimited = false;
+  bool driveOutputSuppressed = false;
   bool driveVelocityEffortActive = false;
   bool driving = false;
   char launchState = '-';                   // '-' idle, W waiting, P pulse, C completed until release
@@ -965,6 +970,7 @@ void loop() {
     controlLog.effectiveKd = Kd;
     controlLog.dTermRaw = 0.0f;
     controlLog.dTermLimited = false;
+    controlLog.driveOutputSuppressed = false;
     controlLog.launchEvent = '-';
     controlLog.effortL = controlLog.effortR = 0.0f;
     controlLog.driveRaw = crsf::drive();
@@ -1126,6 +1132,7 @@ void loop() {
     controlLog.effectiveKd = Kd;
     controlLog.dTermRaw = 0.0f;
     controlLog.dTermLimited = false;
+    controlLog.driveOutputSuppressed = false;
     controlLog.effortL = controlLog.effortR = 0.0f;
     controlLog.positionLean = controlLog.velocityLean = controlLog.leanRaw = 0.0f;
     controlLog.effectiveKvel = Kvel;
@@ -1259,6 +1266,7 @@ void loop() {
   controlLog.launchEvent = '-';
   controlLog.driveVelocityEffort = 0.0f;
   controlLog.driveVelocityEffortActive = false;
+  controlLog.driveOutputSuppressed = false;
 #if DRIVE_LAUNCH_ASSIST
   float launchEffortSign = launchAssistDirection > 0 ? -1.0f : 1.0f;
 #endif
@@ -1348,6 +1356,16 @@ void loop() {
     u += controlLog.driveVelocityEffort;
   }
 #endif
+
+  // Preserve the bounded breakaway pulse, but otherwise suppress tiny common-
+  // mode commands before the discontinuous friction floor magnifies them. This
+  // is drive-only; the known-good neutral balancing output map is untouched.
+  if (driving && launchAssistState != LAUNCH_PUSH &&
+      fabs(u) <= DRIVE_OUTPUT_DEADZONE) {
+    u = 0.0f;
+    controlLog.driveOutputSuppressed = true;
+  }
+
   controlLog.launchState = launchAssistState == LAUNCH_WAIT_LEAN ? 'W' :
                            launchAssistState == LAUNCH_PUSH ? 'P' :
                            launchAssistState == LAUNCH_DONE ? 'C' : '-';
@@ -1393,6 +1411,7 @@ void telemetry(float error, float rate, float u) {
   Serial.print(" D "); Serial.print(dTermLog, 2);
   Serial.print(" DLIM "); Serial.print(controlLog.dTermLimited ? "Y" : "-");
   Serial.print(" U "); Serial.print(u, 2);
+  Serial.print(" UDZ "); Serial.print(controlLog.driveOutputSuppressed ? "Y" : "-");
   Serial.print(" EL "); Serial.print(controlLog.effortL, 2);
   Serial.print(" ER "); Serial.print(controlLog.effortR, 2);
   Serial.print(" PWML "); Serial.print(motorPwmL);
