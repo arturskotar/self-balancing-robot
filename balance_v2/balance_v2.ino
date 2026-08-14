@@ -740,7 +740,16 @@ const float TURN_SIGN      = +1.0f; // flip to -1 if the turn stick steers the w
 // Raise this first if launch is still too soft; it is the aggression knob.
 const float FRICTION_FF_BOOST     = 20.0f; // PWM added to each wheel's floor in the FF path
 const float FRICTION_FF_KNEE_V    = 0.12f; // rev/s of velError for ~76% of the floor in CRUISE
-const float FRICTION_FF_LEAN_DEG  = 3.0f;  // deg toward the command: LAUNCH -> CRUISE, one-way
+const float FRICTION_FF_LEAN_DEG  = 3.0f;  // deg toward the command: LAUNCH -> CRUISE
+// ...and back to LAUNCH only when the lean is clearly in the WRONG direction. A plain
+// one-way latch (the previous attempt) caught a transient and then could never
+// re-establish the lean: bench 2026-08-14 showed FFP pinned at C while LEAN ACT was
+// +3.14 against a REVERSE command, i.e. leanToward -3.14, the opposite of what CRUISE
+// assumes. A small positive exit threshold is not usable either -- LEAN ACT rings over
+// a ~7 deg span, so anything near zero chatters, and chatter is a full-amplitude
+// reversal of the FF. -2.0 gives a 5 deg band: the ring (which stays positive) cannot
+// trip it, but a genuinely inverted lean does.
+const float FRICTION_FF_LEAN_LOST = -2.0f; // deg toward the command: CRUISE -> LAUNCH
 
 #define DRIVE_LAUNCH_ASSIST 0
 const float         LAUNCH_ASSIST_EFFORT     = 20.0f; // -35/-47 PWM with measured static floors
@@ -1137,25 +1146,41 @@ void motorPerWheel(int pwmL, int pwmR) {
 // ffBias (-1..+1, see DRIVE_FRICTION_FF) aims the floor at the outer loop's SUSTAINED
 // demand instead of at the sign of this tick's effort. At 0 this is the original map
 // exactly, so standing balance is unchanged.
-int mapEffortToPwm(float effort, float ffBias, float ffBoost, bool moving,
+// ffFloor is the ALREADY-RESOLVED, COMMON floor for the feedforward path (see
+// driveControlDiff). The per-wheel dbMoving/dbStatic pair is still used by the plain
+// sign-of-u path, where the floor only ever augments |effort| and can never oppose it.
+int mapEffortToPwm(float effort, float ffBias, float ffFloor, bool moving,
                    int dbMoving, int dbStatic) {
-  int deadband = moving ? dbMoving : dbStatic;
   if (ffBias != 0.0f) {
     // One-sided friction compensation plus the raw PD effort. An effort that averages
     // to zero now averages to the bias, not to a relay twice its own amplitude.
-    // ffBoost is common-mode so the overdrive adds no yaw -- see FRICTION_FF_BOOST.
-    float cmd = ((float)deadband + ffBoost) * ffBias + effort;
+    float cmd = ffFloor * ffBias + effort;
     if (fabs(cmd) <= OUT_DEADZONE) return 0;
     return (int)constrain(cmd, -(float)MAX_PWM, (float)MAX_PWM);
   }
+  int deadband = moving ? dbMoving : dbStatic;
   if (fabs(effort) <= OUT_DEADZONE) return 0;
   int pwm = (int)constrain(deadband + fabs(effort), 0.0f, (float)MAX_PWM);
   return effort > 0.0f ? pwm : -pwm;
 }
 
 void driveControlDiff(float uL, float uR, float ffBias, float ffBoost) {
-  int pwmL = mapEffortToPwm(uL, ffBias, ffBoost, wheelMovingL, LEFT_DEADBAND_MOVING,  LEFT_DEADBAND_STATIC);
-  int pwmR = mapEffortToPwm(uR, ffBias, ffBoost, wheelMovingR, RIGHT_DEADBAND_MOVING, RIGHT_DEADBAND_STATIC);
+  // ONE FLOOR FOR BOTH WHEELS in the FF path. The bias is a COMMON-MODE drive command;
+  // giving each wheel its own floor injects a differential into a command that should
+  // have none, and because the FF can OPPOSE u that differential lands as a net-zero
+  // wheel. Bench 2026-08-14 with u = -28.50, FFB = +0.99, DBL 11M, DBR 27S:
+  //     left :  11 * 0.99 - 28.50 = -17.6  -> PWML -17
+  //     right:  27 * 0.99 - 28.50 =  -1.8  -> PWMR  -1
+  // ENC L ran 10 -> 267 while ENC R sat at 20: one wheel turning. It is also
+  // self-reinforcing -- the stopped wheel keeps the larger STATIC floor, which cancels
+  // more of u, which keeps it stopped. Taking the max means neither side is
+  // under-driven; the left is over-driven by the 11-vs-27 spread, which costs some yaw
+  // but never strands a wheel at zero.
+  int fl = wheelMovingL ? LEFT_DEADBAND_MOVING  : LEFT_DEADBAND_STATIC;
+  int fr = wheelMovingR ? RIGHT_DEADBAND_MOVING : RIGHT_DEADBAND_STATIC;
+  float ffFloor = (float)(fl > fr ? fl : fr) + ffBoost;
+  int pwmL = mapEffortToPwm(uL, ffBias, ffFloor, wheelMovingL, LEFT_DEADBAND_MOVING,  LEFT_DEADBAND_STATIC);
+  int pwmR = mapEffortToPwm(uR, ffBias, ffFloor, wheelMovingR, RIGHT_DEADBAND_MOVING, RIGHT_DEADBAND_STATIC);
   motorPerWheel(pwmL, pwmR);
 }
 
@@ -1955,7 +1980,8 @@ void loop() {
     // exactly like the launch assist it replaced. It cannot be needed twice without
     // the pilot letting go first.
     float leanToward = driveDirection * (pitch - BALANCE_SETPOINT);
-    if (leanToward >= FRICTION_FF_LEAN_DEG) frictionLeanUp = true;
+    if      (leanToward >= FRICTION_FF_LEAN_DEG)  frictionLeanUp = true;
+    else if (leanToward <  FRICTION_FF_LEAN_LOST) frictionLeanUp = false;
 
     if (frictionLeanUp) {
       // CRUISE. The lean is established, so the wheels must roll FORWARD to turn it
