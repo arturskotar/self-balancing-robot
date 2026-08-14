@@ -162,8 +162,18 @@ const int BURST_N = 400;             // 2.0 s at 200 Hz; 400 * 20 B = 8 KB of 1 
 //     which is the right baseline for an inner-loop question.
 // The burst capture arms on the ARM transition in this mode (not the drive edge),
 // so SB up gives soft-start + 2 s of full-rate capture, and SB down dumps it.
+// RESULT, first run at 3.0 deg: the robot DID travel -- POS 0.016 -> 0.261, about
+// 0.245 rev -- but only during the stand-up overshoot, while the ACTUAL lean was
+// 6.5-7.6 deg. As the inner loop settled the pitch onto the commanded 3.0, speed
+// decayed with it and motion stopped at LEAN ACT ~3.4:
+//     LEAN ACT 7.6 -> VF 0.20      LEAN ACT 4.1 -> VF 0.06
+//     LEAN ACT 6.5 -> VF 0.18      LEAN ACT 3.4 -> VF 0
+//     LEAN ACT 5.0 -> VF 0.11
+// So BREAKAWAY LEAN IS ~3.4 deg and 3.0 sat just under it. Raised to 6.0 as the
+// falsifiable check: comfortably above threshold, it should roll continuously and
+// never enter the stalled stick-slip cycle.
 #define STATIC_LEAN_TEST 1
-const float STATIC_LEAN_DEG = 3.0f;  // deg of commanded lean, held continuously
+const float STATIC_LEAN_DEG = 6.0f;  // deg of commanded lean, held continuously
 
 // ---- IMU sign/axis test ----------------------------------------------------
 // Set to 1 to verify the gyro vs accelerometer convention (motors OFF). Hold the
@@ -325,12 +335,16 @@ const float DRIVE_KVEL_MULTIPLIER = 1.0f;
 // gravity moment, so the chain never starts, and the outer loop just integrates
 // forever against a disturbance it cannot move.
 //
-// 6.0 is a safety choice, not a tuned one: it is now SMALLER than the sum of the
-// component limits (3.0 position + ~1.8 velocity + 2.5 integral = 7.3), so the
-// conditional integration below actually engages and bounds the pitch excursion
-// at 6 deg instead of letting a held stick walk the robot over. Do not raise it
-// again until an open-loop drivetrain test explains the stall.
-const float LEAN_CLAMP = 6.0f;   // deg : outer-loop authority cap (sole saturation point)
+// RESOLVED 2026-08-14 by STATIC_LEAN_TEST + the 200 Hz burst capture. The missing
+// number was never the ceiling, it was the FLOOR: breakaway lean is ~3.4 deg (see
+// STATIC_LEAN_DEG for the lean/velocity table). Every drive attempt had a MEAN
+// achieved lean of ~2.9-3.0 -- a few tenths under threshold. The commanded value
+// looked adequate; the achieved mean never was.
+//
+// 6.0 -> 12.0. Has to clear 3.4 with room for transients and for the outer loop
+// to modulate above it, not merely exceed it. Still under rc_balance's
+// THETA_REF_MAX (0.33 rad = 18.9 deg).
+const float LEAN_CLAMP = 12.0f;  // deg : outer-loop authority cap (sole saturation point)
 // 0.99 -> 0.97 (tau 0.50 s -> 0.17 s, pole 2 -> 6 rad/s). The velocity loop
 // crosses over near 2.5 rad/s, so the old 2 rad/s pole sat essentially ON the
 // crossover and ate ~51 deg of phase exactly where it hurt. That lag is what
@@ -486,7 +500,12 @@ const int MAX_DEADBAND = (LEFT_DEADBAND_STATIC > RIGHT_DEADBAND_STATIC)
 // STILL UNVERIFIED: the TURN direction. Push the stick RIGHT and confirm the robot
 // yaws right; if not, flip TURN_SIGN (turn is a separate channel with its own TX
 // direction setting, so it does not follow from the drive fix).
-const float DRIVE_MAX_VEL  = 0.6f;  // rev/s at full stick. Conservative on purpose: one encoder
+// 0.6 -> 0.25. Measured 2026-08-14: above the ~3.4 deg breakaway the chassis does
+// about 0.05 rev/s per extra degree of lean, so 0.6 rev/s would need ~15 deg --
+// unreachable. An unreachable target keeps velError permanently open, which pinned
+// the outer loop in saturation in every earlier drive log. 0.25 rev/s corresponds
+// to roughly 8-9 deg of lean, inside LEAN_CLAMP with margin.
+const float DRIVE_MAX_VEL  = 0.25f; // rev/s at full stick. Conservative on purpose: one encoder
                                     // count per 5 ms tick is already 0.366 rev/s (546 counts/rev),
                                     // so 0.6 rev/s is only ~1.6 counts/tick of resolution. Raise
                                     // this after the x4 hardware QuadEncoder upgrade (2184 cpr).
