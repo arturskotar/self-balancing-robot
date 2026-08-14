@@ -722,6 +722,23 @@ const float FRICTION_FF_KNEE_U = 3.0f;  // effort units for ~76% of the floor. u
 // Checked against that log: at burst i=0 the lean toward the command is 0.68 deg
 // (LAUNCH); by MS 31199 it is 6.45 deg (CRUISE), so the forward push would engage
 // exactly where the robot sat and did nothing.
+// BREAKAWAY OVERDRIVE. 2026-08-14: the robot finally drove (POS -0.625 -> 1.164, 1.79
+// rev) but needed ~11 deg of lean to come unstuck, and the ramp to 11 deg is what feels
+// slow. The FF was capped at exactly the bare floor -- 11/13 moving, 15/27 static --
+// while the launch assist that historically worked applied 20 ON TOP of those floors
+// for 35/47. So the FF was delivering about a third of the proven push.
+// Added as a COMMON-MODE PWM term, not a per-wheel multiplier: scaling 15/27 by a gain
+// would widen the 12-count differential into a yaw command (2.5x gives 37/67, a 30-count
+// split, larger than TURN_AUTHORITY 25). Adding the same number to both keeps the
+// differential at 12 and lands on 15+20 = 35 and 27+20 = 47 -- the launch assist's exact
+// numbers. It is scaled by ffBias, so tanh(velError) fades it out as commanded speed is
+// reached, and reverses it into BRAKING when overspeed: this log overshot to VF 0.75-0.96
+// against a 0.40 command with LEAN ACT 18.5 deg and ERR 14 deg, and 47 counts of one-sided
+// brake is exactly what that needs.
+// Breaking away at LESS lean shortens the ramp and shrinks the overshoot at the same
+// time, because less accumulated lean gets dumped into acceleration at breakaway.
+// Raise this first if launch is still too soft; it is the aggression knob.
+const float FRICTION_FF_BOOST     = 20.0f; // PWM added to each wheel's floor in the FF path
 const float FRICTION_FF_KNEE_V    = 0.12f; // rev/s of velError for ~76% of the floor in CRUISE
 const float FRICTION_FF_LEAN_DEG  = 3.0f;  // deg toward the command: LAUNCH -> CRUISE
 const float FRICTION_FF_LEAN_DROP = 1.5f;  // hysteresis back to LAUNCH; wide enough that the
@@ -1112,7 +1129,8 @@ int mapEffortToPwm(float effort, float ffBias, bool moving, int dbMoving, int db
   if (ffBias != 0.0f) {
     // One-sided friction compensation plus the raw PD effort. An effort that averages
     // to zero now averages to the bias, not to a relay twice its own amplitude.
-    float cmd = (float)deadband * ffBias + effort;
+    // FRICTION_FF_BOOST is common-mode so the overdrive adds no yaw -- see its note.
+    float cmd = ((float)deadband + FRICTION_FF_BOOST) * ffBias + effort;
     if (fabs(cmd) <= OUT_DEADZONE) return 0;
     return (int)constrain(cmd, -(float)MAX_PWM, (float)MAX_PWM);
   }
