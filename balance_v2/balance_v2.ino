@@ -397,8 +397,8 @@ const unsigned int  LAUNCH_ASSIST_TICKS      = 40;    // one bounded 200 ms wind
 // VERR remains large. Keep it small: the old 8 PWM version made the inner loop
 // fight it by building several degrees of angle error.
 #define DRIVE_VELOCITY_EFFORT 1
-const float DRIVE_VELOCITY_EFFORT_GAIN  = 4.0f; // rev/s error -> PWM effort
-const float DRIVE_VELOCITY_EFFORT_LIMIT = 3.0f; // small trim, well below launch floor
+const float DRIVE_VELOCITY_EFFORT_GAIN  = 5.5f; // rev/s error -> PWM effort
+const float DRIVE_VELOCITY_EFFORT_LIMIT = 4.0f; // small trim, well below launch floor
 const float DRIVE_VELOCITY_HOLD_LEAN_DEG = 0.75f; // hysteresis after the strict 1.5 deg engagement
 
 // ---- Soft start + saturation latch (from the rc_balance reference) ---------
