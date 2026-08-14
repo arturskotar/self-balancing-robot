@@ -252,8 +252,18 @@ float Ki = 0.0f;   // integral      (deg*s    -> PWM)  keep 0 until PD works
 //     Kpeff/Kdeff track Kp/Kd for the whole drive.
 // 1 = schedule ON (blend toward DRIVE_KP / DRIVE_KD with commanded drive).
 //
-// SET TO 0 2026-08-14 to test whether this schedule is what stops the robot driving.
-// The 200 Hz burst capture (400 samples, armed on the drive rising edge) says it is:
+// TESTED 2026-08-14 WITH THIS AT 0: NULL RESULT, RESTORED TO 1. The bench run
+// confirmed the switch took (Kpeff 2.00 / Kdeff 0.30 / DLIM '-' for the whole drive)
+// and the stall was IDENTICAL -- POS moved 0.029 rev in 4.2 s while LEAN CMD ramped
+// to 7.47 and VELI sat on its clamp, PWM alternating +/-20 about a mean of -2.6.
+// The schedule is NOT the cause. Worse, setting it to 0 raises Kd during drive to
+// 0.30, and the 2026-06-30 note at Kd already records that RAISING Kd makes a
+// several-Hz ring worse (D-destabilization via rate-filter lag) -- at 9 Hz the D term
+// is not damping, it is the whole loop gain (0.30 * 56 = 17). Leave this at 1.
+// Kept as a switch because the burst evidence below is still the best description of
+// the oscillation, and this is the cheapest way to re-test the gains against it.
+//
+// The 200 Hz burst capture (400 samples, armed on the drive rising edge) showed:
 //   * The stall is a clean 8.5 Hz LIMIT CYCLE, not chatter and not gyro noise.
 //     Positive-run starts at i = 202,226,250,273,296,319,343,366 -> deltas
 //     24,24,23,23,23,24,23 = 23.4 samples = 117 ms. u is a smooth sinusoid swinging
@@ -269,15 +279,15 @@ float Ki = 0.0f;   // integral      (deg*s    -> PWM)  keep 0 until PD works
 //   * It dies WITHOUT the loop. i=374..387 have u = 0.000 and motors off: pitch runs
 //     -2.331 -> -1.187 and rate decays -14.29 -> 4.35, smooth and monotonic with no
 //     ringing. A structural resonance would keep ringing; this does not.
-// Mechanism: doubling Kp and cutting Kd moves the P/D crossover 1.06 Hz -> 3.2 Hz, so
-// at 8.5 Hz the loop is deep in derivative-dominated territory (|Kd*w| = 0.20*53 = 10.7)
-// with less damping. The deadband floor then SUSTAINS it -- PWM steps discontinuously
-// 0 -> +/-15/27 at every zero crossing, injecting energy twice per cycle, which is the
-// textbook describing-function recipe for a limit cycle. The schedule was added to give
-// drive more authority and is the reason drive has none.
-// If flipping this to 0 clears the 8.5 Hz cycle, do NOT just restore the schedule with
-// smaller numbers: rebuild drive authority somewhere that is not the pitch loop.
-#define DRIVE_GAIN_SCHEDULE 0
+// The gains do not set it; the FLOOR does. The cycle settles at |u| = 8-10 against a
+// floor of 15 -- i.e. exactly where the floor stops dominating the PWM. Below that the
+// map has enormous incremental gain (u = 0.1 -> PWM 15), which is the describing-
+// function recipe for a limit cycle, and the amplitude it settles at is the signature.
+// That also explains the thing that never fit: balance is quiet, drive oscillates. At
+// rest the robot sits in the COAST BAND with the motors off, so no floor is applied.
+// Driving holds them energized every tick. It was never a drive problem -- the coast
+// band was hiding it. Fix lives at DRIVE_FRICTION_FF, not in these gains.
+#define DRIVE_GAIN_SCHEDULE 1
 
 // Translation needs turn-class common-mode authority, but neutral balance is
 // already tuned. Blend toward this proportional gain with commanded drive only.
@@ -606,7 +616,42 @@ const float TURN_SIGN      = +1.0f; // flip to -1 if the turn stick steers the w
 // bounded 200 ms axle pulse to cross static friction. Unlike the retired
 // velocity-effort path, this cannot persist: every exit enters LAUNCH_DONE and
 // a fresh pulse is impossible until the stick is released or changes direction.
-#define DRIVE_LAUNCH_ASSIST 1
+// ---- Friction feedforward: the launch assist, made continuous ---------------
+// 2026-08-14. The bench log finally showed the ONLY mechanism that has ever moved
+// this robot, and it is this assist -- not the cascade. MS 33390-33590:
+//     MS      DL  DR    VF    START  BTK
+//     33290   -1   0   0.01     W     40
+//     33390   +1  +3   0.06     W     40
+//     33490   +1  +5   0.09     P     36   <- assist PUSH fires
+//     33590   +4  +4   0.12     P     16
+//     33690    0  +1   0.03     C     11   <- released early on driveRollingConfirmed
+//     33790   -1  -2  -0.04     C     11
+// It rolls while the pulse is on and dies within 200 ms of it ending. The assist
+// exited at BTK 11 with ticks still on the clock, i.e. it saw 0.12 rev/s, declared
+// breakaway, and handed back to a cascade whose u averages -0.78 -- far under the
+// 11/13 kinetic floor needed to KEEP a wheel turning. So the push works and we
+// deliberately switch it off. MAX_PWM is not the limit: peak PWM in that run was 37
+// of 110, and the saturation latch needs |u| > 78.
+//
+// This replaces the 200 ms timer with a floor that fades on VELOCITY, not a clock:
+//   * Aimed by velError -- clean, slow and one-sided (-0.24..-0.32 for seconds),
+//     unlike u, whose ~9 Hz swing carries almost no DC.
+//   * Magnitude capped at the per-wheel deadband (11/13 moving, 15/27 static). That
+//     is BY DEFINITION the amount that produces no motion, so while the wheel is
+//     stuck friction absorbs it and net body torque is ~0. This is what makes it a
+//     friction compensator and not the retired DRIVE_VELOCITY_EFFORT torque command
+//     that the balance loop had to fight.
+//   * It also takes the floor OFF the oscillating path: a +/-9 u now yields +/-9 PWM,
+//     under breakaway, so no buzz and no energy injected at the zero crossings.
+//   * Drive only. With no stick the old sign-of-u floor is untouched, so standing
+//     balance is exactly as before.
+// LAUNCH ASSIST DISABLED so this is the sole breakaway mechanism and the next log is
+// unambiguous. Running both would confound it the way DRIVE_VELOCITY_EFFORT did.
+#define DRIVE_FRICTION_FF 1
+const float FRICTION_FF_KNEE = 0.12f; // rev/s of velError for ~76% of the floor;
+                                      // 0.28 (the observed stall) gives ~0.98.
+
+#define DRIVE_LAUNCH_ASSIST 0
 const float         LAUNCH_ASSIST_EFFORT     = 20.0f; // -35/-47 PWM with measured static floors
 const float         LAUNCH_MIN_TARGET_VEL    = 0.12f; // allow launch at the low CH3 speed cap (0.35*Vmax ~= 0.21)
 const float         LAUNCH_READY_LEAN_DEG    = 2.5f;  // max required lean; scaled down for smaller requested speeds
@@ -814,6 +859,7 @@ struct ControlTelemetry {
   float speedInput = 0.0f, commandCap = 0.35f;
   float driveRaw = 0.0f, turnRaw = 0.0f;
   float driveCmd = 0.0f, turnCmd = 0.0f;
+  float frictionFF = 0.0f;   // -1..+1 : how much of the deadband floor drive is aiming
   float wheelVelRawL = 0.0f, wheelVelRawR = 0.0f;
   long encoderDeltaL = 0, encoderDeltaR = 0;
   float posError = 0.0f, velError = 0.0f;   // outer-loop tracking errors
@@ -979,16 +1025,26 @@ void motorPerWheel(int pwmL, int pwmR) {
 // Map a wheel's effort to PWM through the appropriate friction floor: the STATIC
 // (breakaway) figure if that wheel is stopped, the lower MOVING (Coulomb) figure
 // once it is already turning. Below OUT_DEADZONE the wheel rests.
-int mapEffortToPwm(float effort, bool moving, int dbMoving, int dbStatic) {
-  if (fabs(effort) <= OUT_DEADZONE) return 0;
+// ffBias (-1..+1, see DRIVE_FRICTION_FF) aims the floor at the outer loop's SUSTAINED
+// demand instead of at the sign of this tick's effort. At 0 this is the original map
+// exactly, so standing balance is unchanged.
+int mapEffortToPwm(float effort, float ffBias, bool moving, int dbMoving, int dbStatic) {
   int deadband = moving ? dbMoving : dbStatic;
+  if (ffBias != 0.0f) {
+    // One-sided friction compensation plus the raw PD effort. An effort that averages
+    // to zero now averages to the bias, not to a relay twice its own amplitude.
+    float cmd = (float)deadband * ffBias + effort;
+    if (fabs(cmd) <= OUT_DEADZONE) return 0;
+    return (int)constrain(cmd, -(float)MAX_PWM, (float)MAX_PWM);
+  }
+  if (fabs(effort) <= OUT_DEADZONE) return 0;
   int pwm = (int)constrain(deadband + fabs(effort), 0.0f, (float)MAX_PWM);
   return effort > 0.0f ? pwm : -pwm;
 }
 
-void driveControlDiff(float uL, float uR) {
-  int pwmL = mapEffortToPwm(uL, wheelMovingL, LEFT_DEADBAND_MOVING,  LEFT_DEADBAND_STATIC);
-  int pwmR = mapEffortToPwm(uR, wheelMovingR, RIGHT_DEADBAND_MOVING, RIGHT_DEADBAND_STATIC);
+void driveControlDiff(float uL, float uR, float ffBias) {
+  int pwmL = mapEffortToPwm(uL, ffBias, wheelMovingL, LEFT_DEADBAND_MOVING,  LEFT_DEADBAND_STATIC);
+  int pwmR = mapEffortToPwm(uR, ffBias, wheelMovingR, RIGHT_DEADBAND_MOVING, RIGHT_DEADBAND_STATIC);
   motorPerWheel(pwmL, pwmR);
 }
 
@@ -1264,7 +1320,7 @@ void loop() {
     controlLog.turnRaw = crsf::turn();
     controlLog.speedInput = crsf::speed();
     controlLog.commandCap = 0.35f + 0.65f * controlLog.speedInput;
-    controlLog.driveCmd = controlLog.turnCmd = 0.0f;
+    controlLog.driveCmd = controlLog.turnCmd = controlLog.frictionFF = 0.0f;
     controlLog.positionLean = controlLog.velocityLean = controlLog.velocityLeanIntegral = controlLog.leanRaw = 0.0f;
     controlLog.effectiveKvel = Kvel;
     controlLog.posError = controlLog.velError = controlLog.softStart = 0.0f;
@@ -1748,9 +1804,21 @@ void loop() {
                            launchAssistState == LAUNCH_PUSH ? 'P' :
                            launchAssistState == LAUNCH_DONE ? 'C' : '-';
 
+  // --- Friction feedforward (see DRIVE_FRICTION_FF) --------------------------
+  // Aim the deadband floor at the outer loop's sustained demand. velError holds one
+  // sign for seconds while u swings +/-9 about a mean of -0.78, so velError is the
+  // only signal here that carries usable DC.
+  float frictionFF = 0.0f;
+#if DRIVE_FRICTION_FF
+  // SIGN_CFG: physical forward is NEGATIVE PWM effort, and velError is POSITIVE when
+  // the robot still owes forward speed -- hence the negation.
+  if (driving) frictionFF = -tanhf(velError / FRICTION_FF_KNEE);
+#endif
+  controlLog.frictionFF = frictionFF;
+
   controlLog.effortL = u + turnCmd;
   controlLog.effortR = u - turnCmd;
-  driveControlDiff(controlLog.effortL, controlLog.effortR);   // balance +/- steering
+  driveControlDiff(controlLog.effortL, controlLog.effortR, frictionFF);  // balance +/- steering
 
 #if BURST_LOG
   // Capture AFTER the motors are written so pwmL/pwmR are this tick's real output.
@@ -1832,6 +1900,7 @@ void telemetry(float error, float rate, float u) {
   Serial.print(" START "); Serial.print(controlLog.launchState);
   Serial.print(" EXIT "); Serial.print(controlLog.launchEvent);
   Serial.print(" BOOST "); Serial.print(controlLog.launchBoost, 1);
+  Serial.print(" FFB "); Serial.print(controlLog.frictionFF, 2);
   Serial.print(" BTK "); Serial.print(launchAssistTicksRemaining);
   Serial.print(" VTRQ "); Serial.print(controlLog.driveVelocityEffort, 2);
   Serial.print(" VTG "); Serial.print(controlLog.driveVelocityEffortActive ? "Y" : "-");
