@@ -277,17 +277,18 @@ const float VEL_I_CLAMP = 2.5f;  // deg; must exceed the stiction lean, not sit 
 // at breakaway already saturated and then overshoots. Below this speed the
 // integral FREEZES (holds its value); it is only zeroed when the stick releases.
 const float VEL_I_ROLL_MIN = 0.10f;  // rev/s : below this the integral is frozen
-// FINDING 2026-08-14, bench: this gate is a CATCH-22 as written. It requires
-// rolling before the integral may build, but the integral existed to help START
-// the roll -- so on a stalled drive VELI sits at 0.01 forever and contributes
-// nothing. Measured ceiling with it frozen: LEAN POS 3.00 (pinned at
-// POS_ERROR_CLAMP * Kpos) + LEAN VEL 1.26 (Kvel * TVEL 0.42 at a 0.70 speed cap)
-// + VELI 0.01 = 4.27 deg, and RAW read 4.10-4.47. LEAN_CLAMP 6.0 never binds;
-// POS_ERROR_CLAMP binds again. The anti-windup argument for the gate is still
-// correct in isolation -- an integral that winds while stalled arrives at
-// breakaway saturated -- but freezing it beforehand removes the only term that
-// was still trying to grow. If this is revisited: let it accumulate while
-// stalled and RESET it on breakaway, rather than blocking it before.
+// FINDING 2026-08-14, bench: gating the integral OFF below this speed was a
+// CATCH-22. It required rolling before the integral could build, but building was
+// what would start the roll -- so on a stalled drive VELI sat at 0.01 forever.
+// Measured ceiling with it frozen: LEAN POS 3.00 (pinned at POS_ERROR_CLAMP *
+// Kpos) + LEAN VEL 1.26 (Kvel * TVEL 0.42 at a 0.70 speed cap) + VELI 0.01
+// = 4.27 deg, RAW read 4.10-4.47, LEAN_CLAMP 6.0 never binding.
+// RESOLVED: this threshold is now the BREAKAWAY EDGE DETECTOR, not an integrate
+// gate. The integral accumulates freely while stalled, and is discarded on the
+// stall -> rolling transition -- which keeps the anti-windup property (it never
+// carries stiction-fighting wind into the cruise) without blocking the only term
+// that could grow. Ramp rate is KVEL_I * velError ~ 0.25 deg/s at full stick, so
+// it takes several seconds to matter; raise KVEL_I if that is too slow.
 // Keep drive velocity feedback at the neutral-loop gain. Doubling it drove
 // leanRaw into the +/-5 deg clamp for most held-stick samples, so encoder ripple
 // could only move the command away from saturation and was fed back asymmetrically.
@@ -517,9 +518,10 @@ const unsigned int  LAUNCH_ASSIST_TICKS      = 40;    // one bounded 200 ms wind
 //     DFILT  -7.58 -> VTG -
 //     DFILT -17.73 -> VTG Y (VTRQ -1.99)
 // Same class of error as scheduling Kd on |error|: a gain that switches with the
-// signal it acts on is a nonlinear feedback path, not a schedule. Set this to 0
-// before reading any burst capture, or the derivative analysis is meaningless.
-#define DRIVE_VELOCITY_EFFORT 1
+// signal it acts on is a nonlinear feedback path, not a schedule.
+// DISABLED 2026-08-14 so u is a clean PD output and the burst capture is
+// interpretable. Turn it back on only for a deliberate A/B, never for flight.
+#define DRIVE_VELOCITY_EFFORT 0
 const float DRIVE_VELOCITY_EFFORT_GAIN  = 5.5f; // rev/s error -> PWM effort
 const float DRIVE_VELOCITY_EFFORT_LIMIT = 4.0f; // small trim, well below launch floor
 const float DRIVE_VELOCITY_HOLD_LEAN_DEG = 0.75f; // hysteresis after the strict 1.5 deg engagement
@@ -602,6 +604,7 @@ float dRateFilt = 0.0f;   // low-pass-filtered gyro rate for the D term (angle e
 float dTermLog = 0.0f;    // derivative contribution, for telemetry
 float leanCmd   = 0.0f;   // cascade outer-loop output: the desired lean (deg) added to BALANCE_SETPOINT
 float velocityLeanI = 0.0f;
+bool  integralRollingPrev = false;            // edge-detect stall -> rolling for the integral reset
 unsigned long lastControlMicros = 0;
 int controlHz = 0;   // measured control-loop frequency (should read ~200; if lower, we're falling behind)
 
@@ -1350,15 +1353,22 @@ void loop() {
   float effectiveKvel = Kvel * (driving ? DRIVE_KVEL_MULTIPLIER : 1.0f);
   float positionLean = Kpos * posError;
   float velocityLean = effectiveKvel * velError;
-  // Conditional integration on ACTUAL ROLLING, not merely on a drive command --
-  // see VEL_I_ROLL_MIN. Stalled: hold the current value. Released: reset.
+  // Accumulate whenever the pilot is asking for speed -- INCLUDING while stalled,
+  // which is exactly when the extra lean is wanted. Freezing it there (the first
+  // attempt) was a catch-22: it required rolling to build, and building was what
+  // started the roll. The windup problem is handled at the other end instead --
+  // on the stall -> rolling transition whatever accumulated was fighting stiction,
+  // not trimming a cruise, so it is discarded at breakaway and the integral
+  // restarts from zero for the cruise it actually exists to trim.
   bool integralRolling = fabs(forwardVel) >= VEL_I_ROLL_MIN;
-  if (driving && integralRolling) {
+  if (!driving) {
+    velocityLeanI = 0.0f;
+  } else {
+    if (integralRolling && !integralRollingPrev) velocityLeanI = 0.0f;   // breakaway
     velocityLeanI += KVEL_I * velError * DT;
     velocityLeanI = constrain(velocityLeanI, -VEL_I_CLAMP, VEL_I_CLAMP);
-  } else if (!driving) {
-    velocityLeanI = 0.0f;
   }
+  integralRollingPrev = integralRolling;
   float velocityLeanIntegral = velocityLeanI;
 #else
   float effectiveKvel = 0.0f;
