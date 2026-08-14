@@ -221,9 +221,9 @@ const float DRIVE_KD_RESTORE_FULL_ERROR  = 3.0f;
 #define OUTER_LOOP 1
 
 float Kpos = 1.0f;               // wheel position error (rev -> deg of lean)
-float Kvel = 2.5f;               // wheel-velocity damping; keep drive lean below the pitch ring
-const float KVEL_I = 0.5f;       // slow velocity-error memory (rev/s*s -> deg lean)
-const float VEL_I_CLAMP = 0.6f;  // deg; enough to bias through stiction without sustaining a hard lean
+float Kvel = 3.0f;               // wheel-velocity damping; enough drive lean without sitting on the pitch ring
+const float KVEL_I = 0.6f;       // slow velocity-error memory (rev/s*s -> deg lean)
+const float VEL_I_CLAMP = 0.8f;  // deg; enough to bias through stiction without sustaining a hard lean
 // Keep drive velocity feedback at the neutral-loop gain. Doubling it drove
 // leanRaw into the +/-5 deg clamp for most held-stick samples, so encoder ripple
 // could only move the command away from saturation and was fed back asymmetrically.
