@@ -277,6 +277,17 @@ const float VEL_I_CLAMP = 2.5f;  // deg; must exceed the stiction lean, not sit 
 // at breakaway already saturated and then overshoots. Below this speed the
 // integral FREEZES (holds its value); it is only zeroed when the stick releases.
 const float VEL_I_ROLL_MIN = 0.10f;  // rev/s : below this the integral is frozen
+// FINDING 2026-08-14, bench: this gate is a CATCH-22 as written. It requires
+// rolling before the integral may build, but the integral existed to help START
+// the roll -- so on a stalled drive VELI sits at 0.01 forever and contributes
+// nothing. Measured ceiling with it frozen: LEAN POS 3.00 (pinned at
+// POS_ERROR_CLAMP * Kpos) + LEAN VEL 1.26 (Kvel * TVEL 0.42 at a 0.70 speed cap)
+// + VELI 0.01 = 4.27 deg, and RAW read 4.10-4.47. LEAN_CLAMP 6.0 never binds;
+// POS_ERROR_CLAMP binds again. The anti-windup argument for the gate is still
+// correct in isolation -- an integral that winds while stalled arrives at
+// breakaway saturated -- but freezing it beforehand removes the only term that
+// was still trying to grow. If this is revisited: let it accumulate while
+// stalled and RESET it on breakaway, rather than blocking it before.
 // Keep drive velocity feedback at the neutral-loop gain. Doubling it drove
 // leanRaw into the +/-5 deg clamp for most held-stick samples, so encoder ripple
 // could only move the command away from saturation and was fed back asymmetrically.
@@ -495,6 +506,19 @@ const unsigned int  LAUNCH_ASSIST_TICKS      = 40;    // one bounded 200 ms wind
 // lean; this only prevents a held leaned target from settling with U ~= 0 while
 // VERR remains large. Keep it small: the old 8 PWM version made the inner loop
 // fight it by building several degrees of angle error.
+// FINDING 2026-08-14: this is ON despite the comment above calling it A/B-only,
+// and it is a CONFOUND in every log analysed so far -- u is not a clean PD output
+// while it runs. Worse, it is a relay gated on a FAST variable: engagement needs
+// |dRateFilt| <= DRIVE_VELOCITY_HOLD_RATE_DPS (18), and dRateFilt swings +/-38 at
+// the ring frequency, so the term switches on and off in step with the
+// oscillation. Bench sample, four consecutive telemetry lines:
+//     DFILT  -5.11 -> VTG Y (VTRQ -2.11)
+//     DFILT +36.44 -> VTG -
+//     DFILT  -7.58 -> VTG -
+//     DFILT -17.73 -> VTG Y (VTRQ -1.99)
+// Same class of error as scheduling Kd on |error|: a gain that switches with the
+// signal it acts on is a nonlinear feedback path, not a schedule. Set this to 0
+// before reading any burst capture, or the derivative analysis is meaningless.
 #define DRIVE_VELOCITY_EFFORT 1
 const float DRIVE_VELOCITY_EFFORT_GAIN  = 5.5f; // rev/s error -> PWM effort
 const float DRIVE_VELOCITY_EFFORT_LIMIT = 4.0f; // small trim, well below launch floor
