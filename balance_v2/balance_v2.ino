@@ -680,7 +680,28 @@ const int MAX_DEADBAND = (LEFT_DEADBAND_STATIC > RIGHT_DEADBAND_STATIC)
 // at 200 Hz x1), at 0.40 it was ~1.1 counts, at 0.60 it is ~1.6 -- the velocity loop
 // finally has real signal rather than mostly quantization.
 // Ceiling is unchanged: 6*1.5 + 3*0.60 + 14 = 24.8, still clamped by LEAN_CLAMP 18.
-const float DRIVE_MAX_VEL  = 0.60f; // rev/s at full stick. Conservative on purpose: one encoder
+// 0.60 -> 0.90 (2026-08-14), "too slow, too sluggish, cannot overcome minor bumps".
+// EVIDENCE THIS IS THE RIGHT KNOB and not LEAN_CLAMP: in the 0.60 drive log the loop
+// was TRACKING its target, not straining against a ceiling -- TVEL 0.56 vs VF 0.55,
+// VERR 0.01, and LEAN RAW peaked at 9.43 against a clamp of 18 that never bound on
+// forward acceleration. The robot delivered exactly the speed it was asked for, so
+// the speed request is what was low. Raising LEAN_CLAMP would have done nothing here.
+// Ramp goes (Kpos + KVEL_I)*Vmax = 30*0.90 = 27 deg/s, up from 18, so LEAN_CLAMP is
+// reachable in 0.67 s instead of 1.0 -- it answers "sluggish" as well as "slow".
+// Bumps ride on the same term: a bump drops forwardVel, and the bigger the target the
+// bigger the resulting velError, so VELI winds at KVEL_I*velError and converts the
+// shortfall into lean (hence torque) faster than it did at 0.60.
+// DRIVE-ONLY BY CONSTRUCTION -- no gate needed. targetVel is identically 0 with the
+// drive stick centred, so every term this scales vanishes in plain balance and the
+// balancer keeps its tuning untouched. CH3 still scales it (cap 0.35..1.0), so this
+// raises the top of the throttle range rather than the whole range.
+// Ceiling invariant holds: 6*1.5 + 3*0.90 + 14 = 25.7, still over LEAN_CLAMP 18, so
+// that clamp remains the single saturation point behind the conditional integration.
+// Encoder resolution keeps improving: 0.90/0.366 = ~2.5 counts per tick at full stick.
+// WATCH: if LEAN RAW now starts pinning at +/-18 during forward acceleration (it did
+// not at 0.60), the clamp has become the binding constraint and IT is the next lever
+// -- and it would then need a drive-only gate, which this constant does not.
+const float DRIVE_MAX_VEL  = 0.90f; // rev/s at full stick. Conservative on purpose: one encoder
                                     // count per 5 ms tick is already 0.366 rev/s (546 counts/rev),
                                     // so 0.6 rev/s is only ~1.6 counts/tick of resolution. Raise
                                     // this after the x4 hardware QuadEncoder upgrade (2184 cpr).
