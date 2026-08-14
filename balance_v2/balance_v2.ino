@@ -542,9 +542,25 @@ const float DRIVE_KVEL_MULTIPLIER = 1.0f;
 // both limits are far from zero, so a misclassification near the crossing changes
 // nothing (|leanRaw| ~ 0 is nowhere near either bound), and the two branches differ
 // only in HOW MUCH authority is allowed -- never in which direction it points.
+// CORRECTION, same day: the log cited above was CONTAMINATED -- the USB tether was
+// fouling the right wheel. That drag is what held forwardVel at 0.15 against a target
+// of 0.51, and a permanently open velError is exactly what winds VELI into the clamp.
+// So "forward pinned at 12" is an artifact of the tether, not proof that clean-ground
+// forward needs more than 12. Do not cite that log as evidence for anything.
+// THE SPLIT STILL STANDS, on the geometry rather than on that log:
+//   - the chassis is measurably asymmetric (30.53 fwd vs 15.67 rear), so ONE number
+//     has to be sized for the worse side and is wrong-shaped for the better one;
+//   - 18 forward is not speculative, it is the value every good forward-drive log ran
+//     at, so this restores known-good forward while keeping the new measured rear cap;
+//   - it costs nothing measurable: forward has never exceeded 9.43 deg on clean ground,
+//     so 12 vs 18 should be invisible until something actually loads the wheels.
+// Corollary worth remembering: a dragging wheel and a too-low clamp look IDENTICAL in
+// telemetry (RAW pinned, VELI at its ceiling, velError open, robot slower than asked).
+// Distinguish them by LEAN ACT vs speed -- a real 13 deg lean must produce g*tan(13) =
+// 2.3 m/s^2, and if the robot is not accelerating, something external is eating it.
 // Headroom check: 18 forward leaves 12.5 deg to the +30.53 stop; 12 rear leaves 3.7 deg
 // to the -15.67 sit-down. If forward pins at 18 under Vmax 0.90 there is room to ~24
-// before the geometry bites, but do not go there without a log showing 18 saturating.
+// before the geometry bites, but do not go there without a CLEAN log showing 18 saturating.
 const float LEAN_CLAMP_FWD  = 18.0f; // deg : forward authority cap (stop is at +30.53)
 const float LEAN_CLAMP_REAR = 12.0f; // deg : rear authority cap (SITS DOWN at -15.67)
 // 0.99 -> 0.97 (tau 0.50 s -> 0.17 s, pole 2 -> 6 rad/s). The velocity loop
