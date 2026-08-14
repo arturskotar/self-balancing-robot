@@ -651,7 +651,15 @@ const int MAX_DEADBAND = (LEFT_DEADBAND_STATIC > RIGHT_DEADBAND_STATIC)
 // target sat BELOW one encoder count per tick (0.366 rev/s raw), so the loop was
 // regulating against a signal that was mostly quantization. 0.40 is still well under
 // the old 0.6 and gets a fuller x1 count per tick.
-const float DRIVE_MAX_VEL  = 0.40f; // rev/s at full stick. Conservative on purpose: one encoder
+// 0.40 -> 0.60 (2026-08-14), from v2-drive-works. NOTE THIS IS NOT JUST A SPEED CAP:
+// both outer-loop ramp terms scale with it, so the lean ramp goes (Kpos + KVEL_I)*Vmax
+// = 30*0.60 = 18 deg/s, up from 12, and LEAN_CLAMP 18 is now reached in ~1.0 s instead
+// of ~1.5 s. Expect it to lean into a command noticeably harder, not only run faster.
+// Encoder resolution improves too: at 0.25 the target sat BELOW one count (0.366 rev/s
+// at 200 Hz x1), at 0.40 it was ~1.1 counts, at 0.60 it is ~1.6 -- the velocity loop
+// finally has real signal rather than mostly quantization.
+// Ceiling is unchanged: 6*1.5 + 3*0.60 + 14 = 24.8, still clamped by LEAN_CLAMP 18.
+const float DRIVE_MAX_VEL  = 0.60f; // rev/s at full stick. Conservative on purpose: one encoder
                                     // count per 5 ms tick is already 0.366 rev/s (546 counts/rev),
                                     // so 0.6 rev/s is only ~1.6 counts/tick of resolution. Raise
                                     // this after the x4 hardware QuadEncoder upgrade (2184 cpr).
