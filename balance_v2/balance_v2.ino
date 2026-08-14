@@ -386,7 +386,13 @@ float Kvel = 3.0f;               // wheel-velocity damping; enough drive lean wi
 // launch-overdrive line of work back to 28badb1. Authority now comes from the LEAN,
 // which the cascade is built around, instead of from a feedforward push fighting the
 // inner loop. Ramp is (Kpos + KVEL_I)*Vmax = (6 + 16)*0.40 = 8.8 deg/s, up from 5.6.
-const float KVEL_I = 16.0f;      // velocity-error memory (rev/s*s -> deg lean)
+// 16 -> 24. Measured ramp at 16 was 8.5 deg/s (MS 137170->138675), matching the 8.8
+// design, so the ramp law is right -- it is just not fast enough. Now 24*0.40 = 9.6
+// plus Kpos*Vmax 2.4 = 12.0 deg/s, so LEAN_CLAMP 18 is reached in ~1.5 s.
+// This also fixes "too slow to react to reverse": a direction change re-anchors
+// posSetpoint and zeroes velocityLeanI, so a reversal re-runs the entire ramp from
+// zero. Reversal latency IS ramp time.
+const float KVEL_I = 24.0f;      // velocity-error memory (rev/s*s -> deg lean)
 // RAISED 0.8 -> 2.5. In the 2026-08-14 log this integral ramped to 0.80 in 0.6 s
 // and then sat there for the rest of the hold: saturated, and contributing a
 // constant. An integral that saturates below the disturbance it is integrating
@@ -396,7 +402,13 @@ const float KVEL_I = 16.0f;      // velocity-error memory (rev/s*s -> deg lean)
 // 5 -> 9. This sets how long the FAST part of the ramp lasts: once the integral
 // saturates only Kpos*Vmax = 2.4 deg/s is left and the last degrees crawl, which is
 // what "ramp up is slow" was. At KVEL_I 16 the integral now runs 1.4 s before it pins.
-const float VEL_I_CLAMP = 9.0f;  // deg; must exceed the stiction lean, not sit under it
+// 9 -> 14. THE CRAWL WAS HERE. At 9 the integral pinned after 1.5 s and the ramp fell
+// to Kpos*Vmax = 2.4 deg/s for the last 2.4 deg, which took 1.1 s -- over 40% of the
+// total time to breakaway (measured MS 138675->139775). Sized so the integral no longer
+// saturates before LEAN_CLAMP binds: 14/9.6 = 1.46 s, and the clamp binds at 1.5 s. The
+// component sum is 9 + 1.2 + 14 = 24.2, well over LEAN_CLAMP 18, so that clamp stays the
+// single saturation point with the conditional integration behind it.
+const float VEL_I_CLAMP = 14.0f; // deg; must exceed the stiction lean, not sit under it
 // The integral may only TRIM A CRUISE, never fight stiction. While the wheels are
 // not actually rolling, velError reports a stalled drivetrain rather than a speed
 // shortfall, and integrating that just winds to the clamp -- so the term arrives
@@ -736,6 +748,15 @@ const float FRICTION_FF_KNEE_U = 3.0f;  // effort units for ~76% of the floor. u
 // (LAUNCH); by MS 31199 it is 6.45 deg (CRUISE), so the forward push would engage
 // exactly where the robot sat and did nothing.
 const float FRICTION_FF_KNEE_V    = 0.12f; // rev/s of velError for ~76% of the floor in CRUISE
+// Breakaway overdrive, re-added NARROWLY after 268a8f7's version had to be reverted.
+// That one applied in BOTH phases, and since LAUNCH and CRUISE push OPPOSITE ways it
+// amplified them fighting each other. This one is gated three ways so it cannot
+// misclassify: CRUISE only (direction comes from velError, which is unambiguous),
+// wheels actually STOPPED, and common-mode so it adds no yaw. It can only ever add
+// magnitude to a push whose sign is already correct.
+// 27 + 20 = 47 is the same number LAUNCH_ASSIST_EFFORT produced, the one mechanism
+// that reliably moved this robot. It disappears the moment either wheel turns.
+const float FRICTION_FF_BOOST     = 20.0f; // extra PWM on the floor while stalled in CRUISE
 const float FRICTION_FF_LEAN_DEG  = 3.0f;  // deg toward the command: LAUNCH -> CRUISE
 const float FRICTION_FF_LEAN_DROP = 1.5f;  // hysteresis back to LAUNCH; wide enough that the
                                            // +/-1.5 deg tracking ripple cannot chatter the phase
@@ -1139,12 +1160,13 @@ void motorPerWheel(int pwmL, int pwmR) {
 // ffBias (-1..+1, see DRIVE_FRICTION_FF) aims the floor at the outer loop's SUSTAINED
 // demand instead of at the sign of this tick's effort. At 0 this is the original map
 // exactly, so standing balance is unchanged.
-int mapEffortToPwm(float effort, float ffBias, bool moving, int dbMoving, int dbStatic) {
+int mapEffortToPwm(float effort, float ffBias, float ffFloor, bool moving,
+                   int dbMoving, int dbStatic) {
   int deadband = moving ? dbMoving : dbStatic;
   if (ffBias != 0.0f) {
     // One-sided friction compensation plus the raw PD effort. An effort that averages
     // to zero now averages to the bias, not to a relay twice its own amplitude.
-    float cmd = (float)deadband * ffBias + effort;
+    float cmd = ffFloor * ffBias + effort;
     if (fabs(cmd) <= OUT_DEADZONE) return 0;
     return (int)constrain(cmd, -(float)MAX_PWM, (float)MAX_PWM);
   }
@@ -1153,9 +1175,22 @@ int mapEffortToPwm(float effort, float ffBias, bool moving, int dbMoving, int db
   return effort > 0.0f ? pwm : -pwm;
 }
 
-void driveControlDiff(float uL, float uR, float ffBias) {
-  int pwmL = mapEffortToPwm(uL, ffBias, wheelMovingL, LEFT_DEADBAND_MOVING,  LEFT_DEADBAND_STATIC);
-  int pwmR = mapEffortToPwm(uR, ffBias, wheelMovingR, RIGHT_DEADBAND_MOVING, RIGHT_DEADBAND_STATIC);
+void driveControlDiff(float uL, float uR, float ffBias, bool ffBoostOk) {
+  // ONE FLOOR FOR BOTH WHEELS in the FF path (re-applied from 4013030; it was a real
+  // fix that got thrown out with that revert). The bias is a COMMON-MODE drive command,
+  // so per-wheel floors inject a differential into a command that should have none --
+  // and because the FF can OPPOSE u, that differential strands a wheel at zero. Bench
+  // 2026-08-14, u = -26.84, FFB 1.00, DBL 15S / DBR 27S:
+  //     left :  15 * 1.00 - 26.84 = -11.8  -> PWML -11
+  //     right:  27 * 1.00 - 26.84 =  +0.2  -> PWMR   0
+  // Self-reinforcing too: the stopped wheel keeps the larger STATIC floor, cancels more
+  // of u, and stays stopped. Max means neither side is under-driven.
+  int fl = wheelMovingL ? LEFT_DEADBAND_MOVING  : LEFT_DEADBAND_STATIC;
+  int fr = wheelMovingR ? RIGHT_DEADBAND_MOVING : RIGHT_DEADBAND_STATIC;
+  float ffFloor = (float)(fl > fr ? fl : fr);
+  if (ffBoostOk) ffFloor += FRICTION_FF_BOOST;   // stalled in CRUISE: see the constant
+  int pwmL = mapEffortToPwm(uL, ffBias, ffFloor, wheelMovingL, LEFT_DEADBAND_MOVING,  LEFT_DEADBAND_STATIC);
+  int pwmR = mapEffortToPwm(uR, ffBias, ffFloor, wheelMovingR, RIGHT_DEADBAND_MOVING, RIGHT_DEADBAND_STATIC);
   motorPerWheel(pwmL, pwmR);
 }
 
@@ -1966,7 +2001,9 @@ void loop() {
 
   controlLog.effortL = u + turnCmd;
   controlLog.effortR = u - turnCmd;
-  driveControlDiff(controlLog.effortL, controlLog.effortR, frictionFF);  // balance +/- steering
+  // Boost only in CRUISE (unambiguous direction) and only while BOTH wheels are stopped.
+  bool ffBoostOk = frictionLeanUp && !wheelMovingL && !wheelMovingR;
+  driveControlDiff(controlLog.effortL, controlLog.effortR, frictionFF, ffBoostOk);
 
 #if BURST_LOG
   // Capture AFTER the motors are written so pwmL/pwmR are this tick's real output.
