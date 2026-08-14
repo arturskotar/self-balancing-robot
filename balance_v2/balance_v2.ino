@@ -788,7 +788,28 @@ const int MAX_DEADBAND = (LEFT_DEADBAND_STATIC > RIGHT_DEADBAND_STATIC)
 // WATCH: if LEAN RAW now starts pinning at +/-18 during forward acceleration (it did
 // not at 0.60), the clamp has become the binding constraint and IT is the next lever
 // -- and it would then need a drive-only gate, which this constant does not.
-const float DRIVE_MAX_VEL  = 0.90f; // rev/s at full stick. Conservative on purpose: one encoder
+// 0.90 -> 0.65 (2026-08-14). SIZED BY STOPPING DISTANCE, not by feel. Reported: braking
+// from forward takes too long and the robot crashes; the pilot's own read was "it keeps
+// driving forward to reach the lean, can't reach it, and crashes" -- which is the
+// non-minimum-phase surge (wheels must roll FORWARD to plant a backward lean; measured
+// at VF 0.65 -> 1.01 before the turnaround) failing because there is not enough room or
+// wheel authority left at speed.
+// The arithmetic I should have run when raising this. Stopping distance goes as
+//     d  ~  v^2 / (g * tan(theta_rear))
+// and the last few commits moved BOTH terms the wrong way at once:
+//     was:  Vmax 0.60, rear lean 18 deg -> a = 9.81*tan(18) = 3.19 m/s^2   (braked fine)
+//     then: Vmax 0.90, rear lean 12 deg -> a = 9.81*tan(12) = 2.09 m/s^2
+//     ratio = (0.90/0.60)^2 * (3.19/2.09) = 2.25 * 1.53 = 3.4x the stopping distance.
+// The 12 is not negotiable -- the chassis sits down at 15.67 deg of rear lean, see
+// LEAN_CLAMP_REAR -- so the speed is the only term left to move.
+// Reference points at the 12 deg rear cap, relative to the config that stopped well:
+//     0.49 = same distance    0.60 = 1.5x    0.69 = 2x    0.90 = 3.4x
+// 0.65 lands at ~1.8x: still quicker than the old 0.60 setup but stoppable. Go to 0.60
+// or 0.49 if it is still running out of room. Ramp comes down with it, (Kpos+KVEL_I)*Vmax
+// = 30*0.65 = 19.5 deg/s, so the forward clamp is reached in ~0.9 s.
+// THE REAL FIX IS MECHANICAL. Every degree recovered at the rear contact buys back
+// deceleration directly, and 18 deg rear would allow 0.90 again at this same distance.
+const float DRIVE_MAX_VEL  = 0.65f; // rev/s at full stick. Conservative on purpose: one encoder
                                     // count per 5 ms tick is already 0.366 rev/s (546 counts/rev),
                                     // so 0.6 rev/s is only ~1.6 counts/tick of resolution. Raise
                                     // this after the x4 hardware QuadEncoder upgrade (2184 cpr).
