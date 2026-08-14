@@ -362,7 +362,12 @@ const float DRIVE_KD_RESTORE_FULL_ERROR  = 3.0f;
 // to 12 deg, but that was with LEAN_CLAMP at 10 and no conditional integration
 // engaging; LEAN_CLAMP 12 now binds below the component sum, so the anti-windup
 // actually fires and bounds the excursion.
-float Kpos = 4.0f;               // wheel position error (rev -> deg of lean)
+// 4.0 -> 6.0 (2026-08-14, after the two-phase friction FF made drive work at all).
+// This term does double duty: it sets 3/5 of the lean RAMP RATE (posError grows at
+// targetVel, so this contributes Kpos*Vmax deg/s) and Kpos*POS_ERROR_CLAMP of the
+// CEILING. Pilot report: "hold the stick longer and the drive actually is initiated,
+// but very slowly" -- the mechanism works, the ramp was just too slow to use.
+float Kpos = 6.0f;               // wheel position error (rev -> deg of lean)
 float Kvel = 3.0f;               // wheel-velocity damping; enough drive lean without sitting on the pitch ring
 // 0.6 -> 4.0. This term sets TIME TO BREAKAWAY, and 0.6 made that time absurd.
 // posError grows at targetVel, so the lean ramps at Kpos*Vmax = 4.0*0.25 = 1.0
@@ -373,14 +378,18 @@ float Kvel = 3.0f;               // wheel-velocity damping; enough drive lean wi
 // and still discarded at the stall -> rolling edge, so nothing carries into the
 // cruise. Observed 2026-08-14: forward drive that was ALREADY rolling worked
 // fine; it was only a fresh standing start that timed out.
-const float KVEL_I = 4.0f;       // velocity-error memory (rev/s*s -> deg lean)
+// 4.0 -> 8.0. The other half of the ramp rate: this contributes KVEL_I*Vmax deg/s.
+// Measured on the 2026-08-14 bench log, LEAN CMD went 6.12 -> 8.46 over 1.3 s = 1.8
+// deg/s, matching the predicted (Kpos + KVEL_I)*Vmax = 8*0.25 = 2.0 deg/s. Reaching a
+// ~7 deg breakaway therefore took ~3.5 s of held stick. See LEAN_CLAMP for the new sum.
+const float KVEL_I = 8.0f;       // velocity-error memory (rev/s*s -> deg lean)
 // RAISED 0.8 -> 2.5. In the 2026-08-14 log this integral ramped to 0.80 in 0.6 s
 // and then sat there for the rest of the hold: saturated, and contributing a
 // constant. An integral that saturates below the disturbance it is integrating
 // against is just an offset. 2.5 lets it actually search for the friction level.
 // 0.8 -> 2.5 -> 4.0. Raised again with Kpos: breakaway is ~6-7 deg and the whole
 // component sum has to clear it, not just this term.
-const float VEL_I_CLAMP = 4.0f;  // deg; must exceed the stiction lean, not sit under it
+const float VEL_I_CLAMP = 5.0f;  // deg; must exceed the stiction lean, not sit under it
 // The integral may only TRIM A CRUISE, never fight stiction. While the wheels are
 // not actually rolling, velError reports a stalled drivetrain rather than a speed
 // shortfall, and integrating that just winds to the clamp -- so the term arrives
@@ -438,7 +447,14 @@ const float DRIVE_KVEL_MULTIPLIER = 1.0f;
 // 6.0 -> 12.0. Has to clear 3.4 with room for transients and for the outer loop
 // to modulate above it, not merely exceed it. Still under rc_balance's
 // THETA_REF_MAX (0.33 rad = 18.9 deg).
-const float LEAN_CLAMP = 12.0f;  // deg : outer-loop authority cap (sole saturation point)
+// 12 -> 14 (2026-08-14). The old component sum was Kpos*POS_ERROR_CLAMP + Kvel*Vmax +
+// VEL_I_CLAMP = 6.0 + 0.75 + 4.0 = 10.75, BELOW LEAN_CLAMP 12 -- so this clamp never
+// fired and the conditional integration hung off it was dead code; the real ceiling
+// was an accident of three unrelated limits. New sum is 9.0 + 1.2 + 5.0 = 15.2, so
+// LEAN_CLAMP binds again and is once more the single saturation point it claims to be.
+// THIS IS THE RISKY NUMBER of the set: the robot was already in a slow topple at ~10
+// deg. Back this off first if it starts falling forward instead of driving.
+const float LEAN_CLAMP = 14.0f;  // deg : outer-loop authority cap (sole saturation point)
 // 0.99 -> 0.97 (tau 0.50 s -> 0.17 s, pole 2 -> 6 rad/s). The velocity loop
 // crosses over near 2.5 rad/s, so the old 2 rad/s pole sat essentially ON the
 // crossover and ate ~51 deg of phase exactly where it hurt. That lag is what
@@ -599,7 +615,13 @@ const int MAX_DEADBAND = (LEFT_DEADBAND_STATIC > RIGHT_DEADBAND_STATIC)
 // unreachable. An unreachable target keeps velError permanently open, which pinned
 // the outer loop in saturation in every earlier drive log. 0.25 rev/s corresponds
 // to roughly 8-9 deg of lean, inside LEAN_CLAMP with margin.
-const float DRIVE_MAX_VEL  = 0.25f; // rev/s at full stick. Conservative on purpose: one encoder
+// 0.25 -> 0.40 (2026-08-14). This is a THIRD ramp-rate lever, not just a speed cap:
+// both outer-loop ramp terms scale with it, so the total is (Kpos + KVEL_I)*Vmax.
+// It also improves the velocity feedback rather than hurting it -- at 0.25 rev/s the
+// target sat BELOW one encoder count per tick (0.366 rev/s raw), so the loop was
+// regulating against a signal that was mostly quantization. 0.40 is still well under
+// the old 0.6 and gets a fuller x1 count per tick.
+const float DRIVE_MAX_VEL  = 0.40f; // rev/s at full stick. Conservative on purpose: one encoder
                                     // count per 5 ms tick is already 0.366 rev/s (546 counts/rev),
                                     // so 0.6 rev/s is only ~1.6 counts/tick of resolution. Raise
                                     // this after the x4 hardware QuadEncoder upgrade (2184 cpr).
