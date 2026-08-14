@@ -602,7 +602,19 @@ const float LEAN_CLAMP_REAR = 12.0f; // deg : rear authority cap (SITS DOWN at -
 // mid-brake, which removes the braking entirely -- and that is the likeliest
 // explanation for "crashes sometimes". If that shows up, this goes back to 0.97 and
 // the answer is mechanical, not a gain.
-const float LEAN_LPF   = 0.95f;  // EMA on leanCmd (~100 ms). Higher = slower outer loop.
+// 0.95 -> 0.97, reverted same day. 0.95 was never flown; it was traded away as soon as
+// the overshoot budget became clear. Rear margin is the scarce resource, not response
+// time: pitch overshoot past leanCmd is what consumes the 3.7 deg between LEAN_CLAMP_REAR
+// 12 and the -15.67 sit-down, and a faster command rotates the body faster into the lean,
+// so it overshoots MORE. 0.97 is also the only alpha where the overshoot is actually
+// measured (2.78 deg peak, rear side, MS 32705 of the good brake log) -- going faster
+// invalidated that number in the dangerous direction.
+// EXCHANGE RATE, still unmeasured: slower leanCmd -> less overshoot -> more of the 15.67
+// usable -> a higher LEAN_CLAMP_REAR, which is worth ~8.5% deceleration per degree. That
+// may well beat the lag it costs, but it is a guess until the overshoot is measured at
+// this alpha. Do that before going to 0.98 (tau 250 ms), or the trade is blind in both
+// directions: giving up known response time for unknown headroom.
+const float LEAN_LPF   = 0.97f;  // EMA on leanCmd (~170 ms). Higher = slower outer loop.
 // HARD BACKSTOP ONLY. The primary anti-windup is now conditional integration
 // against LEAN_CLAMP, applied in the outer loop below.
 //
