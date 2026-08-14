@@ -678,6 +678,32 @@ const float FRICTION_FF_LPF    = 0.98f; // ~0.64 Hz corner at 200 Hz: passes the
 const float FRICTION_FF_KNEE_U = 3.0f;  // effort units for ~76% of the floor. u reached
                                         // +20 while stalled, so this saturates early and
                                         // the floor is effectively full during breakaway.
+// TWO PHASES, gated on whether the lean is actually up. Bench 2026-08-14 with the
+// u-aimed bias alone: LEAN ACT reached 6.4 -> 9.9 deg tracking LEAN CMD 6.1 -> 8.5
+// with |ERR| <= 1.5 -- the FIRST time the body ever went where it was told (every
+// earlier run had LEAN ACT pinned at -2.4 while the command climbed to 6.5). But POS
+// stayed at 0.21 for the whole 1.3 s window: lean up, wheels still stopped.
+// The burst says why. u crosses zero at i = 46, 148, 241 -> ~195 samples = ~1 Hz, and
+// over the whole capture u has essentially NO DC, it just swings +/-7. FRICTION_FF_LPF
+// sits at 0.64 Hz, right on that, so FFB chased the swing (-0.62..+0.65) instead of
+// extracting a bias, and pwmR peaked at 22 against a 27 static breakaway. A low-pass
+// cannot extract a DC component that is not there.
+// The two aims were each right for one phase and I kept applying one to both:
+//   LAUNCH  (lean not yet up): wheels must roll BACKWARD to tip the body forward.
+//                              u points that way. This is the part that now works.
+//   CRUISE  (lean up):         wheels must roll FORWARD to convert lean into motion.
+//                              velError points that way and fades as speed arrives.
+// The velError-only version never got the lean up; the u-only version gets it up and
+// then has nothing left to push with, which is exactly "almost moved". Once the lean
+// is established u has no job, so it oscillates and a u-aimed bias oscillates with it
+// -- that is the 1 Hz hunt.
+// Checked against that log: at burst i=0 the lean toward the command is 0.68 deg
+// (LAUNCH); by MS 31199 it is 6.45 deg (CRUISE), so the forward push would engage
+// exactly where the robot sat and did nothing.
+const float FRICTION_FF_KNEE_V    = 0.12f; // rev/s of velError for ~76% of the floor in CRUISE
+const float FRICTION_FF_LEAN_DEG  = 3.0f;  // deg toward the command: LAUNCH -> CRUISE
+const float FRICTION_FF_LEAN_DROP = 1.5f;  // hysteresis back to LAUNCH; wide enough that the
+                                           // +/-1.5 deg tracking ripple cannot chatter the phase
 
 #define DRIVE_LAUNCH_ASSIST 0
 const float         LAUNCH_ASSIST_EFFORT     = 20.0f; // -35/-47 PWM with measured static floors
@@ -797,6 +823,7 @@ float dTermLog = 0.0f;    // derivative contribution, for telemetry
 float leanCmd   = 0.0f;   // cascade outer-loop output: the desired lean (deg) added to BALANCE_SETPOINT
 float velocityLeanI = 0.0f;
 float frictionUSlow = 0.0f;   // low-passed u; aims the friction floor (DRIVE_FRICTION_FF)
+bool  frictionLeanUp = false; // latched LAUNCH -> CRUISE phase for the friction floor
 bool  integralRollingPrev = false;            // edge-detect stall -> rolling for the integral reset
 unsigned long lastControlMicros = 0;
 int controlHz = 0;   // measured control-loop frequency (should read ~200; if lower, we're falling behind)
@@ -889,6 +916,7 @@ struct ControlTelemetry {
   float driveRaw = 0.0f, turnRaw = 0.0f;
   float driveCmd = 0.0f, turnCmd = 0.0f;
   float frictionFF = 0.0f;   // -1..+1 : how much of the deadband floor drive is aiming
+  bool  frictionLeanUp = false;  // false = LAUNCH phase, true = CRUISE phase
   float wheelVelRawL = 0.0f, wheelVelRawR = 0.0f;
   long encoderDeltaL = 0, encoderDeltaR = 0;
   float posError = 0.0f, velError = 0.0f;   // outer-loop tracking errors
@@ -1337,6 +1365,7 @@ void loop() {
     leanCmd  = 0.0f;
     velocityLeanI = 0.0f;
     frictionUSlow = 0.0f;
+    frictionLeanUp = false;
     turnCmdLog = 0.0f;
     controlLog.targetPitch = BALANCE_SETPOINT;
     controlLog.pTerm = controlLog.iTerm = 0.0f;
@@ -1841,16 +1870,33 @@ void loop() {
   float frictionFF = 0.0f;
 #if DRIVE_FRICTION_FF
   if (driving) {
-    // Aim at u's SUSTAINED component, in u's own sign. No negation: u already points
-    // where the inner loop needs torque, including the backward impulse that
-    // establishes a forward lean. See the sign post-mortem at DRIVE_FRICTION_FF.
-    frictionUSlow = FRICTION_FF_LPF * frictionUSlow + (1.0f - FRICTION_FF_LPF) * u;
-    frictionFF = tanhf(frictionUSlow / FRICTION_FF_KNEE_U);
+    // Phase gate: is the commanded lean actually ON THE BODY yet? Latched with
+    // hysteresis so the tracking ripple cannot flip it tick to tick.
+    float leanToward = driveDirection * (pitch - BALANCE_SETPOINT);
+    if      (leanToward >= FRICTION_FF_LEAN_DEG)  frictionLeanUp = true;
+    else if (leanToward <  FRICTION_FF_LEAN_DROP) frictionLeanUp = false;
+
+    if (frictionLeanUp) {
+      // CRUISE. The lean is established, so the wheels must roll FORWARD to turn it
+      // into travel. velError is the sustained one-sided signal here (+0.23..+0.33 for
+      // seconds in the bench log) and it fades on its own as the speed is reached.
+      // SIGN_CFG: physical forward is NEGATIVE PWM effort, velError is POSITIVE when
+      // the robot still owes forward speed -- hence the negation.
+      frictionFF = -tanhf(velError / FRICTION_FF_KNEE_V);
+      frictionUSlow = 0.0f;   // stale on re-entry to LAUNCH; rebuild it from scratch
+    } else {
+      // LAUNCH. The lean is not up yet, and it is established by rolling the wheels
+      // BACKWARD, which is where u points. No negation -- u already carries the sign.
+      frictionUSlow = FRICTION_FF_LPF * frictionUSlow + (1.0f - FRICTION_FF_LPF) * u;
+      frictionFF = tanhf(frictionUSlow / FRICTION_FF_KNEE_U);
+    }
   } else {
-    frictionUSlow = 0.0f;   // no carry-over into the next drive gesture
+    frictionUSlow  = 0.0f;   // no carry-over into the next drive gesture
+    frictionLeanUp = false;  // every gesture starts in LAUNCH
   }
 #endif
   controlLog.frictionFF = frictionFF;
+  controlLog.frictionLeanUp = frictionLeanUp;
 
   controlLog.effortL = u + turnCmd;
   controlLog.effortR = u - turnCmd;
@@ -1937,6 +1983,7 @@ void telemetry(float error, float rate, float u) {
   Serial.print(" EXIT "); Serial.print(controlLog.launchEvent);
   Serial.print(" BOOST "); Serial.print(controlLog.launchBoost, 1);
   Serial.print(" FFB "); Serial.print(controlLog.frictionFF, 2);
+  Serial.print(" FFP "); Serial.print(controlLog.frictionLeanUp ? 'C' : 'L');
   Serial.print(" BTK "); Serial.print(launchAssistTicksRemaining);
   Serial.print(" VTRQ "); Serial.print(controlLog.driveVelocityEffort, 2);
   Serial.print(" VTG "); Serial.print(controlLog.driveVelocityEffortActive ? "Y" : "-");
