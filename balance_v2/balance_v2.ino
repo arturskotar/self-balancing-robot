@@ -172,7 +172,26 @@ const int BURST_N = 400;             // 2.0 s at 200 Hz; 400 * 20 B = 8 KB of 1 
 // So BREAKAWAY LEAN IS ~3.4 deg and 3.0 sat just under it. Raised to 6.0 as the
 // falsifiable check: comfortably above threshold, it should roll continuously and
 // never enter the stalled stick-slip cycle.
-#define STATIC_LEAN_TEST 1
+// RESULT at 6.0 deg, and the reason this test is now RETIRED -- it answered all
+// three questions it was built for:
+//   1. THE DRIVETRAIN WORKS. One run produced POS 0.000 -> 2.134, i.e. 2.13 rev of
+//      sustained monotonic travel at up to VF 0.65 rev/s. That question is closed.
+//   2. Breakaway is ~6-7 deg (not the 3.4 deg first inferred; that figure came
+//      from a decelerating coast, see below).
+//   3. THE REAL OBSTACLE IS THE STATIC/KINETIC FRICTION GAP. The SAME 6.0 deg
+//      command produced opposite outcomes on consecutive runs:
+//          run A: stalled, POS frozen, LEAN ACT held ~6.2
+//          run B: broke away, ran away to LEAN ACT 18.9 with ERR 12.9
+//      and run B did BOTH -- ran away, then settled back and sat stalled at
+//      LEAN ACT ~6 for its last 3 s. Above breakaway 6 deg over-accelerates
+//      without limit; below it, 6 deg holds the robot stopped. NO SINGLE LEAN
+//      VALUE BOTH STARTS AND CRUISES THIS CHASSIS.
+// The runaway is the test working, not a fault: overriding leanCmd removes the
+// velocity feedback, and a fixed lean is a fixed ACCELERATION command, so once it
+// breaks away nothing backs it off. Bridging that gap -- high lean to break away,
+// then collapse it as VF rises -- is precisely the job of the outer loop's
+// velocity term. Set to 1 only to re-measure breakaway on a changed chassis.
+#define STATIC_LEAN_TEST 0
 const float STATIC_LEAN_DEG = 6.0f;  // deg of commanded lean, held continuously
 
 // ---- IMU sign/axis test ----------------------------------------------------
@@ -286,14 +305,28 @@ const float DRIVE_KD_RESTORE_FULL_ERROR  = 3.0f;
 // 2.0 keeps some of the extra station-keeping authority without making a stalled
 // drive dangerous to hold. With POS_ERROR_CLAMP 1.5 the position term now tops
 // out at 3.0 deg.
-float Kpos = 2.0f;               // wheel position error (rev -> deg of lean)
+// 1.0 -> 4.0 -> 2.0 -> 4.0. Back to 4.0 now that breakaway is MEASURED at ~6-7 deg
+// (see STATIC_LEAN_DEG). At 2.0 the outer loop's component sum was
+//   Kpos 2.0 * POS_ERROR_CLAMP 1.5 = 3.00
+//   Kvel 3.0 * DRIVE_MAX_VEL 0.25  = 0.75   <- shrank when Vmax was cut to 0.25
+//   VEL_I_CLAMP                     = 2.50
+//                                    ------
+//                                     6.25  -- just UNDER the threshold, again.
+// With Kpos 4.0 and VEL_I_CLAMP 4.0 the sum is 10.75, clear of breakaway and
+// inside LEAN_CLAMP 12. The earlier 4.0 was reverted because it walked the robot
+// to 12 deg, but that was with LEAN_CLAMP at 10 and no conditional integration
+// engaging; LEAN_CLAMP 12 now binds below the component sum, so the anti-windup
+// actually fires and bounds the excursion.
+float Kpos = 4.0f;               // wheel position error (rev -> deg of lean)
 float Kvel = 3.0f;               // wheel-velocity damping; enough drive lean without sitting on the pitch ring
 const float KVEL_I = 0.6f;       // slow velocity-error memory (rev/s*s -> deg lean)
 // RAISED 0.8 -> 2.5. In the 2026-08-14 log this integral ramped to 0.80 in 0.6 s
 // and then sat there for the rest of the hold: saturated, and contributing a
 // constant. An integral that saturates below the disturbance it is integrating
 // against is just an offset. 2.5 lets it actually search for the friction level.
-const float VEL_I_CLAMP = 2.5f;  // deg; must exceed the stiction lean, not sit under it
+// 0.8 -> 2.5 -> 4.0. Raised again with Kpos: breakaway is ~6-7 deg and the whole
+// component sum has to clear it, not just this term.
+const float VEL_I_CLAMP = 4.0f;  // deg; must exceed the stiction lean, not sit under it
 // The integral may only TRIM A CRUISE, never fight stiction. While the wheels are
 // not actually rolling, velError reports a stalled drivetrain rather than a speed
 // shortfall, and integrating that just winds to the clamp -- so the term arrives
