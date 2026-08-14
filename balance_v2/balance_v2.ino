@@ -719,7 +719,23 @@ const float TURN_SIGN      = +1.0f; // flip to -1 if the turn stick steers the w
 //     balance is exactly as before.
 // LAUNCH ASSIST DISABLED so this is the sole breakaway mechanism and the next log is
 // unambiguous. Running both would confound it the way DRIVE_VELOCITY_EFFORT did.
-#define DRIVE_FRICTION_FF 1
+// OFF 2026-08-14. SETTLED: the two-phase feedforward is not salvageable. LAUNCH and
+// CRUISE push in OPPOSITE directions, so any gate between them turns a misclassification
+// into a full-amplitude PWM reversal -- and every gate tried chattered on a ringing
+// LEAN ACT: 3.0/1.5 hysteresis, a one-way latch, a -2.0 loss threshold, and a rate lead.
+// Final run: FFP alternating C,L,C,L,C,C,L,C,L,... every 100 ms sample with FFB flipping
+// +0.94, -1.00, +0.92, -1.00, +0.49, -1.00; burst shows +/-3.7 deg of pitch at ~5.1 Hz
+// (peaks 39-40 samples apart) and RATE reaching +/-118 deg/s. No threshold fixes this:
+// the ring amplitude exceeds any band narrow enough to be useful.
+// Slew-limiting the floor (97d6e55) made it WORSE, because it held the floor high and
+// steady while the SIGN kept inverting underneath it.
+// With DRIVE_FRICTION_FF 0 the ffBias path in mapEffortToPwm is inert and the plain
+// sign-of-u floor takes over -- the per-wheel deadband only ever augments |effort| and
+// can never oppose it, which is the property the FF path never had.
+// The lean no longer needs a launch push anyway: at Kpos 6 / KVEL_I 24 / LEAN_CLAMP 18
+// it reaches 17-18 deg on its own, which was not true when the FF was designed.
+// Anything rebuilt here must be SINGLE-SIGNED. Do not reintroduce opposing phases.
+#define DRIVE_FRICTION_FF 0
 const float FRICTION_FF_LPF    = 0.98f; // ~0.64 Hz corner at 200 Hz: passes the demand,
                                         // rejects the ring (14x down at 9 Hz).
 const float FRICTION_FF_KNEE_U = 3.0f;  // effort units for ~76% of the floor. u reached
