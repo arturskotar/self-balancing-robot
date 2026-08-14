@@ -695,11 +695,11 @@ const float TURN_SIGN      = +1.0f; // flip to -1 if the turn stick steers the w
 // LAUNCH ASSIST DISABLED so this is the sole breakaway mechanism and the next log is
 // unambiguous. Running both would confound it the way DRIVE_VELOCITY_EFFORT did.
 #define DRIVE_FRICTION_FF 1
-const float FRICTION_FF_LPF    = 0.98f; // ~0.64 Hz corner at 200 Hz: passes the demand,
-                                        // rejects the ring (14x down at 9 Hz).
-const float FRICTION_FF_KNEE_U = 3.0f;  // effort units for ~76% of the floor. u reached
-                                        // +20 while stalled, so this saturates early and
-                                        // the floor is effectively full during breakaway.
+// RETIRED 2026-08-14: FRICTION_FF_LPF / FRICTION_FF_KNEE_U aimed the LAUNCH bias at
+// tanh(LPF(u)). That closed a positive-feedback loop -- the bias is added to u in
+// mapEffortToPwm, so bias -> wheels -> body -> u -> bias -- and the low-pass could not
+// break it because u's swing is ~1 Hz against a 0.64 Hz corner. The launch direction
+// never needed measuring; it follows from driveDirection. See the LAUNCH branch.
 // TWO PHASES, gated on whether the lean is actually up. Bench 2026-08-14 with the
 // u-aimed bias alone: LEAN ACT reached 6.4 -> 9.9 deg tracking LEAN CMD 6.1 -> 8.5
 // with |ERR| <= 1.5 -- the FIRST time the body ever went where it was told (every
@@ -740,9 +740,7 @@ const float FRICTION_FF_KNEE_U = 3.0f;  // effort units for ~76% of the floor. u
 // Raise this first if launch is still too soft; it is the aggression knob.
 const float FRICTION_FF_BOOST     = 20.0f; // PWM added to each wheel's floor in the FF path
 const float FRICTION_FF_KNEE_V    = 0.12f; // rev/s of velError for ~76% of the floor in CRUISE
-const float FRICTION_FF_LEAN_DEG  = 3.0f;  // deg toward the command: LAUNCH -> CRUISE
-const float FRICTION_FF_LEAN_DROP = 1.5f;  // hysteresis back to LAUNCH; wide enough that the
-                                           // +/-1.5 deg tracking ripple cannot chatter the phase
+const float FRICTION_FF_LEAN_DEG  = 3.0f;  // deg toward the command: LAUNCH -> CRUISE, one-way
 
 #define DRIVE_LAUNCH_ASSIST 0
 const float         LAUNCH_ASSIST_EFFORT     = 20.0f; // -35/-47 PWM with measured static floors
@@ -876,7 +874,6 @@ const float LEAN_RATE_FF_MAX = 60.0f; // deg/s : bound on the setpoint-rate term
 float dTermLog = 0.0f;    // derivative contribution, for telemetry
 float leanCmd   = 0.0f;   // cascade outer-loop output: the desired lean (deg) added to BALANCE_SETPOINT
 float velocityLeanI = 0.0f;
-float frictionUSlow = 0.0f;   // low-passed u; aims the friction floor (DRIVE_FRICTION_FF)
 bool  frictionLeanUp = false; // latched LAUNCH -> CRUISE phase for the friction floor
 bool  integralRollingPrev = false;            // edge-detect stall -> rolling for the integral reset
 unsigned long lastControlMicros = 0;
@@ -1140,13 +1137,14 @@ void motorPerWheel(int pwmL, int pwmR) {
 // ffBias (-1..+1, see DRIVE_FRICTION_FF) aims the floor at the outer loop's SUSTAINED
 // demand instead of at the sign of this tick's effort. At 0 this is the original map
 // exactly, so standing balance is unchanged.
-int mapEffortToPwm(float effort, float ffBias, bool moving, int dbMoving, int dbStatic) {
+int mapEffortToPwm(float effort, float ffBias, float ffBoost, bool moving,
+                   int dbMoving, int dbStatic) {
   int deadband = moving ? dbMoving : dbStatic;
   if (ffBias != 0.0f) {
     // One-sided friction compensation plus the raw PD effort. An effort that averages
     // to zero now averages to the bias, not to a relay twice its own amplitude.
-    // FRICTION_FF_BOOST is common-mode so the overdrive adds no yaw -- see its note.
-    float cmd = ((float)deadband + FRICTION_FF_BOOST) * ffBias + effort;
+    // ffBoost is common-mode so the overdrive adds no yaw -- see FRICTION_FF_BOOST.
+    float cmd = ((float)deadband + ffBoost) * ffBias + effort;
     if (fabs(cmd) <= OUT_DEADZONE) return 0;
     return (int)constrain(cmd, -(float)MAX_PWM, (float)MAX_PWM);
   }
@@ -1155,9 +1153,9 @@ int mapEffortToPwm(float effort, float ffBias, bool moving, int dbMoving, int db
   return effort > 0.0f ? pwm : -pwm;
 }
 
-void driveControlDiff(float uL, float uR, float ffBias) {
-  int pwmL = mapEffortToPwm(uL, ffBias, wheelMovingL, LEFT_DEADBAND_MOVING,  LEFT_DEADBAND_STATIC);
-  int pwmR = mapEffortToPwm(uR, ffBias, wheelMovingR, RIGHT_DEADBAND_MOVING, RIGHT_DEADBAND_STATIC);
+void driveControlDiff(float uL, float uR, float ffBias, float ffBoost) {
+  int pwmL = mapEffortToPwm(uL, ffBias, ffBoost, wheelMovingL, LEFT_DEADBAND_MOVING,  LEFT_DEADBAND_STATIC);
+  int pwmR = mapEffortToPwm(uR, ffBias, ffBoost, wheelMovingR, RIGHT_DEADBAND_MOVING, RIGHT_DEADBAND_STATIC);
   motorPerWheel(pwmL, pwmR);
 }
 
@@ -1420,7 +1418,6 @@ void loop() {
     dTermLog = 0.0f;
     leanCmd  = 0.0f;
     velocityLeanI = 0.0f;
-    frictionUSlow = 0.0f;
     frictionLeanUp = false;
     turnCmdLog = 0.0f;
     controlLog.targetPitch = BALANCE_SETPOINT;
@@ -1936,13 +1933,29 @@ void loop() {
   // sign for seconds while u swings +/-9 about a mean of -0.78, so velError is the
   // only signal here that carries usable DC.
   float frictionFF = 0.0f;
+  float frictionBoost = 0.0f;   // extra PWM on the floor; LAUNCH only
 #if DRIVE_FRICTION_FF
   if (driving) {
-    // Phase gate: is the commanded lean actually ON THE BODY yet? Latched with
-    // hysteresis so the tracking ripple cannot flip it tick to tick.
+    // Phase gate: is the commanded lean actually ON THE BODY yet? ONE-WAY LATCH --
+    // once CRUISE is reached it holds for the rest of the gesture, and only releasing
+    // the stick returns to LAUNCH.
+    //
+    // IT USED TO FALL BACK BELOW FRICTION_FF_LEAN_DROP AND THAT WAS THE OSCILLATION.
+    // The two phases push in OPPOSITE directions by design, so any chatter on this
+    // gate is a full-amplitude reversal of the FF. Bench 2026-08-14, consecutive
+    // 100 ms samples:
+    //     45100  FFP C  FFB +0.94  LEAN ACT -5.70  PWM +48/+63
+    //     45200  FFP L  FFB -0.83  LEAN ACT  0.60  PWM -36/-37
+    //     45300  FFP C  FFB +0.95  LEAN ACT -6.34  PWM +46/+48
+    //     45401  FFP L  FFB -0.69  LEAN ACT -0.22  PWM -28/-30
+    // LEAN ACT was ringing -6.6..+0.6 -- a 7 deg swing -- while the enter/exit pair
+    // was 3.0/1.5, a 1.5 deg band sitting entirely INSIDE the ring. No hysteresis
+    // width short of ~8 deg survives that, and a band that wide would never release.
+    // Latching is the right answer anyway: launch is a ONE-TIME event per gesture,
+    // exactly like the launch assist it replaced. It cannot be needed twice without
+    // the pilot letting go first.
     float leanToward = driveDirection * (pitch - BALANCE_SETPOINT);
-    if      (leanToward >= FRICTION_FF_LEAN_DEG)  frictionLeanUp = true;
-    else if (leanToward <  FRICTION_FF_LEAN_DROP) frictionLeanUp = false;
+    if (leanToward >= FRICTION_FF_LEAN_DEG) frictionLeanUp = true;
 
     if (frictionLeanUp) {
       // CRUISE. The lean is established, so the wheels must roll FORWARD to turn it
@@ -1950,16 +1963,31 @@ void loop() {
       // seconds in the bench log) and it fades on its own as the speed is reached.
       // SIGN_CFG: physical forward is NEGATIVE PWM effort, velError is POSITIVE when
       // the robot still owes forward speed -- hence the negation.
+      // NO BOOST HERE. 47 PWM of standing "friction compensation" while already rolling
+      // is not friction compensation, it is a second drive command -- and it is what
+      // pushed VF to 0.75-0.96 against a 0.40 request. Cruise only needs the kinetic
+      // floor (11/13) it already gets.
       frictionFF = -tanhf(velError / FRICTION_FF_KNEE_V);
-      frictionUSlow = 0.0f;   // stale on re-entry to LAUNCH; rebuild it from scratch
+      frictionBoost = 0.0f;
     } else {
-      // LAUNCH. The lean is not up yet, and it is established by rolling the wheels
-      // BACKWARD, which is where u points. No negation -- u already carries the sign.
-      frictionUSlow = FRICTION_FF_LPF * frictionUSlow + (1.0f - FRICTION_FF_LPF) * u;
-      frictionFF = tanhf(frictionUSlow / FRICTION_FF_KNEE_U);
+      // LAUNCH. Full floor, one-sided, held until the lean gate flips this to CRUISE.
+      //
+      // THIS USED TO FOLLOW tanh(LPF(u)) AND THAT OSCILLATED once FRICTION_FF_BOOST
+      // raised it to 35/47. Aiming the bias at u closes a POSITIVE FEEDBACK loop: the
+      // bias is added to u in mapEffortToPwm, so bias pushes the wheels -> the body
+      // moves -> u moves the same way -> the bias grows. It was marginally stable at
+      // the bare 15/27 floor and went unstable at 2.3x that gain. The low-pass did not
+      // save it either: u's swing is ~1 Hz and FRICTION_FF_LPF's corner is 0.64 Hz, so
+      // most of the swing came straight through.
+      // The direction never needed measuring. To tip the body TOWARD the commanded
+      // lean the wheels must roll the OPPOSITE way, and physical forward is negative
+      // PWM effort, so the launch push is simply +driveDirection. Deterministic, no
+      // feedback path, and it still self-terminates on the lean gate rather than a
+      // timer.
+      frictionFF = (float)driveDirection;
+      frictionBoost = FRICTION_FF_BOOST;   // breakaway only: 15+20/27+20 = 35/47
     }
   } else {
-    frictionUSlow  = 0.0f;   // no carry-over into the next drive gesture
     frictionLeanUp = false;  // every gesture starts in LAUNCH
   }
 #endif
@@ -1968,7 +1996,7 @@ void loop() {
 
   controlLog.effortL = u + turnCmd;
   controlLog.effortR = u - turnCmd;
-  driveControlDiff(controlLog.effortL, controlLog.effortR, frictionFF);  // balance +/- steering
+  driveControlDiff(controlLog.effortL, controlLog.effortR, frictionFF, frictionBoost);
 
 #if BURST_LOG
   // Capture AFTER the motors are written so pwmL/pwmR are this tick's real output.
