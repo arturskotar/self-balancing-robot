@@ -500,7 +500,36 @@ const float DRIVE_KVEL_MULTIPLIER = 1.0f;
 // than an arbitrary one. Component sum is 6*1.5 + 3*0.4 + 9 = 19.2, so this still binds
 // and the conditional integration behind it still fires.
 // IT WILL FALL FORWARD if the wheels do not break away -- that is the accepted trade.
-const float LEAN_CLAMP = 18.0f;  // deg : outer-loop authority cap (sole saturation point)
+// 18 -> 12 (2026-08-14). THIS IS NOW A MECHANICAL LIMIT, NOT A TUNING CHOICE.
+// Manual tilt sweep, disarmed, measured on the bench:
+//     forward rest  pitch +27.31  =  LEAN ACT +30.53   (held 1.2 s)
+//     rear settle   pitch -18.89  =  LEAN ACT -15.67   (damped settle, steady)
+//     rear hard     pitch -27.29  =  LEAN ACT -24.07   (held 2.0 s)
+// The chassis has 30.5 deg of FORWARD lean and only 15.7 deg of REAR lean before it
+// sits down on its rear contact. At 18 the commanded pitch is -21.22, i.e. 2.3 deg
+// PAST the angle where the robot stops being an inverted pendulum and becomes a
+// tripod -- so every full-reverse command drove it onto its own backstop and parked.
+// Signature of that deadlock, seen three times: LEAN RAW pinned at -18, encoders
+// frozen for 1.2-3.0 s, pitch held at -20.6..-21.5 (the free rest at -18.89 plus
+// ~1.8 deg of motor reaction torque, since PWM 7-15 is under the 15/27 breakaway so
+// the wheel never turns but the motor still pushes), and u stuck at +0.4..+0.6 deg of
+// error so the inner loop kept asking for MORE backward rotation -- which it can only
+// get by driving the wheels FORWARD. That is the "reverse commands wheels forward"
+// report: correct control law, unreachable target.
+// 12 leaves 3.7 deg of margin under the 15.67 sit-down, and forward drive never
+// exceeded 9.43 deg of lean even at Vmax 0.90, so nothing that currently works loses
+// authority. Braking should IMPROVE rather than suffer: a hard stop used to command
+// -18 and put the robot on its backstop, which killed the brake it was asking for.
+// Symmetric on purpose. An asymmetric clamp (~26 forward / 12 rear) would recover the
+// unused forward range, but nothing needs it yet and one number is easier to reason
+// about. The real fix is mechanical: move the rear contact back or up and the rear
+// range grows toward the forward 30.5, at which point this can rise again.
+// NOTE the fall/recovery latches cannot fire on this chassis -- FALL_CUTOFF_DEG 45 and
+// RECOVERY_GIVEUP_DEG 32 are both ABOVE the mechanical maxima (30.53 fwd, 24.07 rear),
+// so the robot can never tilt far enough to trip either. That is why it pushed into
+// the stop for 3 s instead of giving up. Left alone for now: fixing it properly needs
+// per-direction thresholds, and this clamp keeps it away from the stop in the first place.
+const float LEAN_CLAMP = 12.0f;  // deg : outer-loop authority cap (sole saturation point)
 // 0.99 -> 0.97 (tau 0.50 s -> 0.17 s, pole 2 -> 6 rad/s). The velocity loop
 // crosses over near 2.5 rad/s, so the old 2 rad/s pole sat essentially ON the
 // crossover and ate ~51 deg of phase exactly where it hurt. That lag is what
