@@ -122,6 +122,36 @@ const long ENC_COUNTS_PER_REV = 546;
 // wheels off the ground. Then set this back to 0.
 #define DEADBAND_TEST 0
 
+// ---- Burst logger ----------------------------------------------------------
+// 100 ms telemetry cannot resolve the drive oscillation: clean alternation every
+// sample is equally consistent with 5, 15, 25 or 35 Hz, and those need opposite
+// fixes (loop gain/phase vs structural resonance). This captures the inner loop
+// at the FULL tick rate into RAM with no serial I/O during capture, so it cannot
+// perturb what it is measuring, then dumps once disarmed.
+//
+// Arms automatically on the drive-command rising edge; dumps 20 lines per pass
+// while DISARMED (motors already cut there, and chunking avoids a long block).
+// Read from the dump: the true ring frequency, and whether U LEADS pitch (the D
+// term is driving the oscillation) or LAGS it (D is damping, something else
+// drives it). Either answer picks the next fix; neither is knowable from the
+// 100 ms telemetry.
+#define BURST_LOG 1
+const int BURST_N = 400;             // 2.0 s at 200 Hz; 400 * 20 B = 8 KB of 1 MB
+
+// ---- Static lean test ------------------------------------------------------
+// Bypasses the outer loop entirely and hands the inner loop a FIXED lean target,
+// held for as long as the stick is held. Isolates the single question everything
+// else has been confounded by: given a sustained lean command, does the inner
+// loop produce sustained wheel torque?
+//   * robot drives away and keeps going  -> inner loop is fine, fault is entirely
+//                                           in the outer loop's lean trajectory
+//   * robot shakes in place at a fixed lean -> the inner loop cannot convert a
+//                                           standing lean into net wheel travel
+// Stick-gated on purpose: full stick = STATIC_LEAN_DEG exactly, centre = 0, so
+// releasing the stick is always an immediate return to plain balancing.
+#define STATIC_LEAN_TEST 0
+const float STATIC_LEAN_DEG = 3.0f;  // deg of commanded lean at full stick
+
 // ---- IMU sign/axis test ----------------------------------------------------
 // Set to 1 to verify the gyro vs accelerometer convention (motors OFF). Hold the
 // robot and SLOWLY tilt it forward then back. Expected (consistent) result:
@@ -241,6 +271,12 @@ const float KVEL_I = 0.6f;       // slow velocity-error memory (rev/s*s -> deg l
 // constant. An integral that saturates below the disturbance it is integrating
 // against is just an offset. 2.5 lets it actually search for the friction level.
 const float VEL_I_CLAMP = 2.5f;  // deg; must exceed the stiction lean, not sit under it
+// The integral may only TRIM A CRUISE, never fight stiction. While the wheels are
+// not actually rolling, velError reports a stalled drivetrain rather than a speed
+// shortfall, and integrating that just winds to the clamp -- so the term arrives
+// at breakaway already saturated and then overshoots. Below this speed the
+// integral FREEZES (holds its value); it is only zeroed when the stick releases.
+const float VEL_I_ROLL_MIN = 0.10f;  // rev/s : below this the integral is frozen
 // Keep drive velocity feedback at the neutral-loop gain. Doubling it drove
 // leanRaw into the +/-5 deg clamp for most held-stick samples, so encoder ripple
 // could only move the command away from saturation and was fed back asymmetrically.
@@ -270,12 +306,21 @@ const float DRIVE_KVEL_MULTIPLIER = 1.0f;
 // at 6 deg instead of letting a held stick walk the robot over. Do not raise it
 // again until an open-loop drivetrain test explains the stall.
 const float LEAN_CLAMP = 6.0f;   // deg : outer-loop authority cap (sole saturation point)
-const float LEAN_LPF   = 0.99f;  // EMA on leanCmd (~500 ms). Higher = slower, safer outer loop.
-                                 // 0.95 (~100 ms) RAN AWAY: faster than the pendulum's non-minimum-
-                                 // phase "wrong-way" transient (~100-300 ms), so the outer loop
-                                 // re-commanded lean while the inner loop was still driving the
-                                 // wheels the wrong way -> positive feedback. KEEP THIS SLOW: it is
-                                 // what stops the drive setpoint from exciting the same runaway.
+// 0.99 -> 0.97 (tau 0.50 s -> 0.17 s, pole 2 -> 6 rad/s). The velocity loop
+// crosses over near 2.5 rad/s, so the old 2 rad/s pole sat essentially ON the
+// crossover and ate ~51 deg of phase exactly where it hurt. That lag is what
+// turns velocity regulation into the observed slow hunt: lean builds, the robot
+// accelerates, velError closes, the lean collapses, friction decays the speed,
+// and the loop needs half a second to notice and rebuild -- "reaches the lean,
+// forgets it, balances, again and again". At 0.17 s the pole contributes ~23 deg
+// instead, recovering ~28 deg of margin.
+// The old warning that 0.95 "RAN AWAY" was recorded against the DIRECT-LEAN
+// structure that predates the cascade, where a held lean was a held acceleration
+// command with nothing closing the loop on translation. In the always-closed
+// cascade the outer loop derives lean from measured position/velocity error, so
+// that failure mode does not carry over unchanged -- but this is still the knob
+// to slow down first if the outer loop starts oscillating.
+const float LEAN_LPF   = 0.97f;  // EMA on leanCmd (~170 ms). Higher = slower outer loop.
 // HARD BACKSTOP ONLY. The primary anti-windup is now conditional integration
 // against LEAN_CLAMP, applied in the outer loop below.
 //
@@ -554,6 +599,47 @@ float posSetpoint = 0.0f;                     // OUTER-LOOP TARGET position (rev
 float targetVelLog = 0.0f;                    // latest commanded wheel velocity (rev/s)
 float turnCmdLog = 0.0f;                      // post-deadzone differential effort
 int   motorPwmL = 0, motorPwmR = 0;           // signed PWM actually sent to each IBT-2
+
+#if BURST_LOG
+// Full-rate capture buffer. Written from the control tick only; printed only
+// while disarmed, so nothing here can stretch a 5 ms tick.
+struct BurstSample {
+  float   pitch, target, rate, u;
+  int16_t pwmL, pwmR;
+};
+BurstSample burstBuf[BURST_N];
+int  burstFill   = 0;        // samples captured so far
+bool burstArmed  = false;    // capturing now
+bool burstReady  = false;    // buffer full, waiting to be dumped
+int  burstCursor = 0;        // dump position
+
+// Print a bounded chunk per call so the dump never blocks for long. Only ever
+// called from the disarmed path, where the motors are already cut.
+void burstDumpChunk() {
+  if (burstCursor == 0) {
+    Serial.print("BURST N="); Serial.print(BURST_N);
+    Serial.println(" HZ=200 COLS i,pitch,target,rate,u,pwmL,pwmR");
+  }
+  int end = burstCursor + 20;
+  if (end > BURST_N) end = BURST_N;
+  for (; burstCursor < end; burstCursor++) {
+    const BurstSample &s = burstBuf[burstCursor];
+    Serial.print("B ");  Serial.print(burstCursor);
+    Serial.print(' ');   Serial.print(s.pitch, 3);
+    Serial.print(' ');   Serial.print(s.target, 3);
+    Serial.print(' ');   Serial.print(s.rate, 2);
+    Serial.print(' ');   Serial.print(s.u, 3);
+    Serial.print(' ');   Serial.print(s.pwmL);
+    Serial.print(' ');   Serial.println(s.pwmR);
+  }
+  if (burstCursor >= BURST_N) {
+    Serial.println("BURST END");
+    burstReady = false;
+    burstFill  = 0;
+    burstCursor = 0;
+  }
+}
+#endif
 long  homeTicksSum = 0;                        // (leftTicks+rightTicks) defining "home" (0 = boot spot)
 bool  stalled = false;                         // true while the stall cutoff has the motors off
 bool  fallen = false;                          // true while the fall latch has the motors off
@@ -1054,6 +1140,12 @@ void loop() {
     launchAssistDirection = 0;
     launchAssistTicksRemaining = 0;
     launchRollingTicks = 0;
+#if BURST_LOG
+    // Motors are already cut above, so this is the safe place to read the buffer
+    // out. Suppress the normal telemetry line while dumping so the two do not
+    // interleave in the capture file.
+    if (burstReady) { burstDumpChunk(); return; }
+#endif
     telemetry(pitch - BALANCE_SETPOINT, gyroRate, 0);
     return;
   }
@@ -1120,6 +1212,11 @@ void loop() {
     posSetpoint = positionRev;
     velocityLeanI = 0.0f;
     driveVelocityEffortLatched = false;
+#if BURST_LOG
+    // Arm the full-rate capture on the drive rising edge, unless a previous
+    // capture is still waiting to be read out.
+    if (!burstReady) { burstFill = 0; burstCursor = 0; burstArmed = true; }
+#endif
 #if DRIVE_LAUNCH_ASSIST
     // RC input ramps through small values on the way to full stick. Arm now and
     // let WAIT_LEAN hold until LAUNCH_MIN_TARGET_VEL is actually reached; marking
@@ -1229,10 +1326,13 @@ void loop() {
   float effectiveKvel = Kvel * (driving ? DRIVE_KVEL_MULTIPLIER : 1.0f);
   float positionLean = Kpos * posError;
   float velocityLean = effectiveKvel * velError;
-  if (driving) {
+  // Conditional integration on ACTUAL ROLLING, not merely on a drive command --
+  // see VEL_I_ROLL_MIN. Stalled: hold the current value. Released: reset.
+  bool integralRolling = fabs(forwardVel) >= VEL_I_ROLL_MIN;
+  if (driving && integralRolling) {
     velocityLeanI += KVEL_I * velError * DT;
     velocityLeanI = constrain(velocityLeanI, -VEL_I_CLAMP, VEL_I_CLAMP);
-  } else {
+  } else if (!driving) {
     velocityLeanI = 0.0f;
   }
   float velocityLeanIntegral = velocityLeanI;
@@ -1258,6 +1358,14 @@ void loop() {
   }
   leanRaw = constrain(leanRaw, -LEAN_CLAMP, LEAN_CLAMP);
   leanCmd = LEAN_LPF * leanCmd + (1.0f - LEAN_LPF) * leanRaw;
+#if STATIC_LEAN_TEST
+  // Override the whole outer loop with a fixed lean the inner loop must hold for
+  // as long as the stick is held. Everything above still runs and still logs, so
+  // the telemetry shows what the outer loop WOULD have asked for alongside what
+  // the inner loop is actually being given.
+  leanCmd = STATIC_LEAN_DEG * DRIVE_SIGN * driveIn;
+  leanRaw = leanCmd;
+#endif
   controlLog.posError = posError;
   controlLog.velError = velError;
   controlLog.positionLean = positionLean;
@@ -1452,6 +1560,21 @@ void loop() {
   controlLog.effortL = u + turnCmd;
   controlLog.effortR = u - turnCmd;
   driveControlDiff(controlLog.effortL, controlLog.effortR);   // balance +/- steering
+
+#if BURST_LOG
+  // Capture AFTER the motors are written so pwmL/pwmR are this tick's real output.
+  if (burstArmed && burstFill < BURST_N) {
+    BurstSample &s = burstBuf[burstFill++];
+    s.pitch  = pitch;
+    s.target = BALANCE_SETPOINT + leanCmd;
+    s.rate   = dRateFilt;
+    s.u      = u;
+    s.pwmL   = (int16_t)motorPwmL;
+    s.pwmR   = (int16_t)motorPwmR;
+    if (burstFill >= BURST_N) { burstArmed = false; burstReady = true; }
+  }
+#endif
+
   telemetry(error, gyroRate, u);
 }
 
