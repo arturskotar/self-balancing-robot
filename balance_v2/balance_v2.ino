@@ -546,6 +546,11 @@ unsigned long sweepLastMs = 0;
 const int   MAX_PWM        = 110;   // ceiling, 0-255. Raised 80->110 for authority to recover large
                                     // backward falls. WATCH motor heat/current as you push this up.
 const float OUT_DEADZONE   = 0.5f;  // ignore PD outputs smaller than this (PWM units)
+// Effort over which the stiction floor ramps in from 0 to full, instead of stepping.
+// Sized against the observed ring: u swings +/-9 during a drive, so 5.0 softens more
+// than half of that amplitude while leaving the floor fully applied for real drive
+// efforts (9-30). Raise it if the 8 Hz ring persists; lower it if breakaway suffers.
+const float FLOOR_KNEE     = 5.0f;  // PWM-effort units
 
 // ---- Per-side stiction compensation ----------------------------------------
 // Every non-zero PID effort gets a static floor so the wheel actually moves.
@@ -1203,7 +1208,19 @@ int mapEffortToPwm(float effort, float ffBias, float ffFloor, bool moving,
     return (int)constrain(cmd, -(float)MAX_PWM, (float)MAX_PWM);
   }
   if (fabs(effort) <= OUT_DEADZONE) return 0;
-  int pwm = (int)constrain(deadband + fabs(effort), 0.0f, (float)MAX_PWM);
+  // RAMP THE FLOOR IN over the first FLOOR_KNEE of |effort| instead of stepping to it.
+  // With the feedforward off this is the ONLY nonlinearity left in the loop, and as a
+  // STEP it has infinite incremental gain exactly at the zero crossing -- a textbook
+  // limit-cycle generator, and the burst shows the cycle: u peaks at i = 21, 46, 70, 94,
+  // 117, 142, 168, 193, 219, 245, 271, 296 (intervals 23-26 samples = ~125 ms = 8 Hz),
+  // with PWM stepping 0 -> -16/-28 and 0 -> +15/+27 on every crossing.
+  // Ramped, the incremental gain near zero drops from infinite to deadband/FLOOR_KNEE + 1
+  // (about 6.4 for the 27 floor), which is what takes the energy out of the cycle.
+  // Full friction compensation is still there wherever it matters: |effort| >= FLOOR_KNEE
+  // gets the whole floor, and drive efforts run 9-30.
+  float ramp = fabs(effort) / FLOOR_KNEE;
+  if (ramp > 1.0f) ramp = 1.0f;
+  int pwm = (int)constrain((float)deadband * ramp + fabs(effort), 0.0f, (float)MAX_PWM);
   return effort > 0.0f ? pwm : -pwm;
 }
 
