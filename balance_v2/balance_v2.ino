@@ -757,10 +757,21 @@ const float FRICTION_FF_KNEE_V    = 0.12f; // rev/s of velError for ~76% of the 
 // 27 + 20 = 47 is the same number LAUNCH_ASSIST_EFFORT produced, the one mechanism
 // that reliably moved this robot. It disappears the moment either wheel turns.
 const float FRICTION_FF_BOOST     = 20.0f; // extra PWM on the floor while stalled in CRUISE
-const float FRICTION_FF_ROLL_VEL  = 0.15f; // rev/s at which the FF floor has fully blended
-                                           // from (static + boost) down to the kinetic floor.
-                                           // Well above the 0.05 rev/s encoder-noise band so
-                                           // the blend cannot be driven by quantization.
+// 0.15 -> 0.40, AND the result is now slew-limited. 0.15 did not work and the reason is
+// worth writing down, because it is the third instance of the same mistake this session:
+// ONE ENCODER COUNT IS 0.366 rev/s (546 cpr at 200 Hz, x1 decode). VRL/VRR step in +/-0.37
+// quanta all through the logs. So a 0.15 rev/s blend window is 2.4x SMALLER than the
+// quantum -- ffRoll still slammed 0->1 on a single count and ffFloor still stepped 13<->47.
+// Bench 2026-08-14 burst, u essentially unchanged across the tick:
+//     i=72  u 1.834   PWM 10        i=145 u 16.139  PWM  1
+//     i=73  u 1.801   PWM 47        i=146 u 16.555  PWM 29
+// Filtering the INPUT cannot fix this when the input's quantum exceeds the window. The
+// filter has to be on the OUTPUT, which is immune to whatever the velocity signal does.
+const float FRICTION_FF_ROLL_VEL  = 0.40f; // rev/s for a full blend; = DRIVE_MAX_VEL, and
+                                           // comfortably more than one 0.366 rev/s count
+const float FF_FLOOR_LPF          = 0.99f; // ~0.32 Hz at 200 Hz (tau 0.5 s). A 34-count
+                                           // floor step becomes a 0.5 s ramp, which cannot
+                                           // drive a limit cycle no matter how ffRoll jumps.
 const float FRICTION_FF_LEAN_DEG  = 3.0f;  // deg toward the command: LAUNCH -> CRUISE
 const float FRICTION_FF_LEAN_DROP = 1.5f;  // hysteresis back to LAUNCH; wide enough that the
                                            // +/-1.5 deg tracking ripple cannot chatter the phase
@@ -902,6 +913,7 @@ float leanCmd   = 0.0f;   // cascade outer-loop output: the desired lean (deg) a
 float velocityLeanI = 0.0f;
 float frictionUSlow = 0.0f;   // low-passed u; aims the friction floor (DRIVE_FRICTION_FF)
 bool  frictionLeanUp = false; // latched LAUNCH -> CRUISE phase for the friction floor
+float ffFloorFilt = 47.0f;    // slew-limited FF floor; starts at the stopped value
 bool  integralRollingPrev = false;            // edge-detect stall -> rolling for the integral reset
 unsigned long lastControlMicros = 0;
 int controlHz = 0;   // measured control-loop frequency (should read ~200; if lower, we're falling behind)
@@ -1203,9 +1215,13 @@ void driveControlDiff(float uL, float uR, float ffBias, float ffRoll) {
                                 ? LEFT_DEADBAND_STATIC : RIGHT_DEADBAND_STATIC);
   const float fMoving = (float)(LEFT_DEADBAND_MOVING > RIGHT_DEADBAND_MOVING
                                 ? LEFT_DEADBAND_MOVING : RIGHT_DEADBAND_MOVING);
-  // Stopped -> static floor + breakaway boost (27+20 = 47). Rolling -> kinetic floor
-  // (13). Continuous between, so there is no step for the loop to ring on.
-  float ffFloor = (fStatic + FRICTION_FF_BOOST) * (1.0f - ffRoll) + fMoving * ffRoll;
+  // Stopped -> static floor + breakaway boost (27+20 = 47). Rolling -> kinetic floor (13).
+  // SLEW-LIMITED: the blend input is quantized far coarser than the blend window (see
+  // FRICTION_FF_ROLL_VEL), so the target still steps. Filtering here bounds how fast the
+  // floor can move regardless, which is what actually stops the ringing.
+  float ffFloorTarget = (fStatic + FRICTION_FF_BOOST) * (1.0f - ffRoll) + fMoving * ffRoll;
+  ffFloorFilt = FF_FLOOR_LPF * ffFloorFilt + (1.0f - FF_FLOOR_LPF) * ffFloorTarget;
+  float ffFloor = ffFloorFilt;
   // wheelMoving still governs the plain sign-of-u path (no FF), where the floor only
   // augments |effort| and a step in it cannot reverse the command.
   int pwmL = mapEffortToPwm(uL, ffBias, ffFloor, wheelMovingL, LEFT_DEADBAND_MOVING,  LEFT_DEADBAND_STATIC);
@@ -1474,6 +1490,7 @@ void loop() {
     velocityLeanI = 0.0f;
     frictionUSlow = 0.0f;
     frictionLeanUp = false;
+    ffFloorFilt = (float)RIGHT_DEADBAND_STATIC + FRICTION_FF_BOOST;  // re-arm stopped
     turnCmdLog = 0.0f;
     controlLog.targetPitch = BALANCE_SETPOINT;
     controlLog.pTerm = controlLog.iTerm = 0.0f;
