@@ -180,7 +180,7 @@ const float DRIVE_KP = 6.0f;
 // proportional term instead of leaving a broad proportional-only damping hole.
 // Larger tracking errors still restore the known-good neutral Kd.
 const float DRIVE_KD = 0.20f;
-const float DRIVE_D_NEAR_TARGET_LIMIT = 3.0f; // stop rate noise from becoming full floor reversals
+const float DRIVE_D_NEAR_TARGET_LIMIT = 1.5f; // soften near-target D so rate noise cannot kick the static floor
 const float DRIVE_KD_RESTORE_START_ERROR = 1.5f;
 const float DRIVE_KD_RESTORE_FULL_ERROR  = 3.0f;
 
