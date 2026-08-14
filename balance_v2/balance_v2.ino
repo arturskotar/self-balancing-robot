@@ -227,12 +227,13 @@ const float DRIVE_KD_RESTORE_FULL_ERROR  = 3.0f;
 // verified correct against the 2026-08-13 hand-tilt telemetry -- see git log.
 #define OUTER_LOOP 1
 
-// RAISED 1.0 -> 4.0 from the 2026-08-14 stalled-drive log. PERR sat pinned at
-// POS_ERROR_CLAMP (0.500) for the entire hold, so this gain alone decided the
-// position term: 1.0 * 0.5 = 0.50 deg. See the ceiling arithmetic at
-// POS_ERROR_CLAMP below -- 0.50 deg was the smallest of the three lean terms and
-// the only one that could have been made larger by a constant.
-float Kpos = 4.0f;               // wheel position error (rev -> deg of lean)
+// 1.0 -> 4.0 -> 2.0. The raise to 4.0 was meant to lift the outer loop's lean
+// ceiling past the friction threshold; the bench test refuted that theory (see
+// LEAN_CLAMP) and 4.0 walked the robot to 12 deg of pitch under a held stick.
+// 2.0 keeps some of the extra station-keeping authority without making a stalled
+// drive dangerous to hold. With POS_ERROR_CLAMP 1.5 the position term now tops
+// out at 3.0 deg.
+float Kpos = 2.0f;               // wheel position error (rev -> deg of lean)
 float Kvel = 3.0f;               // wheel-velocity damping; enough drive lean without sitting on the pitch ring
 const float KVEL_I = 0.6f;       // slow velocity-error memory (rev/s*s -> deg lean)
 // RAISED 0.8 -> 2.5. In the 2026-08-14 log this integral ramped to 0.80 in 0.6 s
@@ -244,14 +245,31 @@ const float VEL_I_CLAMP = 2.5f;  // deg; must exceed the stiction lean, not sit 
 // leanRaw into the +/-5 deg clamp for most held-stick samples, so encoder ripple
 // could only move the command away from saturation and was fed back asymmetrically.
 const float DRIVE_KVEL_MULTIPLIER = 1.0f;
-// RAISED 5.0 -> 10.0, and this is now the loop's ONLY saturation point (see the
-// conditional integration in the outer loop). Reference point: librobotcontrol's
-// rc_balance saturates its outer loop at THETA_REF_MAX = 0.33 rad = 18.9 deg, so
-// 10 deg is still conservative by half. Measured requirement: the 2026-08-13/14
-// logs show this chassis sitting motionless at a mean lean of +0.50 deg past
-// balance under full forward stick, so breakaway needs MORE than ~3.7 deg of
-// commanded lean -- and the old 3.10 deg ceiling could never reach it.
-const float LEAN_CLAMP = 10.0f;  // deg : outer-loop authority cap (sole saturation point)
+// 5.0 -> 10.0 -> 6.0.
+//
+// THEORY THAT FAILED, recorded so nobody re-derives it: earlier logs showed the
+// robot sitting motionless at leans of +0.50 and -3.7 deg, which was read as a
+// friction threshold near 3.7 deg that the old 3.10 deg lean ceiling could never
+// reach. Raising the ceiling to 10 falsified it. The bench run reached a
+// COMMANDED lean of 8.4 deg and an ACTUAL pitch of 12 deg with the wheels still
+// producing net +7 encoder counts over 3.1 s -- in the wrong direction. A
+// stationary robot at lean X proves the threshold is at least X, not equal to X.
+// There is no lean value in this range that breaks the wheels loose.
+//
+// WHY MORE LEAN CANNOT HELP: commanding lean does not command wheel torque. The
+// inner loop drives the wheels only in proportion to (pitch - target), and it
+// tracks the ramping target to within +/-1.4 deg throughout. Lean is supposed to
+// become motion THROUGH GRAVITY -- lean, body falls, pitch error opens, inner
+// loop catches it, and that catch IS the translation. Something is absorbing the
+// gravity moment, so the chain never starts, and the outer loop just integrates
+// forever against a disturbance it cannot move.
+//
+// 6.0 is a safety choice, not a tuned one: it is now SMALLER than the sum of the
+// component limits (3.0 position + ~1.8 velocity + 2.5 integral = 7.3), so the
+// conditional integration below actually engages and bounds the pitch excursion
+// at 6 deg instead of letting a held stick walk the robot over. Do not raise it
+// again until an open-loop drivetrain test explains the stall.
+const float LEAN_CLAMP = 6.0f;   // deg : outer-loop authority cap (sole saturation point)
 const float LEAN_LPF   = 0.99f;  // EMA on leanCmd (~500 ms). Higher = slower, safer outer loop.
                                  // 0.95 (~100 ms) RAN AWAY: faster than the pendulum's non-minimum-
                                  // phase "wrong-way" transient (~100-300 ms), so the outer loop
@@ -270,7 +288,11 @@ const float LEAN_LPF   = 0.99f;  // EMA on leanCmd (~500 ms). Higher = slower, s
 //                        capped at Kvel * DRIVE_MAX_VEL by construction
 //     LEAN VELI 0.80  <- saturated at VEL_I_CLAMP after 0.6 s
 //     -------------
-//     total     3.10 deg, against a measured breakaway requirement of ~3.7 deg.
+//     total     3.10 deg -- a hard arithmetic ceiling the loop could not exceed
+//                           however long the stick was held.
+// That ceiling was real. The INFERENCE drawn from it -- that lifting it would let
+// the robot break away -- was wrong; see the failed-theory note at LEAN_CLAMP.
+// The structural argument below still stands on its own merits.
 // LEAN_CLAMP was 5.0 and 1.9 deg of it went permanently unused. The loop could
 // not ask for more lean no matter how long the stick was held -- not a tuning
 // shortfall but an arithmetic ceiling, because the only two terms that can
