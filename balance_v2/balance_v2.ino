@@ -180,7 +180,14 @@ const float DRIVE_KP = 4.0f;
 // proportional term instead of leaving a broad proportional-only damping hole.
 // Larger tracking errors still restore the known-good neutral Kd.
 const float DRIVE_KD = 0.20f;
-const float DRIVE_D_NEAR_TARGET_LIMIT = 1.5f; // soften near-target D so rate noise cannot kick the static floor
+// REMOVED DRIVE_D_NEAR_TARGET_LIMIT (was 1.5). A clamped derivative is not a
+// damper, it is a relay: above |dTerm| = limit it outputs a constant magnitude
+// carrying only the SIGN of the rate, with no proportionality and no phase
+// information. In the 2026-08-14 log D0 reached +/-11.45 while D was pinned at
+// +/-1.50 on essentially every sample (DLIM Y throughout), so ~80% of the
+// derivative was discarded exactly when the rate was highest -- i.e. exactly
+// when damping was needed. PITCH ring amplitude grew across the window
+// (+/-0.6 -> +/-2.4) as a direct result. Kd is set by DRIVE_KD; let it act.
 const float DRIVE_KD_RESTORE_START_ERROR = 1.5f;
 const float DRIVE_KD_RESTORE_FULL_ERROR  = 3.0f;
 
@@ -220,36 +227,62 @@ const float DRIVE_KD_RESTORE_FULL_ERROR  = 3.0f;
 // verified correct against the 2026-08-13 hand-tilt telemetry -- see git log.
 #define OUTER_LOOP 1
 
-float Kpos = 1.0f;               // wheel position error (rev -> deg of lean)
+// RAISED 1.0 -> 4.0 from the 2026-08-14 stalled-drive log. PERR sat pinned at
+// POS_ERROR_CLAMP (0.500) for the entire hold, so this gain alone decided the
+// position term: 1.0 * 0.5 = 0.50 deg. See the ceiling arithmetic at
+// POS_ERROR_CLAMP below -- 0.50 deg was the smallest of the three lean terms and
+// the only one that could have been made larger by a constant.
+float Kpos = 4.0f;               // wheel position error (rev -> deg of lean)
 float Kvel = 3.0f;               // wheel-velocity damping; enough drive lean without sitting on the pitch ring
 const float KVEL_I = 0.6f;       // slow velocity-error memory (rev/s*s -> deg lean)
-const float VEL_I_CLAMP = 0.8f;  // deg; enough to bias through stiction without sustaining a hard lean
+// RAISED 0.8 -> 2.5. In the 2026-08-14 log this integral ramped to 0.80 in 0.6 s
+// and then sat there for the rest of the hold: saturated, and contributing a
+// constant. An integral that saturates below the disturbance it is integrating
+// against is just an offset. 2.5 lets it actually search for the friction level.
+const float VEL_I_CLAMP = 2.5f;  // deg; must exceed the stiction lean, not sit under it
 // Keep drive velocity feedback at the neutral-loop gain. Doubling it drove
 // leanRaw into the +/-5 deg clamp for most held-stick samples, so encoder ripple
 // could only move the command away from saturation and was fed back asymmetrically.
 const float DRIVE_KVEL_MULTIPLIER = 1.0f;
-const float LEAN_CLAMP = 5.0f;   // deg : known-good outer-loop safety cap
+// RAISED 5.0 -> 10.0, and this is now the loop's ONLY saturation point (see the
+// conditional integration in the outer loop). Reference point: librobotcontrol's
+// rc_balance saturates its outer loop at THETA_REF_MAX = 0.33 rad = 18.9 deg, so
+// 10 deg is still conservative by half. Measured requirement: the 2026-08-13/14
+// logs show this chassis sitting motionless at a mean lean of +0.50 deg past
+// balance under full forward stick, so breakaway needs MORE than ~3.7 deg of
+// commanded lean -- and the old 3.10 deg ceiling could never reach it.
+const float LEAN_CLAMP = 10.0f;  // deg : outer-loop authority cap (sole saturation point)
 const float LEAN_LPF   = 0.99f;  // EMA on leanCmd (~500 ms). Higher = slower, safer outer loop.
                                  // 0.95 (~100 ms) RAN AWAY: faster than the pendulum's non-minimum-
                                  // phase "wrong-way" transient (~100-300 ms), so the outer loop
                                  // re-commanded lean while the inner loop was still driving the
                                  // wheels the wrong way -> positive feedback. KEEP THIS SLOW: it is
                                  // what stops the drive setpoint from exciting the same runaway.
-// Anti-windup: never let the setpoint run further than this ahead of where the
-// robot actually is. Without it, blocked wheels wind the setpoint up forever and
-// the robot lurches when they free up.
-// TIGHTENED 2.0 -> 0.5 after the 2026-08-13 stick log. With the wheels unable to
-// break away, the setpoint integrated open-loop to PSET 1.003 and STAYED there
-// once the stick was released. At Kpos = 1.0 that left a PERMANENT +1.3 deg
-// forward lean bias -- TARGET sat at -2.00 against a true balance near -3.3 --
-// so the robot would creep forward forever with the sticks centred. Classic
-// integrator windup; 2.0 rev of slack was far too much to leave unbounded.
-// TRADE-OFF: this also caps the position term at Kpos * POS_ERROR_CLAMP degrees,
-// so station-keeping can only correct 0.5 rev of displacement (~10 cm) and any
-// release-lurch is bounded to the same. Raise it if station-keeping feels weak
-// against a shove -- but only once the wheels reliably move, or the windup and
-// the permanent lean bias come straight back.
-const float POS_ERROR_CLAMP = 0.5f;   // rev
+// HARD BACKSTOP ONLY. The primary anti-windup is now conditional integration
+// against LEAN_CLAMP, applied in the outer loop below.
+//
+// WHY THIS STOPPED BEING THE ANTI-WINDUP MECHANISM -- the 2026-08-14 log. Held
+// full stick for 1.9 s, POS flat at 0.535 +/- 0.005 (zero travel against 1.14 rev
+// commanded), and every one of the three lean terms was independently capped:
+//     LEAN POS  0.50  <- PERR pinned at POS_ERROR_CLAMP 0.5 * Kpos 1.0
+//     LEAN VEL  1.80  <- Kvel 3.0 * velError, and with the wheels STOPPED
+//                        velError is identically targetVel, so this term is
+//                        capped at Kvel * DRIVE_MAX_VEL by construction
+//     LEAN VELI 0.80  <- saturated at VEL_I_CLAMP after 0.6 s
+//     -------------
+//     total     3.10 deg, against a measured breakaway requirement of ~3.7 deg.
+// LEAN_CLAMP was 5.0 and 1.9 deg of it went permanently unused. The loop could
+// not ask for more lean no matter how long the stick was held -- not a tuning
+// shortfall but an arithmetic ceiling, because the only two terms that can
+// ACCUMULATE were both clamped below the disturbance.
+//
+// THE STRUCTURAL FIX: clamp the OUTPUT, not the input. Saturating the position
+// ERROR caps the loop's DC gain at Kpos*POS_ERROR_CLAMP forever; saturating the
+// output preserves full authority right up to the limit. This is what
+// librobotcontrol's rc_balance does -- setpoint.phi - phi is never clamped, only
+// D2's theta_ref output is (at THETA_REF_MAX). Raised 0.5 -> 1.5 so this stays a
+// safety backstop against a runaway setpoint rather than the binding constraint.
+const float POS_ERROR_CLAMP = 1.5f;   // rev : backstop, NOT the anti-windup path
 
 // ---- Auto PID sweep (for recording) ----------------------------------------
 // Cycles Kp/Kd through a grid, holding each set for SWEEP_HOLD_MS so you can
@@ -1157,9 +1190,14 @@ void loop() {
   // target is AHEAD of us -> we must travel forward -> lean FORWARD (+deg).
   // With targetVel = 0 and posSetpoint parked this is identically the baseline
   // law  leanRaw = -(Kpos*positionRev + Kvel*forwardVel).
+  // Remember both accumulator states so a saturated output can unwind exactly
+  // this tick's contribution -- see the conditional integration below.
+  float posSetpointPrev   = posSetpoint;
+  float velocityLeanIPrev = velocityLeanI;
+
   posSetpoint += targetVel * DT;
-  // Anti-windup: clamp the setpoint to a bounded lead over the true position, so
-  // blocked wheels can't wind it up and lurch when they free.
+  // Backstop only. This used to be the anti-windup mechanism, which capped the
+  // loop's authority at Kpos*POS_ERROR_CLAMP permanently -- see POS_ERROR_CLAMP.
   posSetpoint = constrain(posSetpoint, positionRev - POS_ERROR_CLAMP,
                                        positionRev + POS_ERROR_CLAMP);
 
@@ -1184,6 +1222,18 @@ void loop() {
   float velocityLeanIntegral = 0.0f;
 #endif
   float leanRaw = positionLean + velocityLean + velocityLeanIntegral;
+  // CONDITIONAL INTEGRATION (rc_balance structure). LEAN_CLAMP is the single
+  // saturation point: while the requested lean is pinned there, freeze both
+  // accumulators so neither can wind past what the loop is allowed to ask for.
+  // Below saturation they run free, so the loop keeps searching upward for the
+  // lean that actually breaks the wheels loose instead of stalling at a fixed
+  // ceiling. On breakaway there is no lurch to unwind: forwardVel rises,
+  // velError collapses, and positionRev catches posSetpoint, so all three terms
+  // shrink on their own.
+  if (fabs(leanRaw) >= LEAN_CLAMP) {
+    posSetpoint   = posSetpointPrev;
+    velocityLeanI = velocityLeanIPrev;
+  }
   leanRaw = constrain(leanRaw, -LEAN_CLAMP, LEAN_CLAMP);
   leanCmd = LEAN_LPF * leanCmd + (1.0f - LEAN_LPF) * leanRaw;
   controlLog.posError = posError;
@@ -1220,12 +1270,11 @@ void loop() {
   float driveKdFloor = Kd < DRIVE_KD ? Kd : DRIVE_KD;
   float driveKdTarget = driveKdFloor + kdSafetyBlend * (Kd - driveKdFloor);
   controlLog.effectiveKd = Kd + driveAuthority * (driveKdTarget - Kd);
+  // No magnitude clamp here: the drive Kd blend above already sets the damping,
+  // and clamping the result turns the derivative into a sign-only relay (see the
+  // note at DRIVE_KD). DLIM in telemetry now means "drive Kd blend is active",
+  // not "D was truncated".
   dTermLog = controlLog.effectiveKd * dRateFilt;
-  if (driveAuthority > 0.0f && kdSafetyBlend < 1.0f) {
-    float dLimit = DRIVE_D_NEAR_TARGET_LIMIT +
-                   kdSafetyBlend * (fabs(dTermLog) - DRIVE_D_NEAR_TARGET_LIMIT);
-    dTermLog = constrain(dTermLog, -dLimit, dLimit);
-  }
   controlLog.dTermLimited = fabs(controlLog.effectiveKd - Kd) > 0.001f;
 
   float driveKpTarget = Kp < DRIVE_KP ? DRIVE_KP : Kp;
