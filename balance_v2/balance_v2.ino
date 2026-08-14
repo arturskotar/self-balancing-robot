@@ -577,7 +577,32 @@ const float LEAN_CLAMP_REAR = 12.0f; // deg : rear authority cap (SITS DOWN at -
 // cascade the outer loop derives lean from measured position/velocity error, so
 // that failure mode does not carry over unchanged -- but this is still the knob
 // to slow down first if the outer loop starts oscillating.
-const float LEAN_LPF   = 0.97f;  // EMA on leanCmd (~170 ms). Higher = slower outer loop.
+// 0.97 -> 0.95 (2026-08-14): "when I try to brake, it takes too much time to take
+// effect and the bot crashes sometimes". This is the LAG half of that complaint.
+// tau = DT/(1-alpha): 0.005/0.03 = 167 ms at 0.97, 0.005/0.05 = 100 ms at 0.95.
+// Measured cost at 0.97 on a full reversal: leanRaw reached the clamp in 400 ms, then
+// leanCmd needed another 700 ms to follow it (-13.42 -> -17.94, which is 4.3 tau and
+// matched the model to two decimals). At 0.95 that tail is ~410 ms, so ~290 ms comes
+// off a maneuver that is running out of room.
+// Not lower yet: the outer-loop corner goes 0.95 Hz -> 1.6 Hz against an inner loop
+// closing around 3-5 Hz. Cascade rule of thumb wants the outer loop 3-5x slower than
+// the inner, and 1.6 Hz is already only ~2-3x. 0.94 is the next step if 0.95 is clean;
+// past that the two loops start arguing. This is still the first knob to RAISE if the
+// outer loop oscillates -- the old "0.95 ran away" note predates the cascade and does
+// not carry over unchanged, but it is not nothing either.
+// THIS DOES NOT FIX THE ASYMMETRY, and cannot: forward->backward braking needs REAR
+// lean, capped at 12 by the chassis, while backward->forward braking gets the forward
+// 18. That is 2.08 vs 3.19 m/s^2 of available deceleration (g*tan), i.e. the good
+// direction has 53% more, which is exactly the reported "way faster and better".
+// Software cannot close that gap; moving the rear contact can. See LEAN_CLAMP_REAR.
+// WATCH: a faster command means a faster body rotation into the lean, and rotational
+// momentum means pitch overshoots leanCmd by more, not less. Rear margin is only
+// 3.7 deg (clamp 12 vs sit-down 15.67) and overshoot was already ~1.3 deg in steady
+// drive. If LEAN ACT touches -15.7 during a hard stop the robot is ON its backstop
+// mid-brake, which removes the braking entirely -- and that is the likeliest
+// explanation for "crashes sometimes". If that shows up, this goes back to 0.97 and
+// the answer is mechanical, not a gain.
+const float LEAN_LPF   = 0.95f;  // EMA on leanCmd (~100 ms). Higher = slower outer loop.
 // HARD BACKSTOP ONLY. The primary anti-windup is now conditional integration
 // against LEAN_CLAMP, applied in the outer loop below.
 //
