@@ -319,7 +319,16 @@ const float DRIVE_KD_RESTORE_FULL_ERROR  = 3.0f;
 // actually fires and bounds the excursion.
 float Kpos = 4.0f;               // wheel position error (rev -> deg of lean)
 float Kvel = 3.0f;               // wheel-velocity damping; enough drive lean without sitting on the pitch ring
-const float KVEL_I = 0.6f;       // slow velocity-error memory (rev/s*s -> deg lean)
+// 0.6 -> 4.0. This term sets TIME TO BREAKAWAY, and 0.6 made that time absurd.
+// posError grows at targetVel, so the lean ramps at Kpos*Vmax = 4.0*0.25 = 1.0
+// deg/s from position and KVEL_I*Vmax = 0.6*0.25 = 0.15 deg/s from here -- about
+// 1.15 deg/s toward a ~6-7 deg threshold, i.e. SIX SECONDS of held stick before
+// the wheels can break loose. At 4.0 the integral contributes 1.0 deg/s and the
+// total is ~2 deg/s, so breakaway lands near 3 s. Still bounded by VEL_I_CLAMP
+// and still discarded at the stall -> rolling edge, so nothing carries into the
+// cruise. Observed 2026-08-14: forward drive that was ALREADY rolling worked
+// fine; it was only a fresh standing start that timed out.
+const float KVEL_I = 4.0f;       // velocity-error memory (rev/s*s -> deg lean)
 // RAISED 0.8 -> 2.5. In the 2026-08-14 log this integral ramped to 0.80 in 0.6 s
 // and then sat there for the rest of the hold: saturated, and contributing a
 // constant. An integral that saturates below the disturbance it is integrating
@@ -332,7 +341,14 @@ const float VEL_I_CLAMP = 4.0f;  // deg; must exceed the stiction lean, not sit 
 // shortfall, and integrating that just winds to the clamp -- so the term arrives
 // at breakaway already saturated and then overshoots. Below this speed the
 // integral FREEZES (holds its value); it is only zeroed when the stick releases.
-const float VEL_I_ROLL_MIN = 0.10f;  // rev/s : below this the integral is frozen
+// 0.10 -> 0.20. At 0.10 this sat INSIDE the encoder quantization noise: one count
+// at 200 Hz is 0.366 rev/s raw, and VRL/VRR show those +/-0.37 spikes all through
+// a stick-slip stall. So single wheel twitches were tripping the breakaway edge
+// detector and wiping the integral -- the one term meant to accumulate THROUGH a
+// stall was being reset by the stall itself. Seen 2026-08-14: VELI -0.06 -> -0.01
+// and -0.03 -> -0.00 mid-stall with VF never reading above 0.05. 0.20 requires a
+// real roll, clear of a single-count spike.
+const float VEL_I_ROLL_MIN = 0.20f;  // rev/s : below this the integral is frozen
 // FINDING 2026-08-14, bench: gating the integral OFF below this speed was a
 // CATCH-22. It required rolling before the integral could build, but building was
 // what would start the roll -- so on a stalled drive VELI sat at 0.01 forever.
