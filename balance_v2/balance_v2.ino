@@ -750,6 +750,24 @@ const float FRICTION_FF_LEAN_DEG  = 3.0f;  // deg toward the command: LAUNCH -> 
 // reversal of the FF. -2.0 gives a 5 deg band: the ring (which stays positive) cannot
 // trip it, but a genuinely inverted lean does.
 const float FRICTION_FF_LEAN_LOST = -2.0f; // deg toward the command: CRUISE -> LAUNCH
+// The launch rotates the body ~20x faster than the outer loop's lean ramp, so two
+// things have to change or the inner loop spends the launch fighting it. Bench burst
+// 2026-08-14, forward drive:
+//     i=0..5   PWM +47 (launch), pitch -3.52, rate 0
+//     i=6..15  rate 9 -> 93 deg/s, pitch -3.6 -> -0.6
+//     i=16     leanToward crosses 3.0 -> CRUISE, PWM +16 -> -60 in ONE TICK
+// LEAN CMD was still 0.38 and climbing at 5.6 deg/s while the body did 100 deg/s, so
+// u ran to -31 OPPOSING the launch, and the handover then reversed 76 PWM counts into a
+// body already rotating at 100 deg/s. Peak rates in that burst reached +/-146 deg/s.
+//   1. LAUNCH_LEAN_CMD_DEG: during LAUNCH, command the lean the launch is ABOUT to
+//      produce -- immediately and unfiltered, since LEAN_LPF's 0.17 s is far slower than
+//      the ~50 ms transient. The inner loop then pulls WITH the launch instead of
+//      against it. Set just above FRICTION_FF_LEAN_DEG so the handover is continuous.
+//   2. FRICTION_FF_LEAN_LEAD_S: fire the gate on where the body is HEADING, not where
+//      it is. At 100 deg/s, 0.04 s of lead trips the reversal ~4 deg early, so the body
+//      coasts to roughly the target instead of sailing to 7.
+const float LAUNCH_LEAN_CMD_DEG     = 4.0f;  // deg of lean commanded during LAUNCH
+const float FRICTION_FF_LEAN_LEAD_S = 0.04f; // s of rate lead on the LAUNCH -> CRUISE gate
 
 #define DRIVE_LAUNCH_ASSIST 0
 const float         LAUNCH_ASSIST_EFFORT     = 20.0f; // -35/-47 PWM with measured static floors
@@ -1723,7 +1741,18 @@ void loop() {
   }
   leanRaw = constrain(leanRaw, -LEAN_CLAMP, LEAN_CLAMP);
   float leanCmdBefore = leanCmd;
-  leanCmd = LEAN_LPF * leanCmd + (1.0f - LEAN_LPF) * leanRaw;
+#if DRIVE_FRICTION_FF
+  // frictionLeanUp is one tick stale here (it is set after u below); at 200 Hz that is
+  // irrelevant. See LAUNCH_LEAN_CMD_DEG for why the launch bypasses LEAN_LPF.
+  if (driving && !frictionLeanUp) {
+    if (driveDirection * leanRaw < LAUNCH_LEAN_CMD_DEG)
+      leanRaw = driveDirection * LAUNCH_LEAN_CMD_DEG;
+    leanCmd = leanRaw;          // unfiltered: the launch transient outruns LEAN_LPF
+  } else
+#endif
+  {
+    leanCmd = LEAN_LPF * leanCmd + (1.0f - LEAN_LPF) * leanRaw;
+  }
 #if STATIC_LEAN_TEST
   // Override the whole outer loop with a fixed lean the inner loop must hold for
   // as long as the stick is held. Everything above still runs and still logs, so
@@ -1980,8 +2009,21 @@ void loop() {
     // exactly like the launch assist it replaced. It cannot be needed twice without
     // the pilot letting go first.
     float leanToward = driveDirection * (pitch - BALANCE_SETPOINT);
-    if      (leanToward >= FRICTION_FF_LEAN_DEG)  frictionLeanUp = true;
-    else if (leanToward <  FRICTION_FF_LEAN_LOST) frictionLeanUp = false;
+    // Lead the gate by the body's own rotation rate -- at 100 deg/s the lean moves 4 deg
+    // inside one 0.04 s lead, which is the whole overshoot. See FRICTION_FF_LEAN_LEAD_S.
+    float leanLed = leanToward + FRICTION_FF_LEAN_LEAD_S * (driveDirection * dRateFilt);
+    if (leanLed >= FRICTION_FF_LEAN_DEG) {
+      if (!frictionLeanUp) {
+        // Bumpless handover. leanCmd sat at LAUNCH_LEAN_CMD_DEG through the launch while
+        // the outer loop's own leanRaw was still near zero; without this the LPF drags
+        // the target back down just as CRUISE starts needing it.
+        velocityLeanI = constrain(leanCmd - controlLog.positionLean - controlLog.velocityLean,
+                                  -VEL_I_CLAMP, VEL_I_CLAMP);
+      }
+      frictionLeanUp = true;
+    } else if (leanToward < FRICTION_FF_LEAN_LOST) {
+      frictionLeanUp = false;
+    }
 
     if (frictionLeanUp) {
       // CRUISE. The lean is established, so the wheels must roll FORWARD to turn it
