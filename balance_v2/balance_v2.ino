@@ -244,13 +244,48 @@ float Kd = 0.3f;   // derivative    (deg/s    -> PWM)  RE-TUNED FROM SCRATCH 202
                    // 0.3 to get below the ring. If a low-Kd ring persists, the culprit is angle-estimate
                    // lag (revert gyro DLPF 20->41 Hz + remove the phantom bias in software instead).
 float Ki = 0.0f;   // integral      (deg*s    -> PWM)  keep 0 until PD works
+// >>> DIAGNOSTIC SWITCH (bisection tool, not a fix) <<<
+// 0 = schedule OFF: driveAuthority is forced to 0, so effectiveKp/effectiveKd stay
+//     at the neutral Kp/Kd for ANY stick position (this also survives live tuning,
+//     which the DRIVE_KP/DRIVE_KD values below do not). Drive then runs the exact
+//     inner loop that balances quietly. Telemetry confirms it: DLIM reads '-' and
+//     Kpeff/Kdeff track Kp/Kd for the whole drive.
+// 1 = schedule ON (blend toward DRIVE_KP / DRIVE_KD with commanded drive).
+//
+// SET TO 0 2026-08-14 to test whether this schedule is what stops the robot driving.
+// The 200 Hz burst capture (400 samples, armed on the drive rising edge) says it is:
+//   * The stall is a clean 8.5 Hz LIMIT CYCLE, not chatter and not gyro noise.
+//     Positive-run starts at i = 202,226,250,273,296,319,343,366 -> deltas
+//     24,24,23,23,23,24,23 = 23.4 samples = 117 ms. u is a smooth sinusoid swinging
+//     +8 -> -8 over ~12 ticks each way; PWM tracks it faithfully on the friction
+//     floor. Because the swing is SYMMETRIC its mean is ~0, so the wheels dither in
+//     place and the robot never breaks away -- see the note at DRIVE_MAX_VEL.
+//   * The BODY is really rocking, the gyro is not lying: pitch swings ~+/-0.55 deg,
+//     and 2*pi*8.5*0.55 = 29 deg/s, which is exactly the observed rate peak. So this
+//     is NOT an IMU-mount artefact and NOT the 20 Hz DLPF.
+//   * It starts WITH the schedule. i=0..6 are the first ticks of DRIVE: pitch is dead
+//     flat (-3.560,-3.560,-3.559,-3.556) at rate 0.02. By i=9 it is oscillating --
+//     under 50 ms, exactly as Kpeff ramps 2.00->2.86->3.74->4.00 and Kdeff 0.30->0.20.
+//   * It dies WITHOUT the loop. i=374..387 have u = 0.000 and motors off: pitch runs
+//     -2.331 -> -1.187 and rate decays -14.29 -> 4.35, smooth and monotonic with no
+//     ringing. A structural resonance would keep ringing; this does not.
+// Mechanism: doubling Kp and cutting Kd moves the P/D crossover 1.06 Hz -> 3.2 Hz, so
+// at 8.5 Hz the loop is deep in derivative-dominated territory (|Kd*w| = 0.20*53 = 10.7)
+// with less damping. The deadband floor then SUSTAINS it -- PWM steps discontinuously
+// 0 -> +/-15/27 at every zero crossing, injecting energy twice per cycle, which is the
+// textbook describing-function recipe for a limit cycle. The schedule was added to give
+// drive more authority and is the reason drive has none.
+// If flipping this to 0 clears the 8.5 Hz cycle, do NOT just restore the schedule with
+// smaller numbers: rebuild drive authority somewhere that is not the pitch loop.
+#define DRIVE_GAIN_SCHEDULE 0
+
 // Translation needs turn-class common-mode authority, but neutral balance is
 // already tuned. Blend toward this proportional gain with commanded drive only.
 const float DRIVE_KP = 4.0f;
-// Preserve enough rate damping for the measured ~5 Hz drive mode. At the logged
-// 1.5 deg / 47 deg/s oscillation, Kd=0.20 makes D comparable to the drive-mode
-// proportional term instead of leaving a broad proportional-only damping hole.
-// Larger tracking errors still restore the known-good neutral Kd.
+// Kd=0.20 was chosen to damp what 100 ms telemetry looked like a ~5 Hz drive mode.
+// That frequency was an ALIAS -- the real cycle is 8.5 Hz (see DRIVE_GAIN_SCHEDULE),
+// and cutting Kd is what let it grow. Left at 0.20 only so the schedule can be
+// switched back on unchanged for an A/B; it is not a defended value.
 const float DRIVE_KD = 0.20f;
 // REMOVED DRIVE_D_NEAR_TARGET_LIMIT (was 1.5). A clamped derivative is not a
 // damper, it is a relay: above |dTerm| = limit it outputs a constant magnitude
@@ -1533,7 +1568,14 @@ void loop() {
   // The speed knob limits the requested velocity, not the balance loop's ability
   // to catch the requested lean. Full stick must retain full DRIVE_KP authority
   // even when the pilot deliberately selects a low speed cap.
+#if DRIVE_GAIN_SCHEDULE
   float driveAuthority = driving ? constrain(fabs(driveIn), 0.0f, 1.0f) : 0.0f;
+#else
+  // Schedule bisected out: both blends below collapse to the neutral Kp/Kd exactly,
+  // whatever the live-tune knob has done to them. This is the ONLY consumer of
+  // driveAuthority, so zeroing it here disables the schedule completely.
+  const float driveAuthority = 0.0f;
+#endif
 
   controlLog.dTermRaw = Kd * dRateFilt;
   float kdSafetyBlend = constrain(
