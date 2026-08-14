@@ -147,10 +147,23 @@ const int BURST_N = 400;             // 2.0 s at 200 Hz; 400 * 20 B = 8 KB of 1 
 //                                           in the outer loop's lean trajectory
 //   * robot shakes in place at a fixed lean -> the inner loop cannot convert a
 //                                           standing lean into net wheel travel
-// Stick-gated on purpose: full stick = STATIC_LEAN_DEG exactly, centre = 0, so
-// releasing the stick is always an immediate return to plain balancing.
-#define STATIC_LEAN_TEST 0
-const float STATIC_LEAN_DEG = 3.0f;  // deg of commanded lean at full stick
+// ARMED BY DEFAULT: the lean is applied continuously the whole time the robot is
+// armed, with no stick input required, so the body holds a lean it should be
+// falling out of for as long as you let it. SB (the kill switch) is the bail-out.
+//
+// Side effects this mode deliberately forces, both needed for the test to mean
+// anything:
+//   * the COAST BAND is suppressed. Without the stick, `commanding` would be
+//     false, so the moment the body reached the lean (|error| < ANGLE_DEADZONE,
+//     wheels stopped) the coast band would zero u and cut the motors -- exactly
+//     the instant the measurement starts.
+//   * gains are the NEUTRAL set (Kp 2.0 / Kd 0.30), not the drive set, because
+//     driveAuthority is 0 with no stick. That is the known-good balance tuning,
+//     which is the right baseline for an inner-loop question.
+// The burst capture arms on the ARM transition in this mode (not the drive edge),
+// so SB up gives soft-start + 2 s of full-rate capture, and SB down dumps it.
+#define STATIC_LEAN_TEST 1
+const float STATIC_LEAN_DEG = 3.0f;  // deg of commanded lean, held continuously
 
 // ---- IMU sign/axis test ----------------------------------------------------
 // Set to 1 to verify the gyro vs accelerometer convention (motors OFF). Hold the
@@ -601,6 +614,9 @@ const float D_LPF        = 0.60f;   // EMA weight on the previous filtered rate 
 float pitch = 0.0f;
 float integral = 0.0f;
 float dRateFilt = 0.0f;   // low-pass-filtered gyro rate for the D term (angle est. uses the raw rate)
+float targetRateFilt = 0.0f;         // d(leanCmd)/dt, filtered like dRateFilt, for D-on-ERROR
+const float LEAN_RATE_FF_MAX = 60.0f; // deg/s : bound on the setpoint-rate term (a full LEAN_CLAMP
+                                      // swing in 100 ms). Stops a leanCmd STEP becoming a PWM kick.
 float dTermLog = 0.0f;    // derivative contribution, for telemetry
 float leanCmd   = 0.0f;   // cascade outer-loop output: the desired lean (deg) added to BALANCE_SETPOINT
 float velocityLeanI = 0.0f;
@@ -1191,6 +1207,13 @@ void loop() {
     launchAssistDirection = 0;
     launchAssistTicksRemaining = 0;
     launchRollingTicks = 0;
+    targetRateFilt = 0.0f;
+#if BURST_LOG && STATIC_LEAN_TEST
+    // No stick in this mode, so there is no drive edge to arm on. Capture the
+    // arming instead: SB up gives soft-start + 2 s of full-rate data, SB down
+    // dumps it.
+    if (!burstReady) { burstFill = 0; burstCursor = 0; burstArmed = true; }
+#endif
   }
   float softStart = constrain((millis() - armedAtMs) / (SOFT_START_SEC * 1000.0f), 0.0f, 1.0f);
   controlLog.softStart = softStart;
@@ -1391,15 +1414,33 @@ void loop() {
     velocityLeanI = velocityLeanIPrev;
   }
   leanRaw = constrain(leanRaw, -LEAN_CLAMP, LEAN_CLAMP);
+  float leanCmdBefore = leanCmd;
   leanCmd = LEAN_LPF * leanCmd + (1.0f - LEAN_LPF) * leanRaw;
 #if STATIC_LEAN_TEST
   // Override the whole outer loop with a fixed lean the inner loop must hold for
   // as long as the stick is held. Everything above still runs and still logs, so
   // the telemetry shows what the outer loop WOULD have asked for alongside what
   // the inner loop is actually being given.
-  leanCmd = STATIC_LEAN_DEG * DRIVE_SIGN * driveIn;
+  leanCmd = STATIC_LEAN_DEG;   // constant, no stick, no ramp: hold it and watch
   leanRaw = leanCmd;
 #endif
+  // --- Setpoint rate for D-on-ERROR ------------------------------------------
+  // dRateFilt is d(pitch)/dt. The proper derivative for the inner loop is
+  // d(error)/dt = d(pitch)/dt - d(target)/dt; without the second term the D term
+  // opposes the body rotation the OUTER loop just asked for, damping the lean
+  // while it is being established.
+  // Two details that matter:
+  //   * CLAMP before filtering. leanCmd can step (STATIC_LEAN_TEST arming, or the
+  //     posSetpoint re-anchor on a drive edge). A 3 deg step in one 5 ms tick is
+  //     600 deg/s, which would be a ~120 PWM one-tick kick. Soft-start happens to
+  //     mask it at arming, but that is luck, not protection.
+  //   * FILTER IT THE SAME WAY as dRateFilt. Subtracting an unfiltered rate from
+  //     a D_LPF-filtered one introduces a phase mismatch and puts noise back into
+  //     the term the filter exists to clean.
+  float targetRateRaw = constrain((leanCmd - leanCmdBefore) / DT,
+                                  -LEAN_RATE_FF_MAX, LEAN_RATE_FF_MAX);
+  targetRateFilt = D_LPF * targetRateFilt + (1.0f - D_LPF) * targetRateRaw;
+
   controlLog.posError = posError;
   controlLog.velError = velError;
   controlLog.positionLean = positionLean;
@@ -1438,7 +1479,7 @@ void loop() {
   // and clamping the result turns the derivative into a sign-only relay (see the
   // note at DRIVE_KD). DLIM in telemetry now means "drive Kd blend is active",
   // not "D was truncated".
-  dTermLog = controlLog.effectiveKd * dRateFilt;
+  dTermLog = controlLog.effectiveKd * (dRateFilt - targetRateFilt);
   controlLog.dTermLimited = fabs(controlLog.effectiveKd - Kd) > 0.001f;
 
   float driveKpTarget = Kp < DRIVE_KP ? DRIVE_KP : Kp;
@@ -1456,6 +1497,12 @@ void loop() {
   // Only coast when truly IDLE -- not while the pilot commands drive/turn, or the
   // small drive lean (often < ANGLE_DEADZONE) gets zeroed here and nothing moves.
   bool commanding = driving || (fabs(turnCmd) > OUT_DEADZONE);
+#if STATIC_LEAN_TEST
+  // The static lean test uses no stick, so `commanding` would be false and the
+  // coast band would cut the motors the instant the body reached the commanded
+  // lean -- i.e. exactly when the measurement begins. Never coast during it.
+  commanding = true;
+#endif
   controlLog.coasting = false;
   if (!commanding && fabs(error) < ANGLE_DEADZONE && fabs(forwardVel) < VEL_DEADZONE) {
     u = 0.0f;
