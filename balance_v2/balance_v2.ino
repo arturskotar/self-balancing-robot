@@ -174,9 +174,9 @@ float Kd = 0.3f;   // derivative    (deg/s    -> PWM)  RE-TUNED FROM SCRATCH 202
 float Ki = 0.0f;   // integral      (deg*s    -> PWM)  keep 0 until PD works
 // Translation needs turn-class common-mode authority, but neutral balance is
 // already tuned. Blend toward this proportional gain with commanded drive only.
-const float DRIVE_KP = 6.0f;
+const float DRIVE_KP = 4.0f;
 // Preserve enough rate damping for the measured ~5 Hz drive mode. At the logged
-// 1.5 deg / 47 deg/s oscillation, Kd=0.20 makes D comparable to the DRIVE_KP=6
+// 1.5 deg / 47 deg/s oscillation, Kd=0.20 makes D comparable to the drive-mode
 // proportional term instead of leaving a broad proportional-only damping hole.
 // Larger tracking errors still restore the known-good neutral Kd.
 const float DRIVE_KD = 0.20f;
