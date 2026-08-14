@@ -821,6 +821,44 @@ const int MAX_DEADBAND = (LEFT_DEADBAND_STATIC > RIGHT_DEADBAND_STATIC)
 // = 30*0.65 = 19.5 deg/s, so the forward clamp is reached in ~0.9 s.
 // THE REAL FIX IS MECHANICAL. Every degree recovered at the rear contact buys back
 // deceleration directly, and 18 deg rear would allow 0.90 again at this same distance.
+// TARGET VELOCITY SLEW (2026-08-14). The loop had no concept of BRAKING: it only ever
+// tracked a setpoint, so when momentum opposed the command all three outer terms
+// saturated at once and stayed there. Measured on a real forward->reverse slam
+// (MS 31590): LEAN POS -3.24, VEL -4.37, VELI -10.86, RAW -18.47 -> clamped. The
+// INTEGRAL was doing 59% of the braking -- a term that exists to trim a cruise had
+// become the primary brake authority, and it is the slowest thing in the loop.
+// velError sat at -1.25 rev/s for the whole maneuver, so VELI wound at KVEL_I*1.25 =
+// 30 deg/s and pinned in ~0.4 s. Consequences, all bad:
+//   1. the brake is bang-bang, not proportional -- max lean from 0.4 s until the
+//      velocity crosses zero, equally committed at 0.6 rev/s and at 0.05;
+//   2. a pinned maximum command is exactly what drives pitch past the -15.67 sit-down,
+//      because the demand never tapers so neither does the body rotation;
+//   3. at the crossing VELI is still at -13 and must unwind from saturation, so it
+//      over-reverses on the far side.
+// Fix is setpoint shaping, not another output clamp: ramp targetVel at a rate the robot
+// can actually follow, so velError stays proportional to the REMAINING deceleration
+// need. VELI then tracks instead of saturating and the lean bleeds off with the speed.
+// RATE, derived not guessed: the good brake shed 1.01 -> 0 rev/s in ~1.0 s at 18 deg of
+// rear lean = ~1.0 rev/s^2. Scaling by tan(12)/tan(18) = 0.655 for the current rear cap
+// gives ~0.7 rev/s^2, i.e. this asks for almost exactly the deceleration the chassis can
+// produce and no more.
+// ASYMMETRIC ON PURPOSE, and this is the part that matters: motion AWAY from zero is
+// rate-limited, motion TOWARD zero is instant. So releasing the stick still zeroes the
+// demand immediately (no added coast), backing off is immediate, and a full reversal
+// snaps the target to 0 first -- halving the initial velError spike from -1.25 to -0.6 --
+// and only then ramps out the far side at a plantable rate.
+// Why the sign test is not the kind of gate that killed the friction FF: it fires once
+// per direction change, its only effect is to move the target to ZERO (a value between
+// the old and new ones, never outside them), and it can never reverse the sign of
+// anything. A spurious fire costs a momentary drop in demand, not a full-amplitude PWM
+// flip. It also cannot chatter in the deadzone: DRIVE_STICK_DEADZONE makes driveIn
+// exactly 0 there, and 0 * x is never < 0.
+// Starts are not the cost they look like: 0.65 rev/s at 0.7 rev/s^2 is 0.93 s, and the
+// existing lean ramp is (Kpos + KVEL_I)*Vmax = 19.5 deg/s = ~0.9 s to the forward clamp.
+// The velocity ramp lands on top of a ramp that was already there, so it does not become
+// the binding constraint. Set TARGET_VEL_SLEW_LIMIT 0 to A/B it on the same flash.
+#define TARGET_VEL_SLEW_LIMIT 1
+const float TARGET_VEL_SLEW = 0.70f; // rev/s^2 : cap on how fast the velocity DEMAND grows
 const float DRIVE_MAX_VEL  = 0.65f; // rev/s at full stick. Conservative on purpose: one encoder
                                     // count per 5 ms tick is already 0.366 rev/s (546 counts/rev),
                                     // so 0.6 rev/s is only ~1.6 counts/tick of resolution. Raise
@@ -1125,6 +1163,7 @@ float positionRev = 0.0f;                     // avg wheel position, revs from h
 float posSetpoint = 0.0f;                     // OUTER-LOOP TARGET position (rev). The drive stick
                                               // integrates into this; the loop always chases it.
 float targetVelLog = 0.0f;                    // latest commanded wheel velocity (rev/s)
+float targetVelSlewed = 0.0f;                 // rate-limited copy of it; see TARGET_VEL_SLEW
 float turnCmdLog = 0.0f;                      // post-deadzone differential effort
 int   motorPwmL = 0, motorPwmR = 0;           // signed PWM actually sent to each IBT-2
 
@@ -1721,6 +1760,7 @@ void loop() {
     homeTicksSum = hl + hr;      // re-home under the robot while it's parked...
     posSetpoint  = 0.0f;         // ...and park the outer-loop target there too, so
     targetVelLog = 0.0f;         // re-arming never lurches toward a stale setpoint.
+    targetVelSlewed = 0.0f;      // ...including the slew state, so the ramp starts at rest
     satTicks     = 0;
     armedPrev    = false;        // next armed tick re-triggers the soft start
     driveCommandPrev = false;
@@ -1789,7 +1829,23 @@ void loop() {
   float turnIn    = turnRaw;
   if (fabs(driveIn) < DRIVE_STICK_DEADZONE) driveIn = 0.0f;
   if (fabs(turnIn) < TURN_STICK_DEADZONE) turnIn = 0.0f;
-  float targetVel = DRIVE_SIGN * driveIn * cap * DRIVE_MAX_VEL;       // rev/s, + = forward
+  float targetVelRaw = DRIVE_SIGN * driveIn * cap * DRIVE_MAX_VEL;    // rev/s, + = forward
+#if TARGET_VEL_SLEW_LIMIT
+  // See TARGET_VEL_SLEW. Away from zero is rate-limited so the demand stays plantable;
+  // toward zero is instant so a release still stops asking immediately. A sign flip
+  // drops the target to zero first, then ramps out the far side from there.
+  if (targetVelRaw * targetVelSlewed < 0.0f) targetVelSlewed = 0.0f;
+  if (fabs(targetVelRaw) <= fabs(targetVelSlewed)) {
+    targetVelSlewed = targetVelRaw;                                   // toward zero: free
+  } else {
+    const float step = TARGET_VEL_SLEW * DT;
+    targetVelSlewed += constrain(targetVelRaw - targetVelSlewed, -step, step);
+  }
+  float targetVel = targetVelSlewed;
+#else
+  targetVelSlewed = targetVelRaw;
+  float targetVel = targetVelRaw;
+#endif
   float turnCmd   = TURN_SIGN  * turnIn  * cap * TURN_AUTHORITY;      // per-wheel PWM-effort diff
   targetVelLog = targetVel;
   turnCmdLog = turnCmd;
