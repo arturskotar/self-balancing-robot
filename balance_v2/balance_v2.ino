@@ -529,7 +529,24 @@ const float DRIVE_KVEL_MULTIPLIER = 1.0f;
 // so the robot can never tilt far enough to trip either. That is why it pushed into
 // the stop for 3 s instead of giving up. Left alone for now: fixing it properly needs
 // per-direction thresholds, and this clamp keeps it away from the stop in the first place.
-const float LEAN_CLAMP = 12.0f;  // deg : outer-loop authority cap (sole saturation point)
+// SPLIT PER DIRECTION (2026-08-14), immediately after the symmetric 12 shipped.
+// A symmetric clamp has to be sized for the WORSE side, and here the two sides differ
+// by 2x, so 12 starved forward to fix rear. Measured in the very next drive log:
+// LEAN RAW pinned at exactly 12.00 for 4+ s of held forward stick while VELI kept
+// climbing (7.42 -> 7.63) and PERR stayed open at 0.55-0.73 -- the loop asking for
+// more lean than it was allowed, in the direction that has 30.5 deg of physical room.
+// Forward goes back to 18, which is not a guess: it is the value in every good
+// forward-drive log to date, and forward has never actually exceeded 9.43 deg of lean
+// under it. Rear stays at 12, which is the measured sit-down limit and non-negotiable.
+// Gating on sign(leanRaw) is safe here in a way the old friction-FF gates were not:
+// both limits are far from zero, so a misclassification near the crossing changes
+// nothing (|leanRaw| ~ 0 is nowhere near either bound), and the two branches differ
+// only in HOW MUCH authority is allowed -- never in which direction it points.
+// Headroom check: 18 forward leaves 12.5 deg to the +30.53 stop; 12 rear leaves 3.7 deg
+// to the -15.67 sit-down. If forward pins at 18 under Vmax 0.90 there is room to ~24
+// before the geometry bites, but do not go there without a log showing 18 saturating.
+const float LEAN_CLAMP_FWD  = 18.0f; // deg : forward authority cap (stop is at +30.53)
+const float LEAN_CLAMP_REAR = 12.0f; // deg : rear authority cap (SITS DOWN at -15.67)
 // 0.99 -> 0.97 (tau 0.50 s -> 0.17 s, pole 2 -> 6 rad/s). The velocity loop
 // crosses over near 2.5 rad/s, so the old 2 rad/s pole sat essentially ON the
 // crossover and ate ~51 deg of phase exactly where it hurt. That lag is what
@@ -1682,7 +1699,16 @@ void loop() {
   // a pure differential passes straight through). CH3 throttle caps both. With
   // BOTH sticks centered these are 0 and the balancer behaves exactly as before.
   float speedIn   = crsf::speed();
-  float cap       = 0.35f + 0.65f * speedIn;                          // CH3 speed cap 0.35..1.0
+  // 0.35 + 0.65*SPD -> 0.10 + 0.90*SPD (2026-08-14, "give 90 percent of the rpm to the
+  // throttle scale"). CH3 now owns 90 points of the range instead of 65: full stick is
+  // still 1.00 x Vmax, but the bottom drops from 0.35 to 0.10 so the knob actually
+  // spans the speed range instead of living in its top two thirds. The 0.10 floor is
+  // deliberate -- a true zero would make targetVel identically 0 at low throttle, which
+  // reads as "drive stick does nothing" rather than "drive slowly", and would also stop
+  // `driving` from ever latching. Worth knowing the range moved: the log that prompted
+  // this had SPD 0.33 -> cap 0.56; the same stick position is now cap 0.40, so a given
+  // throttle setting is SLOWER than before while full stick is unchanged.
+  float cap       = 0.10f + 0.90f * speedIn;                          // CH3 speed cap 0.10..1.0
   float driveRaw  = crsf::drive();
   float turnRaw   = crsf::turn();
   float driveIn   = driveRaw;
@@ -1893,11 +1919,14 @@ void loop() {
   // ceiling. On breakaway there is no lurch to unwind: forwardVel rises,
   // velError collapses, and positionRev catches posSetpoint, so all three terms
   // shrink on their own.
-  if (fabs(leanRaw) >= LEAN_CLAMP) {
+  // Asymmetric: the chassis has 30.5 deg of forward lean and 15.7 deg of rear before it
+  // sits on its rear contact, so the saturation point differs by direction. + = forward.
+  float leanLimit = leanRaw >= 0.0f ? LEAN_CLAMP_FWD : LEAN_CLAMP_REAR;
+  if (fabs(leanRaw) >= leanLimit) {
     posSetpoint   = posSetpointPrev;
     velocityLeanI = velocityLeanIPrev;
   }
-  leanRaw = constrain(leanRaw, -LEAN_CLAMP, LEAN_CLAMP);
+  leanRaw = constrain(leanRaw, -LEAN_CLAMP_REAR, LEAN_CLAMP_FWD);
   float leanCmdBefore = leanCmd;
   leanCmd = LEAN_LPF * leanCmd + (1.0f - LEAN_LPF) * leanRaw;
 #if STATIC_LEAN_TEST
