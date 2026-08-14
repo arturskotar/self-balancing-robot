@@ -391,14 +391,13 @@ const float         LAUNCH_RELEASE_VEL       = 0.12f; // rev/s toward command me
 const unsigned int  LAUNCH_RELEASE_TICKS     = 20;    // require 100 ms at 200 Hz; reject oscillation spikes
 const unsigned int  LAUNCH_ASSIST_TICKS      = 40;    // one bounded 200 ms window at 200 Hz
 
-// Legacy A/B path. Adding velocity effort after the angle PD makes the inner loop
-// cancel that effort by developing an opposing angle error. In the 2026-08-14
-// stalled-drive log, ~-6 effort with Kp=2 required ~-3 deg error, crossed the
-// safety gate, and repeatedly switched the assist off and on. Drive authority
-// belongs in the outer loop's requested lean, so leave this disabled.
-#define DRIVE_VELOCITY_EFFORT 0
-const float DRIVE_VELOCITY_EFFORT_GAIN  = 10.0f; // rev/s error -> PWM effort
-const float DRIVE_VELOCITY_EFFORT_LIMIT = 8.0f;  // below the tested launch floor
+// Gentle post-PD velocity trim. The outer loop still owns drive authority via
+// lean; this only prevents a held leaned target from settling with U ~= 0 while
+// VERR remains large. Keep it small: the old 8 PWM version made the inner loop
+// fight it by building several degrees of angle error.
+#define DRIVE_VELOCITY_EFFORT 1
+const float DRIVE_VELOCITY_EFFORT_GAIN  = 4.0f; // rev/s error -> PWM effort
+const float DRIVE_VELOCITY_EFFORT_LIMIT = 3.0f; // small trim, well below launch floor
 const float DRIVE_VELOCITY_HOLD_LEAN_DEG = 0.75f; // hysteresis after the strict 1.5 deg engagement
 
 // ---- Soft start + saturation latch (from the rc_balance reference) ---------
