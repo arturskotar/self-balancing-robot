@@ -633,9 +633,34 @@ const float TURN_SIGN      = +1.0f; // flip to -1 if the turn stick steers the w
 // deliberately switch it off. MAX_PWM is not the limit: peak PWM in that run was 37
 // of 110, and the saturation latch needs |u| > 78.
 //
-// This replaces the 200 ms timer with a floor that fades on VELOCITY, not a clock:
-//   * Aimed by velError -- clean, slow and one-sided (-0.24..-0.32 for seconds),
-//     unlike u, whose ~9 Hz swing carries almost no DC.
+// This replaces the 200 ms timer with a floor that fades on DEMAND, not a clock:
+//   * Aimed by a slow-filtered u.
+//
+//     FIRST ATTEMPT AIMED IT AT velError AND THE SIGN WAS WRONG. Bench 2026-08-14:
+//     the oscillation vanished (u smooth, |rate| <= 9, nothing at 9 Hz -- the floor
+//     really was what drove the limit cycle) but the robot could not move at all,
+//     and the burst says why. At i=399, u = +20.4 with FFB = -0.97:
+//         left :  15 * (-0.97) + 20.4 = +5.9   -> pwmL  +6
+//         right:  27 * (-0.97) + 20.4 = -5.8   -> pwmR  -4
+//     The bias and the PD cancelled, and because the floors differ by 12 the two
+//     wheels came out with OPPOSITE SIGNS -- a pure yaw command with no drive.
+//     The sign error: at i=18..40 the bias pushed the wheels forward and pitch went
+//     -3.229 -> -4.148, i.e. the body rotated BACKWARD. That is correct
+//     non-minimum-phase physics, and it is also why the PD was commanding the wheels
+//     BACKWARD (u positive): to establish a FORWARD lean the wheels must first roll
+//     back. LEAN ACT never left -2.4 while LEAN CMD reached 6.5 -- the body never
+//     tilted forward, because the motion that would tilt it was the motion the bias
+//     was fighting. velError points at where we want to END UP; the stiction that
+//     needs breaking at launch resists the opposite motion. u carries the right
+//     intent in BOTH phases, so aim at u.
+//     (The backward lean was introduced by that bias, not pre-existing: every log
+//     before it shows the body leaning the commanded way, to +6.8 and -12.8 deg.)
+//
+//     Low-passing u keeps the property that mattered -- the ~9 Hz swing gets no
+//     floor, only the sustained demand does. Magnitude check: u settles near +20,
+//     and 20 + the floors gives 35/47, which is exactly what LAUNCH_ASSIST_EFFORT
+//     20 produced. Fixing the sign also fixes the opposite-sign wheels, since the
+//     bias and u now ADD instead of cancelling.
 //   * Magnitude capped at the per-wheel deadband (11/13 moving, 15/27 static). That
 //     is BY DEFINITION the amount that produces no motion, so while the wheel is
 //     stuck friction absorbs it and net body torque is ~0. This is what makes it a
@@ -648,8 +673,11 @@ const float TURN_SIGN      = +1.0f; // flip to -1 if the turn stick steers the w
 // LAUNCH ASSIST DISABLED so this is the sole breakaway mechanism and the next log is
 // unambiguous. Running both would confound it the way DRIVE_VELOCITY_EFFORT did.
 #define DRIVE_FRICTION_FF 1
-const float FRICTION_FF_KNEE = 0.12f; // rev/s of velError for ~76% of the floor;
-                                      // 0.28 (the observed stall) gives ~0.98.
+const float FRICTION_FF_LPF    = 0.98f; // ~0.64 Hz corner at 200 Hz: passes the demand,
+                                        // rejects the ring (14x down at 9 Hz).
+const float FRICTION_FF_KNEE_U = 3.0f;  // effort units for ~76% of the floor. u reached
+                                        // +20 while stalled, so this saturates early and
+                                        // the floor is effectively full during breakaway.
 
 #define DRIVE_LAUNCH_ASSIST 0
 const float         LAUNCH_ASSIST_EFFORT     = 20.0f; // -35/-47 PWM with measured static floors
@@ -768,6 +796,7 @@ const float LEAN_RATE_FF_MAX = 60.0f; // deg/s : bound on the setpoint-rate term
 float dTermLog = 0.0f;    // derivative contribution, for telemetry
 float leanCmd   = 0.0f;   // cascade outer-loop output: the desired lean (deg) added to BALANCE_SETPOINT
 float velocityLeanI = 0.0f;
+float frictionUSlow = 0.0f;   // low-passed u; aims the friction floor (DRIVE_FRICTION_FF)
 bool  integralRollingPrev = false;            // edge-detect stall -> rolling for the integral reset
 unsigned long lastControlMicros = 0;
 int controlHz = 0;   // measured control-loop frequency (should read ~200; if lower, we're falling behind)
@@ -1307,6 +1336,7 @@ void loop() {
     dTermLog = 0.0f;
     leanCmd  = 0.0f;
     velocityLeanI = 0.0f;
+    frictionUSlow = 0.0f;
     turnCmdLog = 0.0f;
     controlLog.targetPitch = BALANCE_SETPOINT;
     controlLog.pTerm = controlLog.iTerm = 0.0f;
@@ -1810,9 +1840,15 @@ void loop() {
   // only signal here that carries usable DC.
   float frictionFF = 0.0f;
 #if DRIVE_FRICTION_FF
-  // SIGN_CFG: physical forward is NEGATIVE PWM effort, and velError is POSITIVE when
-  // the robot still owes forward speed -- hence the negation.
-  if (driving) frictionFF = -tanhf(velError / FRICTION_FF_KNEE);
+  if (driving) {
+    // Aim at u's SUSTAINED component, in u's own sign. No negation: u already points
+    // where the inner loop needs torque, including the backward impulse that
+    // establishes a forward lean. See the sign post-mortem at DRIVE_FRICTION_FF.
+    frictionUSlow = FRICTION_FF_LPF * frictionUSlow + (1.0f - FRICTION_FF_LPF) * u;
+    frictionFF = tanhf(frictionUSlow / FRICTION_FF_KNEE_U);
+  } else {
+    frictionUSlow = 0.0f;   // no carry-over into the next drive gesture
+  }
 #endif
   controlLog.frictionFF = frictionFF;
 
