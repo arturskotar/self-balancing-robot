@@ -809,7 +809,22 @@ const float RATE_DEADZONE  = 5.0f;  // deg/s : NO LONGER gates the coast (gyro v
                                     // from ever engaging). Kept for reference / future use.
 
 // ---- Safety ----------------------------------------------------------------
-const float FALL_CUTOFF_DEG = 30.0f; // trip the fall latch: |pitch| beyond this = it fell, stop fighting
+// 30 -> 45 (2026-08-14). The logged "laying" pose is LEAN ACT 31.60 deg -- 1.6 deg past
+// the old cutoff -- so the latch tripped and the robot was forbidden from even trying.
+// At 31.6 deg of error the PD asks for Kp*31.6 = 63 PWM against a 110 ceiling, which is
+// authority it already has; the cutoff was the only thing in the way. Beyond ~45 deg the
+// accel pitch gets ambiguous and it is genuinely on its back, so that is the new line.
+const float FALL_CUTOFF_DEG = 45.0f; // trip the fall latch: |pitch| beyond this = it fell, stop fighting
+// A stand-up attempt must be BOUNDED or it cooks the motors. Two backstops now cover the
+// whole range: above ~39 deg of error the PD exceeds the saturation latch's threshold
+// (SAT_EFFORT_FRAC*(MAX_PWM-MAX_DEADBAND) = 78.85, i.e. 39.4 deg at Kp 2.0) and it latches
+// in 0.5 s. BELOW that, between 25 and 39 deg, u sits under the sat threshold and the old
+// code would have pushed at ~60 PWM indefinitely against an obstacle -- which is exactly
+// the band this 31.6 deg pose lives in. Hence the explicit timeout.
+// 25 deg is chosen to clear normal driving: LEAN_CLAMP caps the COMMANDED lean at 14 and
+// the worst observed ACTUAL overshoot was 18.5 deg, so this cannot false-trip on a drive.
+const float         RECOVERY_GIVEUP_DEG   = 25.0f; // deg of error that counts as "still down"
+const unsigned long RECOVERY_GIVEUP_TICKS = 400;   // 2 s at 200 Hz, then give up and latch
 const float FALL_REARM_DEG  = 8.0f;  // re-arm ONLY when the absolute accel angle is back within this of
                                      // the setpoint -- a gyro-drifting pitch estimate on its back can't
                                      // restart the motors, only physically standing it up does.
@@ -929,6 +944,7 @@ void burstDumpChunk() {
 long  homeTicksSum = 0;                        // (leftTicks+rightTicks) defining "home" (0 = boot spot)
 bool  stalled = false;                         // true while the stall cutoff has the motors off
 bool  fallen = false;                          // true while the fall latch has the motors off
+unsigned long recoverTicks = 0;                // ticks spent above RECOVERY_GIVEUP_DEG
 bool  wheelMovingL = false, wheelMovingR = false;  // wheel turned within WHEEL_STILL_TICKS
 bool  armedPrev = false;                       // edge-detect the arm transition (soft start)
 bool  driveCommandPrev = false;                // edge-detect a fresh non-zero drive-stick command
@@ -1567,6 +1583,17 @@ void loop() {
   // the cutoff -> without the latch the motors flail. Keying re-arm off the
   // accelerometer means only physically standing it up restarts them.
   if (!fallen && fabs(pitch - BALANCE_SETPOINT) > FALL_CUTOFF_DEG) fallen = true;
+  // Bounded stand-up attempt: below the saturation latch's reach the PD would otherwise
+  // push at ~60 PWM forever against whatever it is lying on. See RECOVERY_GIVEUP_DEG.
+  if (!fallen && fabs(error) > RECOVERY_GIVEUP_DEG) {
+    if (++recoverTicks > RECOVERY_GIVEUP_TICKS) {
+      recoverTicks = 0;
+      fallen = true;
+      Serial.println("RECOVER: stand-up attempt timed out -> latched (stand it up to re-arm)");
+    }
+  } else {
+    recoverTicks = 0;
+  }
   if (fallen && fabs(aPitch - BALANCE_SETPOINT) < FALL_REARM_DEG) {
     fallen = false;
     pitch = aPitch;                          // reseed the filter from the true angle
@@ -1578,6 +1605,7 @@ void loop() {
     leanCmd = 0.0f;                          // drop any stale lean from before the fall
     velocityLeanI = 0.0f;
     satTicks = 0;
+    recoverTicks = 0;
     driveVelocityEffortLatched = false;
     launchAssistState = LAUNCH_IDLE;
     launchAssistDirection = 0;
@@ -2051,7 +2079,9 @@ void telemetry(float error, float rate, float u) {
   Serial.print(" Kvel "); Serial.print(Kvel, 2);
   Serial.print(" Kveff "); Serial.print(controlLog.effectiveKvel, 2);
   Serial.print(" Vmax "); Serial.print(DRIVE_MAX_VEL, 2);
-  Serial.print(" Bstart "); Serial.print(LAUNCH_ASSIST_EFFORT, 1);
+  // Was printing LAUNCH_ASSIST_EFFORT under a "Bstart" label -- stale since
+  // DRIVE_LAUNCH_ASSIST went to 0, and misleading (it is not a start ANGLE).
+  Serial.print(" FALLDEG "); Serial.print(FALL_CUTOFF_DEG, 1);
   Serial.print(" GBIAS "); Serial.print(gyroYBias, 2);
   // Floors actually in force this tick (M = moving/Coulomb, S = static breakaway).
   Serial.print(" DBL "); Serial.print(wheelMovingL ? LEFT_DEADBAND_MOVING : LEFT_DEADBAND_STATIC);
