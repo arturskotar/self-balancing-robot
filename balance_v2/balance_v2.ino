@@ -757,6 +757,10 @@ const float FRICTION_FF_KNEE_V    = 0.12f; // rev/s of velError for ~76% of the 
 // 27 + 20 = 47 is the same number LAUNCH_ASSIST_EFFORT produced, the one mechanism
 // that reliably moved this robot. It disappears the moment either wheel turns.
 const float FRICTION_FF_BOOST     = 20.0f; // extra PWM on the floor while stalled in CRUISE
+const float FRICTION_FF_ROLL_VEL  = 0.15f; // rev/s at which the FF floor has fully blended
+                                           // from (static + boost) down to the kinetic floor.
+                                           // Well above the 0.05 rev/s encoder-noise band so
+                                           // the blend cannot be driven by quantization.
 const float FRICTION_FF_LEAN_DEG  = 3.0f;  // deg toward the command: LAUNCH -> CRUISE
 const float FRICTION_FF_LEAN_DROP = 1.5f;  // hysteresis back to LAUNCH; wide enough that the
                                            // +/-1.5 deg tracking ripple cannot chatter the phase
@@ -1175,7 +1179,17 @@ int mapEffortToPwm(float effort, float ffBias, float ffFloor, bool moving,
   return effort > 0.0f ? pwm : -pwm;
 }
 
-void driveControlDiff(float uL, float uR, float ffBias, bool ffBoostOk) {
+// ffRoll (0..1) replaces BOTH discrete gates that used to set the FF floor: the
+// static/moving choice and the boost enable. Both keyed off wheelMoving, which toggles
+// at encoder-noise level -- DBR alternates 27S/13M essentially every telemetry sample --
+// so the floor was being square-waved. Bench 2026-08-14, consecutive ticks:
+//     MS 17360  u = -10.13  FFB 0.98  DBL 15S DBR 27S -> floor 27+20=47 -> PWM +36
+//     MS 17460  u = -37.06  FFB 0.96  DBL 15S DBR 13M -> floor      15 -> PWM -22
+// A 32-count step in the floor, compounded by u, giving a full-amplitude PWM reversal
+// every tick and a ~2.5 Hz limit cycle in the burst. Blending on measured speed instead
+// is continuous: no gate, nothing to chatter, and the boost still lands where it is
+// needed (stopped) and fades where it is not (rolling).
+void driveControlDiff(float uL, float uR, float ffBias, float ffRoll) {
   // ONE FLOOR FOR BOTH WHEELS in the FF path (re-applied from 4013030; it was a real
   // fix that got thrown out with that revert). The bias is a COMMON-MODE drive command,
   // so per-wheel floors inject a differential into a command that should have none --
@@ -1185,10 +1199,15 @@ void driveControlDiff(float uL, float uR, float ffBias, bool ffBoostOk) {
   //     right:  27 * 1.00 - 26.84 =  +0.2  -> PWMR   0
   // Self-reinforcing too: the stopped wheel keeps the larger STATIC floor, cancels more
   // of u, and stays stopped. Max means neither side is under-driven.
-  int fl = wheelMovingL ? LEFT_DEADBAND_MOVING  : LEFT_DEADBAND_STATIC;
-  int fr = wheelMovingR ? RIGHT_DEADBAND_MOVING : RIGHT_DEADBAND_STATIC;
-  float ffFloor = (float)(fl > fr ? fl : fr);
-  if (ffBoostOk) ffFloor += FRICTION_FF_BOOST;   // stalled in CRUISE: see the constant
+  const float fStatic = (float)(LEFT_DEADBAND_STATIC > RIGHT_DEADBAND_STATIC
+                                ? LEFT_DEADBAND_STATIC : RIGHT_DEADBAND_STATIC);
+  const float fMoving = (float)(LEFT_DEADBAND_MOVING > RIGHT_DEADBAND_MOVING
+                                ? LEFT_DEADBAND_MOVING : RIGHT_DEADBAND_MOVING);
+  // Stopped -> static floor + breakaway boost (27+20 = 47). Rolling -> kinetic floor
+  // (13). Continuous between, so there is no step for the loop to ring on.
+  float ffFloor = (fStatic + FRICTION_FF_BOOST) * (1.0f - ffRoll) + fMoving * ffRoll;
+  // wheelMoving still governs the plain sign-of-u path (no FF), where the floor only
+  // augments |effort| and a step in it cannot reverse the command.
   int pwmL = mapEffortToPwm(uL, ffBias, ffFloor, wheelMovingL, LEFT_DEADBAND_MOVING,  LEFT_DEADBAND_STATIC);
   int pwmR = mapEffortToPwm(uR, ffBias, ffFloor, wheelMovingR, RIGHT_DEADBAND_MOVING, RIGHT_DEADBAND_STATIC);
   motorPerWheel(pwmL, pwmR);
@@ -2001,9 +2020,10 @@ void loop() {
 
   controlLog.effortL = u + turnCmd;
   controlLog.effortR = u - turnCmd;
-  // Boost only in CRUISE (unambiguous direction) and only while BOTH wheels are stopped.
-  bool ffBoostOk = frictionLeanUp && !wheelMovingL && !wheelMovingR;
-  driveControlDiff(controlLog.effortL, controlLog.effortR, frictionFF, ffBoostOk);
+  // Continuous stopped->rolling blend for the FF floor. NOT gated on wheelMoving: that
+  // flag toggles at encoder-noise level and square-waved the floor. See driveControlDiff.
+  float ffRoll = constrain(fabs(forwardVel) / FRICTION_FF_ROLL_VEL, 0.0f, 1.0f);
+  driveControlDiff(controlLog.effortL, controlLog.effortR, frictionFF, ffRoll);
 
 #if BURST_LOG
   // Capture AFTER the motors are written so pwmL/pwmR are this tick's real output.
