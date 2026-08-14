@@ -385,7 +385,6 @@ const float         LAUNCH_READY_LEAN_DEG    = 2.5f;  // max required lean; scal
 const float         LAUNCH_READY_ERROR_DEG   = 1.25f; // body must be close to the leaned target
 const float         LAUNCH_READY_RATE_DPS    = 10.0f; // do not launch in the fast part of a pitch swing
 const float         LAUNCH_ABORT_ERROR_DEG   = 2.5f;  // immediately return authority to balance
-const float         LAUNCH_ABORT_RATE_DPS    = 35.0f; // wider hold gate; trims only drop on a real pitch snap
 const float         LAUNCH_ABORT_LEAN_DEG    = 2.0f;  // pulse stops if the established lean is lost
 const float         LAUNCH_MAX_START_VEL     = 0.06f; // already rolling means the pulse is unnecessary
 const float         LAUNCH_RELEASE_VEL       = 0.12f; // rev/s toward command means breakaway succeeded
@@ -400,6 +399,8 @@ const unsigned int  LAUNCH_ASSIST_TICKS      = 40;    // one bounded 200 ms wind
 const float DRIVE_VELOCITY_EFFORT_GAIN  = 5.5f; // rev/s error -> PWM effort
 const float DRIVE_VELOCITY_EFFORT_LIMIT = 4.0f; // small trim, well below launch floor
 const float DRIVE_VELOCITY_HOLD_LEAN_DEG = 0.75f; // hysteresis after the strict 1.5 deg engagement
+const float DRIVE_VELOCITY_HOLD_ERROR_DEG = 0.85f; // do not keep trim through a balance recovery swing
+const float DRIVE_VELOCITY_HOLD_RATE_DPS  = 18.0f; // let the inner loop catch pitch snaps by itself
 
 // ---- Soft start + saturation latch (from the rc_balance reference) ---------
 // Soft start: ramp control authority in over SOFT_START_SEC after arming so a
@@ -1298,8 +1299,8 @@ void loop() {
   bool driveVelocityEffortSafeToHold = driving &&
                                        velocityNeedsDrive &&
                                        driveDirection * actualLean >= DRIVE_VELOCITY_HOLD_LEAN_DEG &&
-                                       fabs(error) <= LAUNCH_ABORT_ERROR_DEG &&
-                                       fabs(dRateFilt) <= LAUNCH_ABORT_RATE_DPS;
+                                       fabs(error) <= DRIVE_VELOCITY_HOLD_ERROR_DEG &&
+                                       fabs(dRateFilt) <= DRIVE_VELOCITY_HOLD_RATE_DPS;
   if (!driveVelocityEffortSafeToHold) driveVelocityEffortLatched = false;
   else if (driveVelocityEffortReady)   driveVelocityEffortLatched = true;
 #else
