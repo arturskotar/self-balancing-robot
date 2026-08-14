@@ -434,6 +434,27 @@ const float VEL_I_ROLL_MIN = 0.20f;  // rev/s : below this the integral is froze
 // carries stiction-fighting wind into the cruise) without blocking the only term
 // that could grow. Ramp rate is KVEL_I * velError ~ 0.25 deg/s at full stick, so
 // it takes several seconds to matter; raise KVEL_I if that is too slow.
+
+// COAST BRAKING (2026-08-14, "a bit lazy break").
+// The integral was zeroed the instant the stick centred (`if (!driving)`), which
+// collapsed the loop's braking authority from LEAN_CLAMP 18 deg to whatever
+// Kpos*posError + Kvel*velError happened to be -- measured at 1.8 deg on release,
+// BELOW the ~6-7 deg breakaway lean. So the robot could not brake at all: it
+// coasted on rolling friction alone. Measured from the log, stick centred at
+// 0.44 rev/s: 0.35 rev of travel over 1.7 s, ending parked with a permanent
+// 0.25 rev position error it never recovered (POS -0.397 against PSET -0.146,
+// held by static friction against a 1.68 deg lean).
+// Fix: keep integrating while the wheels are still ROLLING, stick or no stick.
+// With targetVel 0, velError = -forwardVel, so the counter-lean ramps at
+// KVEL_I*|v| = 24*0.44 = 10.6 deg/s and clears breakaway in ~0.6 s instead of
+// never. VEL_I_ROLL_MIN is reused as the rest detector, and below it the integral
+// is ZEROED, not frozen: a frozen integral parked just above breakaway would
+// creep, stop, creep again -- the standstill stick-slip hunt this project already
+// knows about (see the 2026-08-14 burst finding in MIGRATION_TEENSY.md).
+// This does NOT touch the stick-reversal brake, which is a separate path and is
+// authority- and LEAN_LPF-limited rather than dead. See LEAN_LPF.
+#define COAST_BRAKE 1
+
 // Keep drive velocity feedback at the neutral-loop gain. Doubling it drove
 // leanRaw into the +/-5 deg clamp for most held-stick samples, so encoder ripple
 // could only move the command away from saturation and was fed back asymmetrically.
@@ -1664,7 +1685,16 @@ void loop() {
     launchRollingTicks = 0;
     controlLog.launchEvent = '-';
   } else if (!driving) {
-    if (driveCommandPrev) posSetpoint = positionRev;
+    if (driveCommandPrev) {
+      posSetpoint = positionRev;
+#if COAST_BRAKE
+      // Falling edge: drop the cruise trim so the coast brake starts from zero
+      // rather than unwinding a forward-signed integral through zero first. VELI
+      // read +3.48 at release, which at 10.6 deg/s is ~0.33 s of wrong-signed
+      // lean before braking could even begin.
+      velocityLeanI = 0.0f;
+#endif
+    }
     driveVelocityEffortLatched = false;
     launchAssistState = LAUNCH_IDLE;
     launchAssistDirection = 0;
@@ -1780,7 +1810,15 @@ void loop() {
   // not trimming a cruise, so it is discarded at breakaway and the integral
   // restarts from zero for the cruise it actually exists to trim.
   bool integralRolling = fabs(forwardVel) >= VEL_I_ROLL_MIN;
-  if (!driving) {
+#if COAST_BRAKE
+  // Still rolling counts as well as still commanded -- see COAST_BRAKE. The
+  // breakaway edge below cannot misfire during a coast: integralRolling is
+  // already true on stick release and stays true until the robot stops.
+  bool integralActive = driving || integralRolling;
+#else
+  bool integralActive = driving;
+#endif
+  if (!integralActive) {
     velocityLeanI = 0.0f;
   } else {
     if (integralRolling && !integralRollingPrev) velocityLeanI = 0.0f;   // breakaway
