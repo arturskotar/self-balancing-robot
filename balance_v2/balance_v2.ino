@@ -385,6 +385,7 @@ const float         LAUNCH_READY_LEAN_DEG    = 2.5f;  // max required lean; scal
 const float         LAUNCH_READY_ERROR_DEG   = 1.25f; // body must be close to the leaned target
 const float         LAUNCH_READY_RATE_DPS    = 10.0f; // do not launch in the fast part of a pitch swing
 const float         LAUNCH_ABORT_ERROR_DEG   = 2.5f;  // immediately return authority to balance
+const float         LAUNCH_ABORT_RATE_DPS    = 35.0f; // wider hold gate; trims only drop on a real pitch snap
 const float         LAUNCH_ABORT_LEAN_DEG    = 2.0f;  // pulse stops if the established lean is lost
 const float         LAUNCH_MAX_START_VEL     = 0.06f; // already rolling means the pulse is unnecessary
 const float         LAUNCH_RELEASE_VEL       = 0.12f; // rev/s toward command means breakaway succeeded
