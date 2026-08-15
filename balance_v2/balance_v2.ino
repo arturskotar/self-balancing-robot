@@ -666,7 +666,19 @@ const float DRIVE_KVEL_MULTIPLIER = 1.0f;
 // Headroom check: 18 forward leaves 12.5 deg to the +30.53 stop; 12 rear leaves 3.7 deg
 // to the -15.67 sit-down. If forward pins at 18 under Vmax 0.90 there is room to ~24
 // before the geometry bites, but do not go there without a CLEAN log showing 18 saturating.
-const float LEAN_CLAMP_FWD  = 18.0f; // deg : forward authority cap (stop is at +30.53)
+// 18 -> 24, 2026-08-15. The forward cap was the binding constraint and it was binding against
+// nothing: the 2026-08-15 flight held LEAN RAW 18.00 = CMD 18.00 for seconds at a stretch --
+// RAW equalling CMD exactly means the request was being truncated -- while TARGET sat at
+// BALANCE_SETPOINT + 18 = 14.78 against a forward stop at +30.53. Half the forward range was
+// never used. Raising DRIVE_MAX_VEL 0.65 -> 1.00 made this worse by asking for more velocity,
+// hence more lean, into the same ceiling.
+// 24 puts TARGET at 20.78 and leaves ~9.7 deg to the stop. Forward overshoot is small in
+// practice (PITCH tracks TARGET within ~1 deg while driving, peaking ~16 against a 14.78
+// target), so that margin is real, unlike the rear where overshoot eats most of it.
+// NOT symmetric with the rear, on purpose: the chassis has 30.5 deg forward and ~19 to the rear
+// soft contact, and LEAN_CLAMP_REAR 14 already puts the rear TARGET at -17.2, i.e. nearly on
+// the stop. Forward has room to give; rear does not. See LEAN_CLAMP_REAR.
+const float LEAN_CLAMP_FWD  = 24.0f; // deg : forward authority cap (stop is at +30.53)
 // 12 -> 18 (2026-08-14). THE -15.67 SIT-DOWN WAS NOT REAL. A second manual sweep,
 // disarmed, back-to-front, measured the rear rest at PITCH -28.5 = LEAN ACT -25.3, held
 // steady for a full second -- and swept straight THROUGH -18.9 on the way up at 34-42
