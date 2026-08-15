@@ -716,7 +716,23 @@ const float LEAN_CLAMP_FWD  = 24.0f; // deg : forward authority cap (stop is at 
 // WHAT WOULD SETTLE IT: a SLOW deliberate push through the -17..-23 band, watching for
 // where resistance first appears, rather than a full-range sweep that flies past it.
 // Both previous sweeps were too fast in exactly this region.
-const float LEAN_CLAMP_REAR = 14.0f; // deg : rear cap; soft contact ~-19, hard rest -25.3
+// 14 -> 16, 2026-08-15. Pilot reports the same truncation-and-jitter in reverse as forward,
+// and the log agrees: LEAN RAW -14.00 = CMD -14.00, pinned. Raised only 2 deg, not the 6 that
+// LEAN_CLAMP_FWD got, because the rear budget is not comparable:
+//   BALANCE_SETPOINT -3.22 SUBTRACTS from forward reach and ADDS to rear reach, so the same
+//   clamp number is worth 3.2 deg less one way and 3.2 deg more the other. At 24/14 the
+//   commanded pitch was +20.78 / -17.22 against limits of +30.53 / ~-19, i.e. 9.7 deg of
+//   forward margin and 1.8 of rear.
+// 16 puts the rear TARGET at -19.2, essentially ON the documented soft contact.
+// ⚠️ THE CONTACT FIGURE IS THE REAL UNCERTAINTY AND IT IS UNRESOLVED. This file says soft
+// contact ~-19; the 2026-06 chassis measurement says the tail sits down at -15.7. Those cannot
+// both be right, and the pilot reports visible clearance at the current lean, which fits
+// neither. Everything above is arithmetic on a number nobody has re-measured.
+// MEASURE IT BEFORE GOING FURTHER: disarmed, tip the chassis back by hand until the tail
+// touches, read PITCH off the telemetry. If it is past -22 this can go to 18-19 and match the
+// forward change; if it is near -16 then 14 was already too much and the earlier rear-stall
+// diagnosis (chassis resting on its tail under full reverse) applies at this setting too.
+const float LEAN_CLAMP_REAR = 16.0f; // deg : rear cap; soft contact ~-19 (DISPUTED), hard rest -25.3
 // 0.99 -> 0.97 (tau 0.50 s -> 0.17 s, pole 2 -> 6 rad/s). The velocity loop
 // crosses over near 2.5 rad/s, so the old 2 rad/s pole sat essentially ON the
 // crossover and ate ~51 deg of phase exactly where it hurt. That lag is what
