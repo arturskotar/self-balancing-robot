@@ -61,7 +61,7 @@ MPU9250 imu;
 // SWEEP IN PROGRESS 2026-08-14 -- 4482 measured free-spin L@13 R@12 and L@14 R@13 on a
 // repeat, so repeatability is +/-1 count. Now at 2000; 1200 next. RESTORE TO 4482 unless
 // the sweep says otherwise, and never raise it (see the note above about turn-on delay).
-const int MOTOR_PWM_HZ = 2000;   // do NOT raise without re-running DEADBAND_TEST
+const int MOTOR_PWM_HZ = 1200;   // do NOT raise without re-running DEADBAND_TEST
 const int MOTOR_PWM_BITS = 8;    // analogWrite range is explicitly 0..255 on every channel
 
 // ---- Encoder pins (Waveshare DCGM-3865, connector silkscreen "M V A B G M")-
