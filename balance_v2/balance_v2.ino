@@ -716,7 +716,28 @@ const float LEAN_CLAMP_FWD  = 24.0f; // deg : forward authority cap (stop is at 
 // WHAT WOULD SETTLE IT: a SLOW deliberate push through the -17..-23 band, watching for
 // where resistance first appears, rather than a full-range sweep that flies past it.
 // Both previous sweeps were too fast in exactly this region.
-// 14 -> 16, 2026-08-15. Pilot reports the same truncation-and-jitter in reverse as forward,
+// 16 -> 14, 2026-08-15 (same day, reverting my own +2). The rear stop is now MEASURED, not
+// guessed, and it is tighter than any of the three figures that were in circulation:
+//   DISARMED, motors off (PWML 0 PWMR 0), the chassis settles at PITCH -21.0 +/- 0.15 and
+//   holds it for a full second with RATE ~0. Ten consecutive samples, MS 20340..21340.
+// That is the backstop. The file's old "~-19 soft contact" and the 2026-06 note's "-15.7"
+// are both wrong, as was my 16 (rear TARGET -19.22, and PITCH peaked -20.14 -- 0.9 deg off
+// the stop, i.e. touching down).
+// Confirmed independently by free-body arithmetic on the same flight: sustained PITCH -19.2
+// with VF 0.02 and POS moving 0.169 -> 0.163, six millimetres in 1.5 s. A free body at 19.2
+// deg accelerates backward at g*tan(19.2) = 3.4 m/s^2 = 3.8 m of travel over that interval.
+// Off by ~600x. Something external is carrying the load; at that angle it is the stop.
+// Sizing at 14: TARGET -17.22, plus the ~0.9 deg overshoot this log shows = peak ~-18.1,
+// leaving 2.9 deg to the stop.
+// THE REAR CANNOT BE OPENED UP FURTHER, and this is geometry rather than tuning. Usable rear
+// lean is 21.0 - 3.22 = 17.8 deg, because BALANCE_SETPOINT -3.22 shifts every target rearward
+// and so spends 3.2 deg of the rear budget before the clamp sees any of it. The same offset
+// BUYS forward room (stop +30.53 -> 33.75 deg of usable lean), which is why LEAN_CLAMP_FWD
+// can sit at 24 with margin to spare while the rear is maxed at 14. Reverse acceleration
+// authority is therefore about half of forward and will stay that way until the CoM moves.
+// ---- superseded: original 14 -> 16 rationale, kept because the reasoning was sound and only
+// the input number was wrong ----
+// Pilot reports the same truncation-and-jitter in reverse as forward,
 // and the log agrees: LEAN RAW -14.00 = CMD -14.00, pinned. Raised only 2 deg, not the 6 that
 // LEAN_CLAMP_FWD got, because the rear budget is not comparable:
 //   BALANCE_SETPOINT -3.22 SUBTRACTS from forward reach and ADDS to rear reach, so the same
@@ -732,7 +753,7 @@ const float LEAN_CLAMP_FWD  = 24.0f; // deg : forward authority cap (stop is at 
 // touches, read PITCH off the telemetry. If it is past -22 this can go to 18-19 and match the
 // forward change; if it is near -16 then 14 was already too much and the earlier rear-stall
 // diagnosis (chassis resting on its tail under full reverse) applies at this setting too.
-const float LEAN_CLAMP_REAR = 16.0f; // deg : rear cap; soft contact ~-19 (DISPUTED), hard rest -25.3
+const float LEAN_CLAMP_REAR = 14.0f; // deg : rear cap; backstop MEASURED at -21.0 (disarm settle)
 // 0.99 -> 0.97 (tau 0.50 s -> 0.17 s, pole 2 -> 6 rad/s). The velocity loop
 // crosses over near 2.5 rad/s, so the old 2 rad/s pole sat essentially ON the
 // crossover and ate ~51 deg of phase exactly where it hurt. That lag is what
