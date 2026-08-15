@@ -1225,10 +1225,30 @@ const int MAX_DEADBAND = (LEFT_DEADBAND_STATIC > RIGHT_DEADBAND_STATIC)
 // the binding constraint. Set TARGET_VEL_SLEW_LIMIT 0 to A/B it on the same flash.
 #define TARGET_VEL_SLEW_LIMIT 1
 const float TARGET_VEL_SLEW = 0.70f; // rev/s^2 : cap on how fast the velocity DEMAND grows
-const float DRIVE_MAX_VEL  = 0.65f; // rev/s at full stick. Conservative on purpose: one encoder
+// 0.65 -> 1.00, 2026-08-15, pilot asked for more speed. The old "conservative on purpose"
+// note below was about ENCODER RESOLUTION, and resolution gets BETTER as speed rises: one
+// count per 5 ms tick is 0.366 rev/s, so 0.65 is ~1.8 counts/tick and 1.00 is ~2.7. The
+// resolution argument constrains the LOW end, not this. The machine already demonstrates
+// the headroom -- VF hit 0.86 during aggressive drive on 2026-08-15 while the target was
+// capped at 0.65, i.e. it overshoots the old cap under its own power.
+const float DRIVE_MAX_VEL  = 1.00f; // rev/s at full stick. Was 0.65. Original note: one encoder
                                     // count per 5 ms tick is already 0.366 rev/s (546 counts/rev),
                                     // so 0.6 rev/s is only ~1.6 counts/tick of resolution. Raise
                                     // this after the x4 hardware QuadEncoder upgrade (2184 cpr).
+// FLOOR ON THE COMMANDED SPEED, 2026-08-15, pilot request: more rpm and a NARROWER rpm range
+// on the throttle, with the lower bound raised. The stick used to map linearly from zero, so
+// just past the deadzone it asked for ~0.09 rev/s -- inside the regime where the wheels dither
+// without rolling (2026-08-15 flight: sustained |u| 0.5..1.9 gave PWM 8..15 against a measured
+// breakaway of 18, and the encoders moved 17 counts in 5.7 s). Anything the pilot could ask for
+// down there was unachievable, so the bottom of the stick travel was dead.
+// Now the stick maps its live travel onto DRIVE_MIN_VEL..DRIVE_MAX_VEL, so the smallest command
+// that is not zero is one the machine can actually execute. Observed rolling speeds are 0.2..0.5
+// rev/s and stuck ones are 0..0.1, so 0.30 sits clearly in the rolling regime.
+// The CH3 cap still scales BOTH ends, so slow mode stays slow -- the floor is a fraction of full
+// authority, not an absolute minimum speed. At cap 0.10 the floor is 0.03 rev/s and inert.
+// This does NOT fix breakaway, it stops ASKING for motion below it. If the wheels still refuse
+// at minimum stick, raise this; if it lurches off the centre detent, lower it.
+const float DRIVE_MIN_VEL  = 0.30f; // rev/s just outside the stick deadzone (scaled by the cap)
 // TURN MIXER PRIORITY (2026-08-14). Turning is differential -- effortL = u + turnCmd,
 // effortR = u - turnCmd -- so the fore-aft force, which is the SUM, is exactly 2u and
 // the turn cancels out of the pitch axis entirely. That is why turning has never upset
@@ -1252,7 +1272,14 @@ const float DRIVE_MAX_VEL  = 0.65f; // rev/s at full stick. Conservative on purp
 // yaw stays a stable decoupled axis -- so this cannot become the friction-FF failure.
 #define TURN_HEADROOM_LIMIT 1
 const float TURN_SPEED_FADE = 0.50f; // fraction of turn authority given up at full speed
-const float TURN_AUTHORITY = 25.0f; // PWM-effort differential at full turn stick
+// 25 -> 16, 2026-08-15: pilot reports turns are still faster than the drive. Measured on that
+// flight, full turn stick produced TEFF up to +/-22 and VROT up to 0.61 rev/s while VF during
+// normal driving ran 0.4..0.5 -- so yaw rate was roughly 1.5x the fore-aft rate. 16 scales the
+// differential by 0.64 and brings the two into the same neighbourhood.
+// Note this is now the SECOND lever pulled in the same direction: DRIVE_MAX_VEL went 0.65 ->
+// 1.00 at the same time, so the drive/turn ratio moves by both. If turning ends up too slow,
+// undo this one before touching the speed.
+const float TURN_AUTHORITY = 16.0f; // PWM-effort differential at full turn stick
 const float DRIVE_STICK_DEADZONE = 0.15f;
 const float TURN_STICK_DEADZONE  = 0.30f; // measured cross-axis reaches ~0.25 during straight drive
 const float DRIVE_SIGN     = +1.0f; // flip to -1 if the drive stick drives the wrong way
@@ -2399,7 +2426,17 @@ void loop() {
   float turnIn    = turnRaw;
   if (fabs(driveIn) < DRIVE_STICK_DEADZONE) driveIn = 0.0f;
   if (fabs(turnIn) < TURN_STICK_DEADZONE) turnIn = 0.0f;
-  float targetVelRaw = DRIVE_SIGN * driveIn * cap * DRIVE_MAX_VEL;    // rev/s, + = forward
+  // Map the stick's LIVE travel (deadzone..1) onto DRIVE_MIN_VEL..DRIVE_MAX_VEL instead of
+  // scaling from zero, so the first non-zero command is already a speed the wheels can hold.
+  // See DRIVE_MIN_VEL. driveIn is exactly 0 inside the deadzone, so a centred stick still
+  // commands exactly 0 and the balancer's standing behaviour is untouched.
+  float targetVelRaw = 0.0f;
+  if (driveIn != 0.0f) {
+    float live = (fabs(driveIn) - DRIVE_STICK_DEADZONE) / (1.0f - DRIVE_STICK_DEADZONE);
+    live = constrain(live, 0.0f, 1.0f);
+    float speed = DRIVE_MIN_VEL + live * (DRIVE_MAX_VEL - DRIVE_MIN_VEL);
+    targetVelRaw = DRIVE_SIGN * (driveIn > 0.0f ? 1.0f : -1.0f) * cap * speed;  // rev/s, + = fwd
+  }
 #if TARGET_VEL_SLEW_LIMIT
   // See TARGET_VEL_SLEW. Away from zero is rate-limited so the demand stays plantable;
   // toward zero is instant so a release still stops asking immediately. A sign flip
