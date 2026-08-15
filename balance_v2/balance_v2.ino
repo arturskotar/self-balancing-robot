@@ -1459,6 +1459,30 @@ const float TURN_SIGN      = +1.0f; // flip to -1 if the turn stick steers the w
 // The lean no longer needs a launch push anyway: at Kpos 6 / KVEL_I 24 / LEAN_CLAMP 18
 // it reaches 17-18 deg on its own, which was not true when the FF was designed.
 // Anything rebuilt here must be SINGLE-SIGNED. Do not reintroduce opposing phases.
+//
+// TRIED AND REVERTED SAME DAY, 2026-08-15. I built exactly the single-signed version this
+// note asks for -- LAUNCH and the lean gate deleted from the source, one phase, velError
+// aimed, nothing to misclassify -- and it FAILED HARDER than the two-phase one. Reverted in
+// 1d7de41 after one flight.
+// SINGLE-SIGNED IS NECESSARY BUT NOT SUFFICIENT. The flight (DBF ~18, ffFloor ~38):
+//     PITCH 8.47   TARGET 20.78   ERR -12.31   U 49.43   FFB -1.00   PWML 11
+//     cmd = 38 * (-1.00) + 49.43 = 11
+// The bias ate 38 of the PD's 49 for SECONDS. LEAN ACT froze at 11.7 while LEAN CMD ran to
+// 24.00 and the body never tilted: ERR pinned at -12.3, ENC dead at L -15 R -19, POS -0.031
+// unchanged over four seconds. That is the SAME cancellation the first attempt hit, and the
+// reason is the one written above -- I just talked myself out of it.
+// WHY REMOVING THE LAUNCH PHASE DOES NOT HELP: establishing a lean is non-minimum-phase.
+// The wheels must roll BACKWARD to tilt the body FORWARD. velError points at where we want
+// to END UP, so a velError-aimed bias opposes the wheel motion that builds the lean. That is
+// not a property of a "launch phase" that can be gated away -- it is true at EVERY instant
+// the lean is still being built, which while driving is most of them. My argument for
+// dropping LAUNCH was that the cascade builds the lean unaided now. It does, and it does so
+// BY ROLLING THE WHEELS BACKWARD, which is exactly what this bias cancels.
+// CONCLUSION, and this closes the direction rather than the architecture: velError IS THE
+// WRONG AIMING SIGNAL AT ALL TIMES, not merely at launch. Do not aim the floor at it again,
+// single-signed or otherwise. u has the right intent but no usable DC (it averages ~+0.2
+// across a stalled dither), so the sustained-demand idea needs a signal that is neither, or
+// a different mechanism entirely. Both obvious signals are now eliminated by experiment.
 #define DRIVE_FRICTION_FF 0
 const float FRICTION_FF_LPF    = 0.98f; // ~0.64 Hz corner at 200 Hz: passes the demand,
                                         // rejects the ring (14x down at 9 Hz).
