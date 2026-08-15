@@ -685,9 +685,17 @@ const float DRIVE_KVEL_MULTIPLIER = 1.0f;
 // needed changing, and the pilot's ask was about throttle, not lean.
 // One observation kept from that excursion, with its caveat: the chassis settled at PITCH
 // -21.0 on release, disarmed. That is a RELEASE settle, not a limit -- see LEAN_CLAMP_REAR.
-// The forward stop remains +30.53, so this 18 leaves TARGET at +14.78 with ~15.7 deg spare;
-// there is room here if a future change ever genuinely needs it.
-const float LEAN_CLAMP_FWD  = 18.0f; // deg : forward authority cap (stop is at +30.53)
+// 18 -> 24 AGAIN, 2026-08-15. That revert to 18 was itself the overcorrection -- I undid a
+// justified change along with an unjustified one. Pilot: "why do we reduce the angles again?
+// we measure forward angle near 32 degrees and a rear 20+ degrees."
+//   clamp 18 -> TARGET +14.78, against a measured forward stop near +32 = ~17 deg unused
+//   clamp 24 -> TARGET +20.78, ~11 deg spare, still a wide margin
+// BALANCE_SETPOINT -3.22 shifts every target rearward, SPENDING rear budget and BUYING
+// forward budget. That asymmetry, not a difference in the chassis, is most of why the two
+// caps sit so far apart -- the rear is nearly maxed at 14 against the ~20 deg rear figure
+// once the ~1 deg of pitch overshoot is counted, while the forward has room to spare.
+// This cap has nothing to do with the 8 Hz jitter; raising it neither causes nor fixes it.
+const float LEAN_CLAMP_FWD  = 24.0f; // deg : forward authority cap (measured stop ~+32)
 // 12 -> 18 (2026-08-14). THE -15.67 SIT-DOWN WAS NOT REAL. A second manual sweep,
 // disarmed, back-to-front, measured the rear rest at PITCH -28.5 = LEAN ACT -25.3, held
 // steady for a full second -- and swept straight THROUGH -18.9 on the way up at 34-42
@@ -769,7 +777,19 @@ const float LEAN_CLAMP_FWD  = 18.0f; // deg : forward authority cap (stop is at 
 // touches, read PITCH off the telemetry. If it is past -22 this can go to 18-19 and match the
 // forward change; if it is near -16 then 14 was already too much and the earlier rear-stall
 // diagnosis (chassis resting on its tail under full reverse) applies at this setting too.
-const float LEAN_CLAMP_REAR = 14.0f; // deg : rear cap; backstop MEASURED at -21.0 (disarm settle)
+// 14 -> 18, 2026-08-15. Pilot: "no, rear has range. it won't break away again, if we keep
+// reduced." Correct, and my 14 was resting on the weakest number in the file. The two
+// measurements that actually reproduced say the rear has room:
+//   - manual two-sweep, disarmed, back-to-front: rear rest at PITCH -28.5
+//   - pilot's working figure: rear 20+
+// against which clamp 18 gives TARGET -21.22 and, with the ~1 deg of tracking overshoot,
+// a peak near -22.2. The -21.0 release settle I sized 14 to is NOT a limit -- it is a
+// release settle, the same class of measurement as the discredited -15.67, and sizing to
+// it re-created exactly the reverse-breakaway problem this session started with.
+// 18/18 fwd/rear is also the pairing the file records as "the config that has always
+// worked"; forward is now higher still at 24 because the forward budget is genuinely
+// bigger (see LEAN_CLAMP_FWD, and note BALANCE_SETPOINT -3.22 spends rear and buys forward).
+const float LEAN_CLAMP_REAR = 18.0f; // deg : rear cap; rear rest -28.5 (two-sweep), pilot 20+
 // 0.99 -> 0.97 (tau 0.50 s -> 0.17 s, pole 2 -> 6 rad/s). The velocity loop
 // crosses over near 2.5 rad/s, so the old 2 rad/s pole sat essentially ON the
 // crossover and ate ~51 deg of phase exactly where it hurt. That lag is what
