@@ -985,9 +985,12 @@ const float FLOOR_KNEE     = 2.5f;  // PWM-effort units
 // session on it: watch the left wheel during a stall and see whether the cable is
 // holding it. The measurement that actually settles it is an UNTETHERED run.
 //
-// THE TETHER ALSO INFLATES THE LOADED NUMBERS GENERALLY, not just during snags. Loaded
-// medians across three runs as the tether improved: L 18/17/16, R 18.5/17.5/16.5 --
-// monotonic, both wheels, ~2 counts. Treat the constants below as an UPPER BOUND.
+// THE TETHER DOES NOT INFLATE THE BASELINE -- RETRACTED. Three runs read L 18/17/16 and
+// R 18.5/17.5/16.5 as the tether improved, which looked monotonic and got committed in
+// 16272f6 as a ~2-count bias. A fourth run on the same tether came back L 18 / R 19.
+// Three points were not a trend. The tether causes discrete SNAGS; there is no evidence
+// it shifts the baseline. (Reading a trend out of three samples is the exact error this
+// whole thread has been about -- it does not stop being tempting once you have named it.)
 //
 // WATCH, NOT YET ACTIONABLE: post-fix R backward reads 13, 12, 9. Across both sessions
 // R-back is 9,9,9,11,12,13 against R-fwd 9,9,9,10,10,10 -- an upward tail on one side
@@ -1045,12 +1048,17 @@ const int RIGHT_DEADBAND_MOVING = 10;   // ditto -- keep these two equal without
 // not a breakaway), L reads 16,18,20,17,16 and R reads 17,17,18,19,21,17. Both median
 // 17-18 across two independent loaded runs, so 18/18 stands.
 //
-// THIRD loaded run, better tether: L 17,27*,15,18,16,16  R 20,16,16,19,17,16 (*tether
-// snag, see above). Pooling every valid loaded sample across all three runs gives
-// median L 17 / R 18, so 18/18 is within a count and stays -- but the per-run medians
-// fall as the tether improves, so the true untethered figure is LOWER than this.
-// Erring high is the safer direction here: this project's failure mode has always been
-// a wheel that will not break away, not one that kicks too hard.
+// FOUR loaded runs now, 24 samples per wheel, artifacts excluded:
+//     run 3  L 17,27*,15,18,16,16   R 20,16,16,19,17,16   (*tether snag)
+//     run 4  L 19,19,14,17,17,19    R 20,19,16,19,17,20   (clean, no dropout)
+// POOLED across all four: 21 valid L samples median 17, 24 valid R samples median 18.
+// Same as the three-run pool, so the figure is stable and 18/18 stays. R runs about a
+// count above L consistently, which is not enough to split them -- and splitting would
+// reintroduce exactly the differential this file spent a session removing.
+//
+// STOP MEASURING. Four runs agree; further ramps buy noise, not precision. Erring high
+// is the safe side anyway: this project's failure mode has always been a wheel that
+// will not break away, never one that kicks too hard.
 //
 // These are MEDIANS OF A WIDE DISTRIBUTION, not thresholds. Half the samples sit above
 // 18; loaded stick-slip is severe and always has been. Do not treat 18 as the PWM at
