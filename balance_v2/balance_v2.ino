@@ -831,7 +831,27 @@ const float OUT_DEADZONE   = 0.5f;  // ignore PD outputs smaller than this (PWM 
 // The right wheel's 27 vs the left's 15 is the real asymmetry underneath this -- the
 // deadband sweep (DEADBAND_TEST, wheels off the ground) is what would decompose that
 // into BTS7960 turn-on delay vs actual friction, and it has still never been run.
-const float FLOOR_KNEE     = 2.5f;  // PWM-effort units
+// 2.5 -> 1.0, 2026-08-15. The ramp existed to cut incremental gain at the zero crossing
+// and starve the 8 Hz limit cycle. That cycle turned out to be the CHATTERING FLOOR (see
+// mapEffortToPwm) and died with it: post-fix burst shows PWM holding one sign for tens of
+// samples, |u| ~1.5 not 4-6, RATE +/-3 not +/-30, and no periodicity at all. With the
+// cycle gone the ramp is pure loss, and it was the thing blocking breakaway.
+// Measured, same flight: 5.7 s at full stick moved the wheels 17 counts while LEAN CMD
+// wound to 16.6 deg. pwm = floor*(|u|/KNEE) + |u|, checked against the log --
+//     U 1.06 -> 17.9*0.424 + 1.06 =  8.6 -> PWML  8
+//     U 1.88 -> 17.9*0.752 + 1.88 = 15.3 -> PWML 15
+// Sustained effort ran |u| 0.5..1.9, so PWM sat at 8..15 against a breakaway of 18. The
+// wheel COULD NOT move, however long the stick was held; the inner loop tracked its lean
+// happily the whole time (ERR ~0.2) because the failure is downstream of it.
+// At 1.0 the same |u| 1.06 gives 17.9 + 1.06 = 19.0 and clears breakaway. Chosen as the
+// value where the OBSERVED sustained efforts clear the MEASURED floor -- not tuned by feel.
+// NOTE this is the opposite direction from what the old comment here implied, and lower
+// KNEE means HIGHER incremental gain near zero (floor/KNEE + 1 = 18.9, was 8.2). If a
+// limit cycle returns, do NOT simply raise this back: the principled fix is to ramp on the
+// LOW-PASSED |u| instead of the instantaneous one, so a sustained demand gets the whole
+// floor while a dithering one averages to nothing. That machinery already exists at
+// DRIVE_FRICTION_FF and is currently disabled.
+const float FLOOR_KNEE     = 1.0f;  // PWM-effort units
 
 // ---- Per-side stiction compensation ----------------------------------------
 // Every non-zero PID effort gets a static floor so the wheel actually moves.
