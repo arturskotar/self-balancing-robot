@@ -683,8 +683,8 @@ const float DRIVE_KVEL_MULTIPLIER = 1.0f;
 // widened 0.65 -> 1.00 in the same session; with the throttle back at 0.65 the forward lean
 // demand peaks near 13 deg and never reaches this cap. Nothing about the lean geometry
 // needed changing, and the pilot's ask was about throttle, not lean.
-// Kept from that excursion, because it was measured rather than assumed: the REAR backstop
-// is at PITCH -21.0 (disarmed settle, motors off, ten samples, RATE ~0). See LEAN_CLAMP_REAR.
+// One observation kept from that excursion, with its caveat: the chassis settled at PITCH
+// -21.0 on release, disarmed. That is a RELEASE settle, not a limit -- see LEAN_CLAMP_REAR.
 // The forward stop remains +30.53, so this 18 leaves TARGET at +14.78 with ~15.7 deg spare;
 // there is room here if a future change ever genuinely needs it.
 const float LEAN_CLAMP_FWD  = 18.0f; // deg : forward authority cap (stop is at +30.53)
@@ -725,13 +725,20 @@ const float LEAN_CLAMP_FWD  = 18.0f; // deg : forward authority cap (stop is at 
 // WHAT WOULD SETTLE IT: a SLOW deliberate push through the -17..-23 band, watching for
 // where resistance first appears, rather than a full-range sweep that flies past it.
 // Both previous sweeps were too fast in exactly this region.
-// 16 -> 14, 2026-08-15 (same day, reverting my own +2). The rear stop is now MEASURED, not
-// guessed, and it is tighter than any of the three figures that were in circulation:
-//   DISARMED, motors off (PWML 0 PWMR 0), the chassis settles at PITCH -21.0 +/- 0.15 and
-//   holds it for a full second with RATE ~0. Ten consecutive samples, MS 20340..21340.
-// That is the backstop. The file's old "~-19 soft contact" and the 2026-06 note's "-15.7"
-// are both wrong, as was my 16 (rear TARGET -19.22, and PITCH peaked -20.14 -- 0.9 deg off
-// the stop, i.e. touching down).
+// 16 -> 14, 2026-08-15 (same day, reverting my own +2). 14 is the value that flew; that
+// alone is sufficient reason to be back at it, independent of everything below.
+// OBSERVATION, NOT A MEASURED LIMIT: disarmed, motors off (PWML 0 PWMR 0), the chassis
+// settled at PITCH -21.0 +/- 0.15 and held it for a full second at RATE ~0 -- ten
+// consecutive samples, MS 20340..21340. At clamp 16 the rear TARGET is -19.22 and PITCH
+// peaked -20.14, within 0.9 deg of that.
+// ⚠️ DO NOT SIZE ANYTHING TO -21.0. It is a RELEASE settle, which is exactly the class of
+// measurement that produced the bogus -15.67 rear limit and cost most of a session: a rest
+// angle reached by letting the chassis go is wherever the torques happened to balance on
+// that release, not where the chassis stops. It can also be the tether, which has caused
+// four wrong conclusions on this robot. A real limit is where the chassis stops under a
+// slow deliberate push AND reproduces across sweeps. The prior two-sweep manual measurement
+// says the rear rest is PITCH -28.5, far beyond this. Until a push sweep reproduces -21,
+// treat it as an open question, not a number.
 // Confirmed independently by free-body arithmetic on the same flight: sustained PITCH -19.2
 // with VF 0.02 and POS moving 0.169 -> 0.163, six millimetres in 1.5 s. A free body at 19.2
 // deg accelerates backward at g*tan(19.2) = 3.4 m/s^2 = 3.8 m of travel over that interval.
