@@ -678,7 +678,16 @@ const float DRIVE_KVEL_MULTIPLIER = 1.0f;
 // NOT symmetric with the rear, on purpose: the chassis has 30.5 deg forward and ~19 to the rear
 // soft contact, and LEAN_CLAMP_REAR 14 already puts the rear TARGET at -17.2, i.e. nearly on
 // the stop. Forward has room to give; rear does not. See LEAN_CLAMP_REAR.
-const float LEAN_CLAMP_FWD  = 24.0f; // deg : forward authority cap (stop is at +30.53)
+// 24 -> 18, 2026-08-15: back to the value that flew. Raising it to 24 was a response to the
+// forward clamp saturating, but the saturation was an artefact of DRIVE_MAX_VEL having been
+// widened 0.65 -> 1.00 in the same session; with the throttle back at 0.65 the forward lean
+// demand peaks near 13 deg and never reaches this cap. Nothing about the lean geometry
+// needed changing, and the pilot's ask was about throttle, not lean.
+// Kept from that excursion, because it was measured rather than assumed: the REAR backstop
+// is at PITCH -21.0 (disarmed settle, motors off, ten samples, RATE ~0). See LEAN_CLAMP_REAR.
+// The forward stop remains +30.53, so this 18 leaves TARGET at +14.78 with ~15.7 deg spare;
+// there is room here if a future change ever genuinely needs it.
+const float LEAN_CLAMP_FWD  = 18.0f; // deg : forward authority cap (stop is at +30.53)
 // 12 -> 18 (2026-08-14). THE -15.67 SIT-DOWN WAS NOT REAL. A second manual sweep,
 // disarmed, back-to-front, measured the rear rest at PITCH -28.5 = LEAN ACT -25.3, held
 // steady for a full second -- and swept straight THROUGH -18.9 on the way up at 34-42
@@ -1280,7 +1289,17 @@ const float TARGET_VEL_SLEW = 0.70f; // rev/s^2 : cap on how fast the velocity D
 // resolution argument constrains the LOW end, not this. The machine already demonstrates
 // the headroom -- VF hit 0.86 during aggressive drive on 2026-08-15 while the target was
 // capped at 0.65, i.e. it overshoots the old cap under its own power.
-const float DRIVE_MAX_VEL  = 1.00f; // rev/s at full stick. Was 0.65. Original note: one encoder
+// 1.00 -> 0.65, 2026-08-15: reverting my own change, which misread the request. The pilot
+// asked to "reduce the range" and "increase the lower bound" of the THROTTLE. Raising the
+// top end WIDENS the range -- the opposite of what was asked -- and the request is served
+// by DRIVE_MIN_VEL alone: 0.65 top with a 0.30 floor is a span of 0.35, narrower than the
+// 0.65 span it replaces, with the slow end lifted out of the dither zone.
+// The wider range also had a knock-on that cost three commits to chase: a 1.00 rev/s demand
+// makes velError large enough to drive the outer loop into LEAN_CLAMP_FWD and hold it there,
+// which reads in telemetry exactly like a lean clamp that is set too low. It was not; the
+// clamp only became binding because of this line. Back at 0.65 the forward lean demand
+// peaks around 13 deg and the 18 deg cap has margin again.
+const float DRIVE_MAX_VEL  = 0.65f; // rev/s at full stick. Original note: one encoder
                                     // count per 5 ms tick is already 0.366 rev/s (546 counts/rev),
                                     // so 0.6 rev/s is only ~1.6 counts/tick of resolution. Raise
                                     // this after the x4 hardware QuadEncoder upgrade (2184 cpr).
