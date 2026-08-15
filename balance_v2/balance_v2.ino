@@ -707,7 +707,26 @@ const float OUT_DEADZONE   = 0.5f;  // ignore PD outputs smaller than this (PWM 
 // Sized against the observed ring: u swings +/-9 during a drive, so 5.0 softens more
 // than half of that amplitude while leaving the floor fully applied for real drive
 // efforts (9-30). Raise it if the 8 Hz ring persists; lower it if breakaway suffers.
-const float FLOOR_KNEE     = 5.0f;  // PWM-effort units
+// 5.0 -> 2.5. THE REAR BREAKAWAY DEAD ZONE. Clean tether-free reverse log: the stall
+// angle FOLLOWS THE COMMAND (clamp 18 parked at pitch -20.6, clamp 14 parks at -17.2),
+// which rules out the fixed rear contact I chased for several commits. What actually
+// happens is that the loop reaches its commanded lean, ERR falls to ~0, and there is
+// no effort left to break static friction with.
+// The arithmetic: pwm = deadband*(|u|/FLOOR_KNEE) + |u|, so at FLOOR_KNEE 5 the RIGHT
+// wheel needs |u| >= 3.7 just to reach its own 27-count static floor. In the stall |u|
+// oscillates 0.15..3.7 and flips sign every tick or two -- peak PWM measured 23 against
+// a breakaway of 27, never once reached. A ramped floor below the knee is by
+// construction incapable of breaking away: it is a dead zone of +/-3.7 effort.
+// Forward escapes it by breaking away early during the lean ramp-in, when ERR is still
+// large, after which the MOVING deadband is only 11/13.
+// 2.5 halves the dead zone to |u| >= 1.9 for the right wheel. NOT lower: the knee exists
+// because a floor applied as a STEP at the zero crossing has infinite incremental gain
+// and generated an 8 Hz limit cycle (see the note at DRIVE_FRICTION_FF). 2.5 keeps a
+// ramp, just a steeper one. If an 8 Hz buzz reappears at standstill, go back up.
+// The right wheel's 27 vs the left's 15 is the real asymmetry underneath this -- the
+// deadband sweep (DEADBAND_TEST, wheels off the ground) is what would decompose that
+// into BTS7960 turn-on delay vs actual friction, and it has still never been run.
+const float FLOOR_KNEE     = 2.5f;  // PWM-effort units
 
 // ---- Per-side stiction compensation ----------------------------------------
 // Every non-zero PID effort gets a static floor so the wheel actually moves.
