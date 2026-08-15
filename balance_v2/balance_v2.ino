@@ -120,7 +120,14 @@ const long ENC_COUNTS_PER_REV = 546;
 // RIGHT_DEADBAND_STATIC from each wheel's own first-move value. It does NOT
 // measure the *_MOVING floors -- those are the free-spin figures, taken with the
 // wheels off the ground. Then set this back to 0.
-#define DEADBAND_TEST 0
+// ENABLED 2026-08-14 to measure the right-vs-left breakaway asymmetry (27 vs 15) that
+// is the root of the rear stall -- see FLOOR_KNEE. Run at MOTOR_PWM_HZ 4482, then 2000,
+// then 1200, and fit: deadband = t_on * f_pwm * 256 + mechanical. Predicted driver-delay
+// term at t_on ~8 us is 9.2 / 4.1 / 2.5 counts respectively, so if the floors fall by
+// roughly that much the gap is BTS7960 turn-on delay and a lower PWM frequency fixes it;
+// if they barely move it is real friction and the answer is mechanical.
+// SET BACK TO 0 BEFORE FLYING -- this replaces the balance loop entirely.
+#define DEADBAND_TEST 1
 
 // ---- Burst logger ----------------------------------------------------------
 // 100 ms telemetry cannot resolve the drive oscillation: clean alternation every
