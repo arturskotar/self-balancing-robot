@@ -1459,7 +1459,36 @@ const float TURN_SIGN      = +1.0f; // flip to -1 if the turn stick steers the w
 // The lean no longer needs a launch push anyway: at Kpos 6 / KVEL_I 24 / LEAN_CLAMP 18
 // it reaches 17-18 deg on its own, which was not true when the FF was designed.
 // Anything rebuilt here must be SINGLE-SIGNED. Do not reintroduce opposing phases.
-#define DRIVE_FRICTION_FF 0
+//
+// ON AGAIN 2026-08-15, REBUILT SINGLE-SIGNED TO THAT RULE. The LAUNCH phase and the lean
+// gate are deleted from the source, not merely bypassed, so there is exactly one phase and
+// nothing left to misclassify. Everything the settled note above objects to is about the
+// GATE between two opposing phases; none of it applies to one phase.
+// Pilot, on why the clamp work was beside the point: "it doesn't matter what you put as a
+// clamped angles if the bot can't break away. and reach the requested angle." Right -- and
+// the log shows the angle is NOT the missing part. At the rear pin LEAN ACT holds
+// -13.5..-14.9 against LEAN CMD -14.00, so the requested lean is reached and tracked;
+// POS moves 0.005 -> 0.000 over seconds. The lean works, the translation does not.
+// Three things that were true when this was switched off are no longer true:
+//   1. LAUNCH is obsolete. It existed because the cascade could not build the lean itself.
+//      It can now, and the note above already says so.
+//   2. The wheel floors are no longer 15/27. That 12-count split is what made the bias and
+//      the PD cancel into OPPOSITE-SIGN wheels (a pure yaw command, no drive) in the first
+//      attempt. The EN wiring fault behind it was repaired and the floors are 18/18.
+//   3. The sign objection was against velError AT LAUNCH, where stiction resists the
+//      opposite motion. With no launch phase there is no such moment.
+// And the first attempt already proved this kills the jitter: "the oscillation vanished
+// (u smooth, |rate| <= 9, nothing at 9 Hz -- the floor really was what drove the limit
+// cycle)". It failed on direction, which is what is fixed here, not on the mechanism.
+// WHAT TO CHECK IN THE NEXT LOG, in order:
+//   * FFB should hold ONE sign for the whole gesture. Any alternation means this rebuild
+//     failed the single-signed rule and it goes straight back to 0.
+//   * PWML and PWMR should hold the same sign as each other. Opposite signs = failure 2
+//     above returning, and the floors are the first thing to re-measure.
+//   * RATE should drop from the current +/-25..30 toward <10, and PWM should stop swinging
+//     +/-20..25 about zero.
+//   * POS should actually advance. That is the whole point; jitter alone is not success.
+#define DRIVE_FRICTION_FF 1
 const float FRICTION_FF_LPF    = 0.98f; // ~0.64 Hz corner at 200 Hz: passes the demand,
                                         // rejects the ring (14x down at 9 Hz).
 const float FRICTION_FF_KNEE_U = 3.0f;  // effort units for ~76% of the floor. u reached
@@ -1661,7 +1690,11 @@ float leanCmd   = 0.0f;   // cascade outer-loop output: the desired lean (deg) a
 float velocityLeanI = 0.0f;
 float frictionUSlow = 0.0f;   // low-passed u; aims the friction floor (DRIVE_FRICTION_FF)
 bool  frictionLeanUp = false; // latched LAUNCH -> CRUISE phase for the friction floor
-float ffFloorFilt = 47.0f;    // slew-limited FF floor; starts at the stopped value
+// 47 -> 38: stale initializer. 47 was 27 (the old RIGHT_DEADBAND_STATIC) + FRICTION_FF_BOOST,
+// from before the EN wiring fault was repaired and the static deadbands re-measured at 18/18.
+// The disarm re-arm path already uses RIGHT_DEADBAND_STATIC + FRICTION_FF_BOOST, so this was
+// the one place still carrying the pre-fix number.
+float ffFloorFilt = 38.0f;    // slew-limited FF floor; starts at the stopped value (18 + 20)
 float plainFloorFilt = 18.0f; // same, for the no-FF path; starts at the STATIC figure so
                               // the first breakaway from rest is not under-compensated
 bool  integralRollingPrev = false;            // edge-detect stall -> rolling for the integral reset
@@ -2996,31 +3029,26 @@ void loop() {
   // only signal here that carries usable DC.
   float frictionFF = 0.0f;
 #if DRIVE_FRICTION_FF
+  // SINGLE-SIGNED, as the note at DRIVE_FRICTION_FF requires. The LAUNCH phase and the
+  // lean gate that selected it are GONE, not disabled -- with only one phase left there is
+  // no gate to misclassify and no full-amplitude reversal to chatter into.
+  // Why dropping LAUNCH is safe now: it existed to push the wheels backward to establish a
+  // forward lean, back when the cascade could not build the lean by itself. It can. The
+  // 2026-08-15 flight holds LEAN ACT -13.5..-14.9 against LEAN CMD -14.00 for seconds --
+  // the lean is established and tracked, and what is missing is purely translation.
+  // Why velError and not a low-passed u: u has no usable DC here. Across the stalled rear
+  // pin it runs -5.08 +8.21 -5.46 +6.16 -5.57 +7.43 -6.19 +6.90 ... and averages about
+  // +0.2, i.e. the dither is symmetric and a u-aimed bias would be ~0 -- no push at all.
+  // velError is the one signal with real DC in this state: VERR sits at -0.58 for seconds.
+  // SIGN_CFG: physical forward is NEGATIVE PWM effort, velError is POSITIVE when the robot
+  // still owes forward speed -- hence the negation. Checked against this log: reverse stick
+  // gives VERR -0.58, so frictionFF = -tanh(-0.58/knee) > 0 = positive PWM = physical
+  // backward. Correct direction.
   if (driving) {
-    // Phase gate: is the commanded lean actually ON THE BODY yet? Latched with
-    // hysteresis so the tracking ripple cannot flip it tick to tick.
-    float leanToward = driveDirection * (pitch - BALANCE_SETPOINT);
-    if      (leanToward >= FRICTION_FF_LEAN_DEG)  frictionLeanUp = true;
-    else if (leanToward <  FRICTION_FF_LEAN_DROP) frictionLeanUp = false;
-
-    if (frictionLeanUp) {
-      // CRUISE. The lean is established, so the wheels must roll FORWARD to turn it
-      // into travel. velError is the sustained one-sided signal here (+0.23..+0.33 for
-      // seconds in the bench log) and it fades on its own as the speed is reached.
-      // SIGN_CFG: physical forward is NEGATIVE PWM effort, velError is POSITIVE when
-      // the robot still owes forward speed -- hence the negation.
-      frictionFF = -tanhf(velError / FRICTION_FF_KNEE_V);
-      frictionUSlow = 0.0f;   // stale on re-entry to LAUNCH; rebuild it from scratch
-    } else {
-      // LAUNCH. The lean is not up yet, and it is established by rolling the wheels
-      // BACKWARD, which is where u points. No negation -- u already carries the sign.
-      frictionUSlow = FRICTION_FF_LPF * frictionUSlow + (1.0f - FRICTION_FF_LPF) * u;
-      frictionFF = tanhf(frictionUSlow / FRICTION_FF_KNEE_U);
-    }
-  } else {
-    frictionUSlow  = 0.0f;   // no carry-over into the next drive gesture
-    frictionLeanUp = false;  // every gesture starts in LAUNCH
+    frictionFF = -tanhf(velError / FRICTION_FF_KNEE_V);
   }
+  frictionUSlow  = 0.0f;   // LAUNCH is gone; kept zeroed so nothing stale can be read
+  frictionLeanUp = driving;// FFP telemetry now just means "FF active", one phase only
 #endif
   controlLog.frictionFF = frictionFF;
   controlLog.frictionLeanUp = frictionLeanUp;
