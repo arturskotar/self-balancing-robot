@@ -155,7 +155,7 @@ const long ENC_COUNTS_PER_REV = 546;
 // Post-EN-fix re-measure is COMPLETE (moving 10/10, static 18/18) and the flag is back
 // to 0. deadbandDetect changed after that run, so the next loaded run is a confirmation
 // with the twitch artefact removed -- worth one pass before trusting 18 to a decimal.
-#define DEADBAND_TEST 1
+#define DEADBAND_TEST 0
 // +1 = positive PWM = physical BACKWARD (all existing deadband figures). -1 = FORWARD.
 // This is the sign of the FIRST pass only; the test alternates every pass. See the
 // caveat at LEFT_DEADBAND_MOVING.
@@ -1505,6 +1505,8 @@ float velocityLeanI = 0.0f;
 float frictionUSlow = 0.0f;   // low-passed u; aims the friction floor (DRIVE_FRICTION_FF)
 bool  frictionLeanUp = false; // latched LAUNCH -> CRUISE phase for the friction floor
 float ffFloorFilt = 47.0f;    // slew-limited FF floor; starts at the stopped value
+float plainFloorFilt = 18.0f; // same, for the no-FF path; starts at the STATIC figure so
+                              // the first breakaway from rest is not under-compensated
 bool  integralRollingPrev = false;            // edge-detect stall -> rolling for the integral reset
 unsigned long lastControlMicros = 0;
 int controlHz = 0;   // measured control-loop frequency (should read ~200; if lower, we're falling behind)
@@ -1786,9 +1788,17 @@ void motorPerWheel(int pwmL, int pwmR) {
 // ffBias (-1..+1, see DRIVE_FRICTION_FF) aims the floor at the outer loop's SUSTAINED
 // demand instead of at the sign of this tick's effort. At 0 this is the original map
 // exactly, so standing balance is unchanged.
-int mapEffortToPwm(float effort, float ffBias, float ffFloor, bool moving,
-                   int dbMoving, int dbStatic) {
-  int deadband = moving ? dbMoving : dbStatic;
+// plainFloor is the CONTINUOUS blend of the static and moving figures (see
+// driveControlDiff). It replaces the binary `moving ? dbMoving : dbStatic` this function
+// used to do for itself -- that gate chattered at the loop rate and square-waved the
+// floor. 2026-08-15 flight, consecutive telemetry samples with the wheels barely turning:
+//     DBL 10M DBR 10M  ->  DBL 18S DBR 18S  ->  DBL 10M DBR 18S  ->  DBL 18S DBR 10M
+// an 8-count step in the floor every tick, on both wheels, independently. The continuous
+// ffRoll blend that fixes exactly this was already built -- but only the ffBias branch
+// below ever used it, and with DRIVE_FRICTION_FF 0 that branch is inert, so the chattering
+// gate was the live path the whole time. Same bug as the one fixed at FF_FLOOR_LPF, in the
+// other half of the function.
+int mapEffortToPwm(float effort, float ffBias, float ffFloor, float plainFloor) {
   if (ffBias != 0.0f) {
     // One-sided friction compensation plus the raw PD effort. An effort that averages
     // to zero now averages to the bias, not to a relay twice its own amplitude.
@@ -1809,7 +1819,7 @@ int mapEffortToPwm(float effort, float ffBias, float ffFloor, bool moving,
   // gets the whole floor, and drive efforts run 9-30.
   float ramp = fabs(effort) / FLOOR_KNEE;
   if (ramp > 1.0f) ramp = 1.0f;
-  int pwm = (int)constrain((float)deadband * ramp + fabs(effort), 0.0f, (float)MAX_PWM);
+  int pwm = (int)constrain(plainFloor * ramp + fabs(effort), 0.0f, (float)MAX_PWM);
   return effort > 0.0f ? pwm : -pwm;
 }
 
@@ -1844,10 +1854,21 @@ void driveControlDiff(float uL, float uR, float ffBias, float ffRoll) {
   float ffFloorTarget = (fStatic + FRICTION_FF_BOOST) * (1.0f - ffRoll) + fMoving * ffRoll;
   ffFloorFilt = FF_FLOOR_LPF * ffFloorFilt + (1.0f - FF_FLOOR_LPF) * ffFloorTarget;
   float ffFloor = ffFloorFilt;
-  // wheelMoving still governs the plain sign-of-u path (no FF), where the floor only
-  // augments |effort| and a step in it cannot reverse the command.
-  int pwmL = mapEffortToPwm(uL, ffBias, ffFloor, wheelMovingL, LEFT_DEADBAND_MOVING,  LEFT_DEADBAND_STATIC);
-  int pwmR = mapEffortToPwm(uR, ffBias, ffFloor, wheelMovingR, RIGHT_DEADBAND_MOVING, RIGHT_DEADBAND_STATIC);
+  // THE PLAIN PATH GETS A CONTINUOUS FLOOR TOO (2026-08-15). The old claim here was that
+  // wheelMoving could keep governing this path because "the floor only augments |effort|
+  // and a step in it cannot reverse the command". True in isolation, and still beside the
+  // point: the floor is multiplied by the ramp and added to |effort|, so an 8-count step
+  // in it is an 8-count step in PWM at constant effort, and the gate chatters every tick.
+  // Combined with the sign flip of a limit cycle that is a +/-21 square wave into a wheel
+  // trying to break away -- see mapEffortToPwm for the log. Blend on measured speed like
+  // the FF path does: same ffRoll, same LPF, no gate, nothing to chatter.
+  // ONE FLOOR FOR BOTH WHEELS is now exactly right rather than a compromise: the deadbands
+  // were re-measured symmetric (10/10 moving, 18/18 static), so a common floor injects no
+  // differential at all.
+  float plainTarget = fStatic * (1.0f - ffRoll) + fMoving * ffRoll;
+  plainFloorFilt = FF_FLOOR_LPF * plainFloorFilt + (1.0f - FF_FLOOR_LPF) * plainTarget;
+  int pwmL = mapEffortToPwm(uL, ffBias, ffFloor, plainFloorFilt);
+  int pwmR = mapEffortToPwm(uR, ffBias, ffFloor, plainFloorFilt);
   motorPerWheel(pwmL, pwmR);
 }
 
@@ -2246,6 +2267,7 @@ void loop() {
     frictionUSlow = 0.0f;
     frictionLeanUp = false;
     ffFloorFilt = (float)RIGHT_DEADBAND_STATIC + FRICTION_FF_BOOST;  // re-arm stopped
+    plainFloorFilt = (float)RIGHT_DEADBAND_STATIC;                   // ditto, no boost
     turnCmdLog = 0.0f;
     controlLog.targetPitch = BALANCE_SETPOINT;
     controlLog.pTerm = controlLog.iTerm = 0.0f;
@@ -2966,10 +2988,13 @@ void telemetry(float error, float rate, float u) {
   // DRIVE_LAUNCH_ASSIST went to 0, and misleading (it is not a start ANGLE).
   Serial.print(" FALLDEG "); Serial.print(FALL_CUTOFF_DEG, 1);
   Serial.print(" GBIAS "); Serial.print(gyroYBias, 2);
-  // Floors actually in force this tick (M = moving/Coulomb, S = static breakaway).
-  Serial.print(" DBL "); Serial.print(wheelMovingL ? LEFT_DEADBAND_MOVING : LEFT_DEADBAND_STATIC);
-  Serial.print(wheelMovingL ? "M" : "S");
-  Serial.print(" DBR "); Serial.print(wheelMovingR ? RIGHT_DEADBAND_MOVING : RIGHT_DEADBAND_STATIC);
+  // DBF is the floor ACTUALLY in force this tick: one continuous blended value for both
+  // wheels now, so it can be read as a number rather than decoded from a chattering
+  // M/S gate. It should slew between the moving and static figures, never step.
+  // wheelMovingL/R are still shown (MV) because they remain the raw evidence of how
+  // violently the old gate was chattering -- but nothing in the PWM path reads them.
+  Serial.print(" DBF "); Serial.print(plainFloorFilt, 1);
+  Serial.print(" MV "); Serial.print(wheelMovingL ? "M" : "S");
   Serial.print(wheelMovingR ? "M" : "S");
   Serial.print(" PWMHZ "); Serial.print(MOTOR_PWM_HZ);
   Serial.print(" SET "); Serial.println(sweepIdx + 1);
