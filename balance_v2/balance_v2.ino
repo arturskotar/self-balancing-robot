@@ -951,7 +951,25 @@ const float OUT_DEADZONE   = 0.5f;  // ignore PD outputs smaller than this (PWM 
 // The fix has to use TIME: ramp on the LOW-PASSED |u| so a sustained demand earns the
 // whole floor and a dithering one earns none. That machinery is at DRIVE_FRICTION_FF and
 // is disabled. Do not touch FLOOR_KNEE again as a breakaway lever.
-const float FLOOR_KNEE     = 2.5f;  // PWM-effort units
+// 2.5 -> 5.0, 2026-08-15. 5.0 is the value in tag v2-drive-works, i.e. the last build where
+// drive actually worked, and we never came back to it. The 2.5 was reached by going 2.5 ->
+// 1.0 (pilot: "made it worse. To jittery, can't break away") and then "reverting" -- but the
+// revert landed on 2.5, not on the 5.0 that flew. So the knee has been below its known-good
+// value this whole session while I looked for the jitter elsewhere.
+// It is also the right lever on paper. This knee sets the incremental gain at the zero
+// crossing, which the notes in mapEffortToPwm and DRIVE_GAIN_SCHEDULE both name as the
+// limit-cycle generator: gain = floor/FLOOR_KNEE + 1.
+//     knee 1.0 -> 19.0   (flown, clearly worse)
+//     knee 2.5 ->  8.2   (current, jitters)
+//     knee 5.0 ->  4.6   (tag value, drive worked)
+// The trend across the two flown points already runs the right way; 5.0 continues it and is
+// the only point on the line with evidence FOR it rather than against.
+// Note the floor itself moved 15/27 -> 18/18 since the tag, so 5.0 is not a literal restore
+// of the old gain (it was 15/5+1 = 4.0 on the left wheel then, 4.6 now) -- close enough that
+// the tag's behaviour should reappear if the knee is what matters.
+// Cost of a larger knee: full friction compensation arrives later, |effort| must reach 5.0
+// rather than 2.5 for the whole floor. Drive efforts run 9-30, so this costs nothing there.
+const float FLOOR_KNEE     = 5.0f;  // PWM-effort units
 
 // ---- Per-side stiction compensation ----------------------------------------
 // Every non-zero PID effort gets a static floor so the wheel actually moves.
