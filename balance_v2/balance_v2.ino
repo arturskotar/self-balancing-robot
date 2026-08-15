@@ -562,7 +562,23 @@ const float DRIVE_KVEL_MULTIPLIER = 1.0f;
 // to the -15.67 sit-down. If forward pins at 18 under Vmax 0.90 there is room to ~24
 // before the geometry bites, but do not go there without a CLEAN log showing 18 saturating.
 const float LEAN_CLAMP_FWD  = 18.0f; // deg : forward authority cap (stop is at +30.53)
-const float LEAN_CLAMP_REAR = 12.0f; // deg : rear authority cap (SITS DOWN at -15.67)
+// 12 -> 18 (2026-08-14). THE -15.67 SIT-DOWN WAS NOT REAL. A second manual sweep,
+// disarmed, back-to-front, measured the rear rest at PITCH -28.5 = LEAN ACT -25.3, held
+// steady for a full second -- and swept straight THROUGH -18.9 on the way up at 34-42
+// deg/s with no pause. The -15.67 that this clamp was sized against was a dynamic settle
+// in the earlier sweep, taken during the period when the tether was fouling the right
+// wheel, not a hard contact. Forward agrees across both sweeps (+30.53 / +29.97), which
+// is what made the rear disagreement easy to miss.
+// Corroborating evidence I should have weighted higher at the time: 18 ran for weeks of
+// logs without ever sitting the robot down, and the reported regression after cutting to
+// 12 was exactly "it falls and can't recover" plus "dead angles are too narrow".
+// Restored symmetric with LEAN_CLAMP_FWD. Rear room is ~25 deg, so 18 leaves ~7 deg of
+// margin for the 2.78 deg of measured overshoot -- comfortable, and the same margin the
+// forward side has always run with.
+// LESSON: a rest angle reached by RELEASING the chassis is not a limit. It is wherever
+// the torques happened to balance on that entry. A limit is where it STOPS on a slow
+// deliberate push, and it must reproduce across sweeps before anything gets sized to it.
+const float LEAN_CLAMP_REAR = 18.0f; // deg : rear authority cap (rear rest is at -25.3)
 // 0.99 -> 0.97 (tau 0.50 s -> 0.17 s, pole 2 -> 6 rad/s). The velocity loop
 // crosses over near 2.5 rad/s, so the old 2 rad/s pole sat essentially ON the
 // crossover and ate ~51 deg of phase exactly where it hurt. That lag is what
