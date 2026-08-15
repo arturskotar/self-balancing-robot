@@ -1112,7 +1112,13 @@ const float FALL_CUTOFF_DEG = 45.0f; // trip the fall latch: |pitch| beyond this
 // aggressive drive and latch the motors off mid-run. Still well under FALL_CUTOFF_DEG.
 const float         RECOVERY_GIVEUP_DEG   = 32.0f; // deg of error that counts as "still down"
 const unsigned long RECOVERY_GIVEUP_TICKS = 400;   // 2 s at 200 Hz, then give up and latch
-const float FALL_REARM_DEG  = 8.0f;  // re-arm ONLY when the absolute accel angle is back within this of
+// 8 -> 12 (2026-08-14): "it disables and doesn't read commands at all until I physically
+// push it". This is the angle that made it stay dead. Once `fallen` latches, NOTHING
+// re-arms until the accel angle is back inside this window, and 8 deg is tight enough
+// that the robot has to be held almost perfectly upright to clear it. 12 still requires
+// a deliberate stand-up -- the rear sit-down is 15.67 and the forward stop 30.53, so a
+// robot that is actually down reads far outside 12 and cannot self-clear by lying there.
+const float FALL_REARM_DEG  = 12.0f; // re-arm ONLY when the absolute accel angle is back within this of
                                      // the setpoint -- a gyro-drifting pitch estimate on its back can't
                                      // restart the motors, only physically standing it up does.
 
