@@ -863,6 +863,29 @@ const float DRIVE_MAX_VEL  = 0.65f; // rev/s at full stick. Conservative on purp
                                     // count per 5 ms tick is already 0.366 rev/s (546 counts/rev),
                                     // so 0.6 rev/s is only ~1.6 counts/tick of resolution. Raise
                                     // this after the x4 hardware QuadEncoder upgrade (2184 cpr).
+// TURN MIXER PRIORITY (2026-08-14). Turning is differential -- effortL = u + turnCmd,
+// effortR = u - turnCmd -- so the fore-aft force, which is the SUM, is exactly 2u and
+// the turn cancels out of the pitch axis entirely. That is why turning has never upset
+// the balancer. BUT THE CANCELLATION ONLY HOLDS WHILE NEITHER WHEEL SATURATES.
+// The moment one wheel hits MAX_PWM, the clip is ONE-SIDED: u + turnCmd is truncated
+// and u - turnCmd is not, the sum stops being 2u, and the turn differential leaks into
+// COMMON MODE -- i.e. becomes a direct pitch disturbance, arriving exactly when the loop
+// has no authority left to reject it. Wheel RPM saturation does the same thing: past the
+// motor's speed limit extra PWM buys no extra torque, so the outer wheel silently stops
+// following its command. Reported symptom: spinning near max revs leaves no wheel speed
+// to plant a lean, so a reverse command cannot tip the body back at all.
+// Budget arithmetic that says this is real, not theoretical: DRIVE_MAX_VEL 0.65 plus the
+// ~0.5 rev/s of rotation seen in VROT traces asks the outer wheel for 1.15 rev/s, and the
+// highest wheel speed in ANY log is ~1.0 (the brake surge). Over-subscribed on paper.
+// Fix is mixer priority, the same rule flight controllers use for attitude vs yaw:
+//   (a) PWM budget  -- turn is clamped to whatever MAX_PWM headroom u has not taken, so
+//       the one-sided clip that breaks the cancellation can never happen;
+//   (b) speed budget -- turn fades as forward speed rises, so rotation cannot spend the
+//       RPM a lean needs. At rest the fade is 1.0, so spin-in-place is untouched.
+// Both only ever REDUCE |turnCmd| toward zero. Turn is never reversed, never boosted, and
+// yaw stays a stable decoupled axis -- so this cannot become the friction-FF failure.
+#define TURN_HEADROOM_LIMIT 1
+const float TURN_SPEED_FADE = 0.50f; // fraction of turn authority given up at full speed
 const float TURN_AUTHORITY = 25.0f; // PWM-effort differential at full turn stick
 const float DRIVE_STICK_DEADZONE = 0.15f;
 const float TURN_STICK_DEADZONE  = 0.30f; // measured cross-axis reaches ~0.25 during straight drive
@@ -2323,8 +2346,18 @@ void loop() {
   controlLog.frictionFF = frictionFF;
   controlLog.frictionLeanUp = frictionLeanUp;
 
-  controlLog.effortL = u + turnCmd;
-  controlLog.effortR = u - turnCmd;
+  // Balance has priority over turn; turn spends only what is left. See TURN_AUTHORITY.
+  float turnMix = turnCmd;
+#if TURN_HEADROOM_LIMIT
+  float pwmHeadroom = (float)MAX_PWM - fabs(u);            // (a) keep u + turn off the clip
+  if (pwmHeadroom < 0.0f) pwmHeadroom = 0.0f;
+  turnMix = constrain(turnMix, -pwmHeadroom, pwmHeadroom);
+  float speedFrac = constrain(fabs(forwardVel) / DRIVE_MAX_VEL, 0.0f, 1.0f);
+  turnMix *= (1.0f - TURN_SPEED_FADE * speedFrac);         // (b) leave RPM for the lean
+#endif
+  turnCmdLog = turnMix;   // TEFF reports what was APPLIED, not what the stick asked for
+  controlLog.effortL = u + turnMix;
+  controlLog.effortR = u - turnMix;
   // Continuous stopped->rolling blend for the FF floor. NOT gated on wheelMoving: that
   // flag toggles at encoder-noise level and square-waved the floor. See driveControlDiff.
   float ffRoll = constrain(fabs(forwardVel) / FRICTION_FF_ROLL_VEL, 0.0f, 1.0f);
