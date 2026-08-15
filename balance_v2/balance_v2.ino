@@ -153,6 +153,9 @@ const long ENC_COUNTS_PER_REV = 546;
 // if they barely move it is real friction and the answer is mechanical.
 // SET BACK TO 0 BEFORE FLYING -- this replaces the balance loop entirely.
 #define DEADBAND_TEST 0
+// +1 = positive PWM = physical BACKWARD (all existing deadband figures). -1 = FORWARD,
+// never yet measured. See the caveat at LEFT_DEADBAND_MOVING.
+const int DEADBAND_TEST_SIGN = 1;
 
 // ---- Burst logger ----------------------------------------------------------
 // 100 ms telemetry cannot resolve the drive oscillation: clean alternation every
@@ -1674,7 +1677,14 @@ void deadbandTestLoop() {
 
   if ((movedL && movedR) || pwm >= MAX_PWM) { motorRaw(0); return; }  // done: stop ramping
   pwm++;
-  motorRaw(pwm);
+  // DEADBAND_TEST_SIGN +1 ramps positive PWM = physical BACKWARD (see motorRaw). Every
+  // deadband figure in this file was taken that way, so FORWARD has never been measured.
+  // mapEffortToPwm applies ONE constant per wheel to BOTH signs, so if breakaway differs
+  // by direction -- backlash, gearbox preload -- one direction is mis-compensated with no
+  // way to express it. Mirrored motors make that a robot-level fwd/rev asymmetry, because
+  // each motor runs in its opposite local direction between the two. Set to -1 and re-run
+  // to get the forward figures; the printed numbers stay magnitudes either way.
+  motorRaw(DEADBAND_TEST_SIGN * pwm);
 }
 
 // IMU sign/axis check: motors off, stream the accel-pitch and all three gyro
