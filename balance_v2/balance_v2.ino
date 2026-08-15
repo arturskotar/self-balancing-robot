@@ -61,6 +61,22 @@ MPU9250 imu;
 // SWEEP IN PROGRESS 2026-08-14 -- 4482 measured free-spin L@13 R@12 and L@14 R@13 on a
 // repeat, so repeatability is +/-1 count. Now at 2000; 1200 next. RESTORE TO 4482 unless
 // the sweep says otherwise, and never raise it (see the note above about turn-on delay).
+// SWEEP RESULTS (free-spin breakaway, wheels off the ground, positive PWM = backward):
+//         L     R
+//   4482  13    12    (repeat 14 / 13, so repeatability is +/-1 count)
+//   2000  11     9
+//   1200  21     8    <- R lands exactly on the predicted 8; L is NOT monotonic
+// A floor cannot RISE as frequency falls, so L@21 is a bad sample, not a measurement.
+// UNRESOLVED, and it blocks interpreting any of this: at 1200 the log shows dL -14
+// (barely moved) and dR -358 (spun freely), but the pilot saw the RIGHT wheel barely
+// move. If the encoder channels are mislabelled then every left/right constant in this
+// file is attached to the wrong wheel. DO NOT TUNE DEADBANDS UNTIL THAT IS SETTLED.
+// Conclusions that survive either way:
+//   - the 15/27 LOADED asymmetry is not electrical. Off the ground both wheels break
+//     within a count of each other at every frequency, so no PWM change narrows it.
+//   - fitting dt = 1/(f*256) gives t_on ~4-5.5 us, not the ~8 us assumed from the
+//     datasheet, so frequency buys ~3 counts of floor rather than ~7. The remaining
+//     6-9 counts are real unloaded mechanical friction. FLOOR_KNEE 2.5 stays.
 const int MOTOR_PWM_HZ = 1200;   // do NOT raise without re-running DEADBAND_TEST
 const int MOTOR_PWM_BITS = 8;    // analogWrite range is explicitly 0..255 on every channel
 
