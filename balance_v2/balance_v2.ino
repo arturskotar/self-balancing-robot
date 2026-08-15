@@ -152,10 +152,80 @@ const long ENC_COUNTS_PER_REV = 546;
 // roughly that much the gap is BTS7960 turn-on delay and a lower PWM frequency fixes it;
 // if they barely move it is real friction and the answer is mechanical.
 // SET BACK TO 0 BEFORE FLYING -- this replaces the balance loop entirely.
+// Post-EN-fix re-measure is COMPLETE (moving 10/10, static 18/18) and the flag is back
+// to 0. deadbandDetect changed after that run, so the next loaded run is a confirmation
+// with the twitch artefact removed -- worth one pass before trusting 18 to a decimal.
 #define DEADBAND_TEST 0
-// +1 = positive PWM = physical BACKWARD (all existing deadband figures). -1 = FORWARD,
-// never yet measured. See the caveat at LEFT_DEADBAND_MOVING.
+// +1 = positive PWM = physical BACKWARD (all existing deadband figures). -1 = FORWARD.
+// This is the sign of the FIRST pass only; the test alternates every pass. See the
+// caveat at LEFT_DEADBAND_MOVING.
 const int DEADBAND_TEST_SIGN = 1;
+// MULTI-PASS, 2026-08-15. One flash and one power-up runs DEADBAND_TEST_PASSES ramps
+// with the sign alternating each pass, then prints a summary table.
+//
+// IT HAS ALREADY ANSWERED THE QUESTION IT WAS BUILT FOR -- see LEFT_DEADBAND_MOVING for
+// the numbers. Direction is not a variable and the free-spin floor is ~10 on both
+// wheels. Kept because any future deadband claim needs a distribution, not a sample.
+//
+// WHY REPEATS: repeatability stopped being an assumption and became the measurement.
+// A +1 run came back L@21 R@8 where the 2000 Hz sweep recorded L@11 R@9 -- and
+// L@21 / R@8 / dR ~ -360 is a replay of the 1200 Hz line that ac0b305 discarded as a
+// bad sample on the grounds that a floor cannot rise as frequency falls. Two events
+// looked like a bimodal left channel, which would have made the "+/-1 count" premise
+// under every deadband figure in this file false. Six passes said otherwise: L@21 did
+// not reproduce, and each wheel's spread is 2-4 counts. A single ramp cannot tell an
+// outlier from a regime. Three per direction can.
+//
+// WHY ALTERNATE rather than run a block of + then a block of -: a block comparison
+// confounds direction with anything that drifts across the session (motor warming,
+// battery sag). Alternating puts both directions on the same drift.
+//
+// Each pass re-seeds after the rotor has coasted to a stop, so the passes also sample
+// different rotor rest positions -- which is the standing hypothesis for the left
+// channel: a commutator dead spot, where breakaway depends on where the rotor stopped.
+// If that is what this is, the answer is neither a deadband constant nor a mechanical
+// hunt, and per-direction constants would be fitting a number to a coin flip.
+//
+// >>> RESOLVE THE ENCODER CHANNEL LABELS FIRST (ENCODER_TEST). ac0b305 is still
+// >>> blocking: the pilot saw the RIGHT wheel barely moving while the log said dL
+// >>> stuck / dR spinning, and this run reproduced that too. If the channels are
+// >>> swapped, every L/R constant here is on the wrong wheel and these passes will
+// >>> just mislabel a real result.
+const int DEADBAND_TEST_PASSES   = 6;      // 3 per direction
+const int DEADBAND_TEST_DWELL_MS = 1500;   // coast-down between passes, motors off
+
+// ---- Idle-brake experiment --------------------------------------------------
+// The two bridges idle in OPPOSITE states -- left coasts, right brakes; see the
+// retraction block at LEFT_DEADBAND_MOVING. The BTS7960 enable pins are not wired to
+// the MCU, so the RIGHT cannot be made to coast. The reverse IS reachable in firmware:
+// driving BOTH inputs of a BTS7960 HIGH puts both outputs at VCC, shorting the motor
+// just as both-LOW shorts it to ground. Either way it is a brake, and it works whether
+// that module's enables are strapped high or follow the inputs -- which is what makes
+// this testable without knowing the left module's jumpering.
+// NOT shoot-through: each half-bridge drives one FET, the halves are independent, and
+// a stationary motor generates no back-EMF so a braked idle draws no current.
+//
+// SUPERSEDED 2026-08-15: the EN wiring was found and fixed, both bridges now idle in
+// the same state, and the asymmetry this was built to explain is gone. Kept because it
+// is still the only way to A/B brake-vs-coast from firmware -- if a limit cycle wants
+// passive damping later, or if the two wheels now both COAST and breakaway needs help,
+// this is the lever. The original framing follows.
+//
+// THE TEST: set to 1, run DEADBAND_TEST LOADED, and read the LEFT static figures.
+//   climbs from ~13 toward the right's ~24 -> brake drag is worth ~11 counts of
+//     breakaway, the 13-vs-24 asymmetry is explained, and nothing is mechanically wrong
+//   does not move                          -> the brake is not the mechanism and the
+//     24 still needs an explanation
+// A second effect rides along and this test cannot separate it: with the enables
+// following the inputs the left also uses FAST decay during PWM off-time while the
+// right uses SLOW decay, which changes torque per unit duty independently of anything
+// at rest. If the left static moves but not all the way, suspect both are in play.
+//
+// EXPERIMENT ONLY, SET BACK TO 0. Braking both wheels IS symmetric and would kill the
+// veer, but it doubles down on the stiction wall this whole file is fighting. With the
+// enables unreachable the shipped mitigation stays the per-side constants.
+#define LEFT_IDLE_BRAKE 0
+const int MOTOR_PWM_FULL = 255;            // MOTOR_PWM_BITS 8 -> full-scale count
 
 // ---- Burst logger ----------------------------------------------------------
 // 100 ms telemetry cannot resolve the drive oscillation: clean alternation every
@@ -818,9 +888,108 @@ const float FLOOR_KNEE     = 2.5f;  // PWM-effort units
 // the right wheel 12 more PWM than the left. If a mechanical fix brings the right
 // side back near 15, re-run this test and lower it.
 //
-// CAVEAT: DEADBAND_TEST ramps positive PWM only, so these are one-direction
-// figures. Breakaway can differ by direction (backlash, gearbox preload), and the
-// turn logs hint that it does. Worth measuring both ways eventually.
+// DIRECTION IS NOT A VARIABLE. Settled 2026-08-15, 6 interleaved free-spin passes:
+//               L                    R
+//   back(+1)    12, 11, 10  -> 11.0   9, 11, 9  -> 9.7
+//   fwd (-1)     9,  8, 12  ->  9.7   9, 10, 9  -> 9.3
+// All 12 samples lie in 8..12. Each wheel's OWN spread (2-4 counts) exceeds the
+// fwd/rev difference (1.3 on L, 0.3 on R) and the ranges overlap in both directions,
+// so the fwd/rev gap is not resolvable above the noise. mapEffortToPwm keeps ONE
+// constant per wheel for both signs; a per-sign floor would be fitting a constant to
+// noise. Do not reopen this without a measurement that beats +/-2 counts.
+// The old caveat here (backlash/gearbox preload, "the turn logs hint that it does")
+// and the mirrored-motor argument in a06ce6c are both answered: NO.
+//
+// L@21 DID NOT REPRODUCE. Six passes, max L is 12. The two historical L@21 events
+// (1200 Hz sweep, and one 2000 Hz run) are a rare excursion -- 2 in 8 backward ramps,
+// 0 in 3 here -- not a bimodal constant. Nothing to compensate; noted so the next
+// person who meets one knows it is a known rare event and not a new regime.
+//
+// LEFT AND RIGHT ARE THE SAME WHEEL OFF THE GROUND: ~10 counts, both channels, both
+// directions, now across three independent free-spin datasets. The 9/10 MOVING split
+// below is BELOW the resolution of the measurement -- it is not evidence of a real
+// difference, and nothing should be built on top of it.
+// So the loaded 13-vs-24 asymmetry is LOAD-DEPENDENT: it appears only with the
+// robot's weight through the gearbox and vanishes free-spinning. Not electrical
+// (frequency sweep), not directional (this test), and not the rig -- pilot confirms
+// no hand side-load during the loaded runs (2026-08-15).
+//
+// ⚠️ NOT MECHANICAL. RETRACTED 2026-08-15, and the 2026-08-13 "suspect a MECHANICAL
+// fault on the right drivetrain" warning above goes with it. Pilot, hands on the
+// hardware: the right wheel is tighter to turn by hand ONLY WHEN THE ROBOT IS POWERED.
+// Power off, both wheels spin the same. Friction does not switch off with the battery.
+//
+// That is ELECTROMAGNETIC BRAKING. A motor spun by hand is a generator; short its
+// terminals and the current produces drag, leave them open and it coasts. On a BTS7960
+// both inputs LOW pulls both outputs low, shorting the motor -- brake. Kill the supply
+// and both bridges go high-impedance, so both wheels coast and feel identical. Exactly
+// the reported behaviour.
+//
+// The firmware idle state is SYMMETRIC -- motorRaw(0) and motorWriteWheel(pwm 0) both
+// write 0 to all four pins -- so the asymmetry is downstream of this file: enable (INH)
+// wiring, a bridge module difference, or a supply/ground fault on one channel.
+//
+// ISOLATED 2026-08-15, pilot by hand: LEFT had no drag either powered or unpowered.
+// RIGHT dragged only when powered. Two identical bridges idling in OPPOSITE states.
+// Both inputs low brakes ONLY if the enable pins are held high, so one module's
+// R_EN/L_EN were not doing what the other's were.
+//
+// ✅ FOUND AND FIXED 2026-08-15 (pilot): it was the EN wiring. Both wheels now behave
+// identically when powered.
+//
+// ⚠️⚠️ THEREFORE EVERY DEADBAND CONSTANT BELOW IS STALE. All of them -- 9/10 moving,
+// 13/24 static, and the 11/13 and 15/27 figures they descend from -- were measured
+// with one bridge braking at idle and the other coasting. The measurements were not
+// wrong, but the machine they described no longer exists.
+// The 13-vs-24 split is the urgent one: it now hands the right wheel 11 counts of PWM
+// to overcome a brake that has been removed. That is a real differential injected into
+// a balancing robot, and it will veer. DO NOT FLY until both are re-measured.
+// It also retires the last of the mechanical-fault thread: there was never anything
+// wrong with the right drivetrain, and the 2026-08-13 warning about a "MECHANICAL
+// fault ... over-tight hub, rubbing tire, misaligned motor mount" was chasing a jumper.
+//
+// RE-MEASURE BOTH, 6-pass -- BOTH DONE 2026-08-15:
+//   1. ✅ OFF THE GROUND -> *_MOVING, both 10.
+//   2. ✅ LOADED         -> *_STATIC, both 18. The 13-vs-24 split did not survive.
+// Consequences to walk through before flying, because three things were tuned against
+// an asymmetry that is no longer in the machine:
+//   - MAX_DEADBAND drops 24 -> 18, so the saturation-latch ceiling moves:
+//     SAT_EFFORT_FRAC*(MAX_PWM-MAX_DEADBAND) goes 81.7 -> 87.4, and the 78.85 quoted
+//     at FALL_CUTOFF_DEG was staler still (it dated from RIGHT_DEADBAND_STATIC 27).
+//     A DIFFERENT trip point, on top of the Kp-vs-Kpeff bug already open in that latch.
+//   - FLOOR_KNEE 2.5 sets incremental gain deadband/FLOOR_KNEE + 1, which was 10.6 on
+//     the right wheel and is now 8.2 on both. It was chosen against the limit cycle the
+//     old asymmetry produced.
+//   - driveControlDiff's one-floor-for-both-wheels fix exists because per-wheel floors
+//     injected a differential. With the floors now EQUAL that differential is zero and
+//     the max() is a no-op -- still correct, but no longer load-bearing.
+//
+// AND THE FREE-SPIN RE-RUN CLOSED THE L@21 ANOMALY. Post-fix the LEFT is the tightest
+// channel in the file -- spread 1 in both directions, against 8..12 with 21-count
+// outliers before. An enable that was not reliably asserted would leave that
+// half-bridge undriven at low duty, letting the ramp climb past the real threshold
+// before the wheel moved: rare, large, one-sided, and gone the moment the wiring was
+// fixed. That is ac0b305's "left-channel anomaly", and it was never a measurement
+// artefact or a bad sample -- it was the same EN fault, seen from a different angle.
+//
+// WATCH, NOT YET ACTIONABLE: post-fix R backward reads 13, 12, 9. Across both sessions
+// R-back is 9,9,9,11,12,13 against R-fwd 9,9,9,10,10,10 -- an upward tail on one side
+// only. Its own spread swamps the fwd/rev gap, so it is not a direction effect by this
+// file's own rule, and 3 samples per cell cannot carry a constant. Re-check if the
+// loaded run shows the same one-sided tail.
+// Expect FLOOR_KNEE 2.5 to need revisiting too -- it was tuned for the limit cycle
+// that the old asymmetry produced.
+//
+// WHY THIS IS THE MOST PROMISING LEAD IN THE FILE: brake drag on ONE channel opposes
+// breakaway from rest on that wheel and nothing else, which is the shape of the data --
+// the STATIC figures differ by 11 counts while the MOVING figures differ by 1. If the
+// right bridge brakes at zero command and the left coasts, the 13-vs-24 split is an
+// artefact of the electronics and there is nothing wrong with the drivetrain at all.
+// It would also be FIXABLE rather than compensated: coast (high-Z) at zero command
+// instead of braking. That needs the INH pins under firmware control; they are not
+// wired to the Teensy today.
+// DO NOT touch these constants until it is localised -- they are currently the only
+// thing making that wheel usable, whatever the cause turns out to be.
 // RESCALED for MOTOR_PWM_HZ 4482 -> 2000 (2026-08-14). These were all measured at 4482.
 // The free-spin sweep gave 4482 L13/R12 -> 2000 L11/R9, i.e. deltas of -2 and -3, and
 // the BTS7960 turn-on delay is an ADDITIVE pwm-count offset that does not depend on
@@ -828,10 +997,35 @@ const float FLOOR_KNEE     = 2.5f;  // PWM-effort units
 // arithmetic, not extrapolation.
 // Still worth a loaded re-measure to confirm: hold the robot upright, wheels on the
 // ground, DEADBAND_TEST 1. If the right static comes back near 24 this was right.
-const int LEFT_DEADBAND_MOVING  = 9;    // was 11 @4482
-const int RIGHT_DEADBAND_MOVING = 10;   // was 13 @4482
-const int LEFT_DEADBAND_STATIC  = 13;   // was 15 @4482
-const int RIGHT_DEADBAND_STATIC = 24;   // was 27 @4482
+// MOVING: re-measured 2026-08-15 AFTER the EN fix, 6 free-spin passes, median of 3
+// samples per wheel per direction. L 9,9,10,10,10,9 and R 9,9,10,10,12,13 -- median 10
+// on both, and no systematic L/R difference survives, so they are SYMMETRIC now. The
+// old 9/10 split expressed a difference the data never supported; equal floors also
+// stop injecting a differential into a command that should have none.
+const int LEFT_DEADBAND_MOVING  = 10;   // free-spin median, post-EN-fix 2026-08-15
+const int RIGHT_DEADBAND_MOVING = 10;   // ditto -- keep these two equal without evidence
+// STATIC: re-measured LOADED 2026-08-15 after the EN fix, 6 passes.
+//     back(+1)   L 16, 11, 18     R 18, 17, 19
+//     fwd (-1)   L 21, 18, 19     R 22, 18, 19
+// Medians 18 and 18.5; per-pass L-vs-R differences are 2, 1, 6, 0, 1, 0. The 13-vs-24
+// split is GONE and both wheels take 18. (The L@11 in pass 3 is a detector artefact --
+// the wheel twitched 6 counts and stalled until 16; deadbandDetect now rejects that.
+// Reading it as 16 puts L at 16,16,18 / 21,18,19.)
+//
+// HONEST CAVEAT ON WHY IT WENT AWAY: both wheels converged on ~18, which is close to
+// the mean of the old 13 and 24 -- and the original 2026-08-13 estimate was 18 before a
+// single ramp "corrected" it to 15/27. The loaded spread is wide (L 11..21, R 17..22),
+// so one ramp reading L@15 R@27 is fully consistent with both wheels having been ~18
+// all along. The pre-fix loaded test was never run 6-pass, so "the EN fix removed the
+// asymmetry" and "the asymmetry was a single-sample artefact" cannot be separated.
+// Both fit. What is certain is that it is not there now, and that neither story
+// supports carrying an 11-count differential.
+//
+// These are MEDIANS OF A WIDE DISTRIBUTION, not thresholds. Half the samples sit above
+// 18; loaded stick-slip is severe and always has been. Do not treat 18 as the PWM at
+// which the wheel is guaranteed to move.
+const int LEFT_DEADBAND_STATIC  = 18;   // loaded median, post-EN-fix 2026-08-15
+const int RIGHT_DEADBAND_STATIC = 18;   // keep equal without evidence to split them
 // A wheel counts as "moving" only if it makes NET progress: at least
 // WHEEL_MOVE_COUNTS ticks in one direction across a WHEEL_WINDOW_TICKS window.
 // NOT "any tick recently" -- that was the first attempt and it was wrong. Under
@@ -1199,7 +1393,9 @@ const float RATE_DEADZONE  = 5.0f;  // deg/s : NO LONGER gates the coast (gyro v
 const float FALL_CUTOFF_DEG = 45.0f; // trip the fall latch: |pitch| beyond this = it fell, stop fighting
 // A stand-up attempt must be BOUNDED or it cooks the motors. Two backstops now cover the
 // whole range: above ~39 deg of error the PD exceeds the saturation latch's threshold
-// (SAT_EFFORT_FRAC*(MAX_PWM-MAX_DEADBAND) = 78.85, i.e. 39.4 deg at Kp 2.0) and it latches
+// (SAT_EFFORT_FRAC*(MAX_PWM-MAX_DEADBAND) = 87.4 since the 2026-08-15 re-measure took
+// MAX_DEADBAND 24 -> 18; it was 81.7 before that and the 78.85 written here previously
+// was staler still, from the 27 era -- i.e. 43.7 deg at Kp 2.0) and it latches
 // in 0.5 s. BELOW that, between 25 and 39 deg, u sits under the sat threshold and the old
 // code would have pushed at ~60 PWM indefinitely against an obstacle -- which is exactly
 // the band this 31.6 deg pose lives in. Hence the explicit timeout.
@@ -1465,8 +1661,11 @@ void setup() {
   Serial.println("ENCODER_TEST mode: motors OFF. Roll each wheel by hand "
                  "(1 turn = ~546 counts = 1.00 rev).");
 #elif DEADBAND_TEST
-  Serial.println("DEADBAND_TEST mode: wheels OFF THE GROUND. Ramping PWM; "
-                 "set LEFT/RIGHT_DEADBAND_STATIC from 'first-move L@' and 'R@'.");
+  Serial.print("DEADBAND_TEST mode: OFF THE GROUND measures MOVING, ON THE FLOOR "
+               "measures STATIC. ");
+  Serial.print(DEADBAND_TEST_PASSES);
+  Serial.println(" passes, direction alternating, summary at the end. "
+                 "Do not touch the wheels between passes.");
 #elif IMU_TEST
   Serial.println("IMU_TEST mode: motors OFF. Hold + slowly tilt FORWARD then BACK. "
                  "aPitch & gX should rise together tilting forward (consistent sign).");
@@ -1488,7 +1687,14 @@ void motorRaw(int pwm) {
     analogWrite(LEFT_MOTOR_FORWARD_PIN, 0);  analogWrite(LEFT_MOTOR_REVERSE_PIN, pwm);
     analogWrite(RIGHT_MOTOR_FORWARD_PIN, 0); analogWrite(RIGHT_MOTOR_REVERSE_PIN, pwm);
   } else {
+#if LEFT_IDLE_BRAKE
+    // Both inputs HIGH -> both outputs at VCC -> left motor shorted -> brake, matching
+    // the state the right bridge sits in on its own. See LEFT_IDLE_BRAKE.
+    analogWrite(LEFT_MOTOR_FORWARD_PIN, MOTOR_PWM_FULL);
+    analogWrite(LEFT_MOTOR_REVERSE_PIN, MOTOR_PWM_FULL);
+#else
     analogWrite(LEFT_MOTOR_FORWARD_PIN, 0);  analogWrite(LEFT_MOTOR_REVERSE_PIN, 0);
+#endif
     analogWrite(RIGHT_MOTOR_FORWARD_PIN, 0); analogWrite(RIGHT_MOTOR_REVERSE_PIN, 0);
   }
 }
@@ -1510,6 +1716,14 @@ void motorWriteWheel(int forwardPin, int reversePin, int pwm, int &lastSign) {
     analogWrite(forwardPin, 0);
     analogWrite(reversePin, -pwm);
   } else {
+#if LEFT_IDLE_BRAKE
+    if (forwardPin == LEFT_MOTOR_FORWARD_PIN) {   // see LEFT_IDLE_BRAKE: both HIGH = brake
+      analogWrite(forwardPin, MOTOR_PWM_FULL);
+      analogWrite(reversePin, MOTOR_PWM_FULL);
+      lastSign = 0;                               // leaving brake needs no reversal blanking
+      return;
+    }
+#endif
     analogWrite(forwardPin, 0);
     analogWrite(reversePin, 0);
   }
@@ -1654,37 +1868,163 @@ void encoderTestLoop() {
   Serial.print(" R ");             Serial.println(r / (float)ENC_COUNTS_PER_REV, 2);
 }
 
-// Deadband measurement: slowly ramp PWM, report the PWM at which each wheel
-// first turns (its stiction threshold). Run with the wheels off the ground.
+// A wheel has broken free when it ADVANCES by DB_STEP_COUNTS within one 200 ms step AND
+// advances again on the following step. CUMULATIVE displacement is not enough: under
+// load a wheel takes up backlash, jumps a few counts and STALLS. Pass 3 of the
+// 2026-08-15 loaded run had dL reach 6 at PWM 11 then sit at exactly 6 through PWM 15
+// before really breaking at 16 -- the old bare "cumulative > 5" test recorded 11, five
+// counts early, and it was the single widest sample in that run. Requiring a second
+// advance rejects the twitch, and recording the FIRST of the two steps keeps a clean
+// break from being reported late.
+const int DB_STEP_COUNTS = 5;
+
+void deadbandDetect(int pwm, long d, long prevD, int &cand, long &candD, int &moved) {
+  if (moved) return;
+  if (cand) {
+    if (d >= candD + DB_STEP_COUNTS) { moved = cand; return; }  // advanced again: confirmed
+    cand = 0;                                                   // stalled: it was a twitch
+  }
+  if (d >= prevD + DB_STEP_COUNTS) { cand = pwm; candD = d; }   // provisional
+}
+
+// Per-wheel min/max across the passes that ran in one direction. Ignores 0 entries:
+// 0 means that wheel never broke free before MAX_PWM, which is not a threshold and must
+// not be averaged in as if it were one. Returns the number of valid samples.
+int deadbandSpread(const int *res, const int *sgn, int n, int want, int &lo, int &hi) {
+  int seen = 0;
+  for (int i = 0; i < n; i++) {
+    if (sgn[i] != want || res[i] == 0) continue;
+    if (!seen || res[i] < lo) lo = res[i];
+    if (!seen || res[i] > hi) hi = res[i];
+    seen++;
+  }
+  return seen;
+}
+
+// One line per wheel per direction: the range, not a single number. The range IS the
+// result -- if L comes back 11..21 while R comes back 8..9, the left wheel has no
+// deadband to tune and the next question is why it is bimodal, not what to set it to.
+void deadbandPrintDirection(const int *resL, const int *resR, const int *sgn,
+                            int n, int want) {
+  int lo = 0, hi = 0;
+  Serial.print(want > 0 ? "  back(+1)  L " : "  fwd (-1)  L ");
+  int seen = deadbandSpread(resL, sgn, n, want, lo, hi);
+  if (!seen) Serial.print("none");
+  else { Serial.print(lo); Serial.print(".."); Serial.print(hi);
+         Serial.print(" spread "); Serial.print(hi - lo); }
+  Serial.print("   R ");
+  lo = 0; hi = 0;
+  seen = deadbandSpread(resR, sgn, n, want, lo, hi);
+  if (!seen) Serial.println("none");
+  else { Serial.print(lo); Serial.print(".."); Serial.print(hi);
+         Serial.print(" spread "); Serial.println(hi - lo); }
+}
+
+void deadbandTestSummary(const int *resL, const int *resR, const int *sgn, int n) {
+  Serial.println();
+  Serial.println("==== DB_TEST SUMMARY ====");
+  Serial.println("pass  dir        L     R");
+  for (int i = 0; i < n; i++) {
+    Serial.print("  ");   Serial.print(i + 1);
+    Serial.print("   ");  Serial.print(sgn[i] > 0 ? "back(+1)  " : "fwd (-1)  ");
+    if (resL[i]) { Serial.print(resL[i]); } else { Serial.print("--"); }
+    Serial.print("    ");
+    if (resR[i]) { Serial.println(resR[i]); } else { Serial.println("--"); }
+  }
+  Serial.println("-- means the wheel never moved below MAX_PWM.");
+  deadbandPrintDirection(resL, resR, sgn, n, +1);
+  deadbandPrintDirection(resL, resR, sgn, n, -1);
+  // Read it in this order. Spread first, direction second: a per-direction deadband is
+  // only meaningful if each direction is tight enough to have a value at all.
+  Serial.println("READ: spread within a direction FIRST. If a wheel's own spread is as");
+  Serial.println("big as the fwd/rev gap, direction is not the variable and per-direction");
+  Serial.println("deadbands would be fitting a constant to noise. Only if both directions");
+  Serial.println("are tight (<=1) and differ does mapEffortToPwm need a per-sign floor.");
+  Serial.println("=========================");
+}
+
+// Deadband measurement: slowly ramp PWM, report the PWM at which each wheel first turns
+// (its stiction threshold). Run with the wheels off the ground.
+//
+// Runs DEADBAND_TEST_PASSES ramps back to back, alternating direction, then prints the
+// summary and stops. No reset or reflash between samples -- see DEADBAND_TEST_PASSES for
+// why repeats and interleaving are the point.
 void deadbandTestLoop() {
   static bool seeded = false;
   static long baseL = 0, baseR = 0;
   static int  pwm = 0, movedL = 0, movedR = 0;     // 0 = wheel hasn't moved yet
+  static int  candL = 0, candR = 0;                // provisional breakaway, not yet confirmed
+  static long candDL = 0, candDR = 0, prevDL = 0, prevDR = 0;
+  static int  pass = 0;
+  static int  sign = DEADBAND_TEST_SIGN;
+  static bool coasting = false, finished = false;
   static unsigned long lastStep = 0;
-  if (!seeded) { readEncoders(baseL, baseR); seeded = true; lastStep = millis(); }
+  static int  resL[DEADBAND_TEST_PASSES], resR[DEADBAND_TEST_PASSES];
+  static int  resSign[DEADBAND_TEST_PASSES];
+
+  if (finished) { motorRaw(0); return; }
+
+  if (!seeded) {
+    readEncoders(baseL, baseR);
+    seeded   = true;
+    lastStep = millis();
+    Serial.print("DB_TEST pass ");  Serial.print(pass + 1);
+    Serial.print("/");              Serial.print(DEADBAND_TEST_PASSES);
+    Serial.println(sign > 0 ? "  sign +1 (backward)" : "  sign -1 (forward)");
+  }
+
+  // Between passes: motors off, and WAIT for the rotor to coast to a stop before
+  // re-seeding the baseline. Re-seeding while it still turns carries the leftover
+  // rotation into the next pass and trips the >5-count move test at pwm 0, which would
+  // report a deadband of 0 and look like a spectacular result.
+  if (coasting) {
+    if (millis() - lastStep < (unsigned long)DEADBAND_TEST_DWELL_MS) return;
+    coasting = false;
+    seeded   = false;
+    pwm = 0; movedL = 0; movedR = 0;
+    candL = 0; candR = 0; candDL = 0; candDR = 0; prevDL = 0; prevDR = 0;
+    return;
+  }
+
   if (millis() - lastStep < 200) return;           // step every 200 ms
   lastStep = millis();
 
   long l, r; readEncoders(l, r);
-  if (!movedL && labs(l - baseL) > 5) movedL = pwm; // record the PWM that broke stiction
-  if (!movedR && labs(r - baseR) > 5) movedR = pwm;
+  long dl = labs(l - baseL), dr = labs(r - baseR);
+  deadbandDetect(pwm, dl, prevDL, candL, candDL, movedL);   // see deadbandDetect: a
+  deadbandDetect(pwm, dr, prevDR, candR, candDR, movedR);   // twitch is not a breakaway
+  prevDL = dl; prevDR = dr;
 
-  Serial.print("DB_TEST PWM ");        Serial.print(pwm);
+  Serial.print("DB_TEST p");           Serial.print(pass + 1);
+  Serial.print(sign > 0 ? "+" : "-");
+  Serial.print(" PWM ");               Serial.print(pwm);
   Serial.print(" dL ");                Serial.print(l - baseL);
   Serial.print(" dR ");                Serial.print(r - baseR);
   Serial.print("  | first-move L@");   Serial.print(movedL);
   Serial.print(" R@");                 Serial.println(movedR);
 
-  if ((movedL && movedR) || pwm >= MAX_PWM) { motorRaw(0); return; }  // done: stop ramping
+  if ((movedL && movedR) || pwm >= MAX_PWM) {      // pass done
+    motorRaw(0);
+    resL[pass] = movedL; resR[pass] = movedR; resSign[pass] = sign;
+    pass++;
+    if (pass >= DEADBAND_TEST_PASSES) {
+      deadbandTestSummary(resL, resR, resSign, DEADBAND_TEST_PASSES);
+      finished = true;
+      return;
+    }
+    sign     = -sign;                              // interleave the directions
+    coasting = true;
+    lastStep = millis();
+    return;
+  }
   pwm++;
-  // DEADBAND_TEST_SIGN +1 ramps positive PWM = physical BACKWARD (see motorRaw). Every
-  // deadband figure in this file was taken that way, so FORWARD has never been measured.
-  // mapEffortToPwm applies ONE constant per wheel to BOTH signs, so if breakaway differs
-  // by direction -- backlash, gearbox preload -- one direction is mis-compensated with no
-  // way to express it. Mirrored motors make that a robot-level fwd/rev asymmetry, because
-  // each motor runs in its opposite local direction between the two. Set to -1 and re-run
-  // to get the forward figures; the printed numbers stay magnitudes either way.
-  motorRaw(DEADBAND_TEST_SIGN * pwm);
+  // sign +1 ramps positive PWM = physical BACKWARD (see motorRaw). Every deadband figure
+  // in this file was taken that way. mapEffortToPwm applies ONE constant per wheel to
+  // BOTH signs, so if breakaway differs by direction -- backlash, gearbox preload -- one
+  // direction is mis-compensated with no way to express it. Mirrored motors make that a
+  // robot-level fwd/rev asymmetry, because each motor runs in its opposite local
+  // direction between the two. The printed numbers stay magnitudes either way.
+  motorRaw(sign * pwm);
 }
 
 // IMU sign/axis check: motors off, stream the accel-pitch and all three gyro
