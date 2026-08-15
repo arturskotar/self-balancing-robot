@@ -578,7 +578,28 @@ const float LEAN_CLAMP_FWD  = 18.0f; // deg : forward authority cap (stop is at 
 // LESSON: a rest angle reached by RELEASING the chassis is not a limit. It is wherever
 // the torques happened to balance on that entry. A limit is where it STOPS on a slow
 // deliberate push, and it must reproduce across sweeps before anything gets sized to it.
-const float LEAN_CLAMP_REAR = 18.0f; // deg : rear authority cap (rear rest is at -25.3)
+// 18 -> 14. THERE ARE TWO REAR CONTACTS and the sweeps each found a different one:
+//   ~-19 to -21  soft/compliant -- the first sweep SETTLED at -18.89 here; the second
+//                swept through at 34-42 deg/s without pausing, which is what a
+//                compliant contact does to a fast hand sweep. Real, just not hard.
+//   -25.3        hard rest, found by the slow sweep, held steady for a full second.
+// At 18 the commanded pitch is -3.22 - 18 = -21.22, landing inside the soft band, and
+// EVERY logged reverse stall parked at -20.6..-21.5 with the encoders frozen for 1-3 s.
+// That is the loop driving itself onto the soft contact: pitch reaches target, ERR falls
+// to ~+0.5, u drops to ~2, PWM ~8 which is under the 15/27 breakaway, and nothing moves.
+// Reads as "reverse commands the wheels forward" because the inner loop still wants a
+// few tenths more backward rotation and rolling forward is how you get it.
+// 14 puts the command at -17.22; add the 2.78 deg of measured overshoot and the peak is
+// -20.0, just clear of the -20.6 where the stalls begin. That is ~0.6 deg of margin, so
+// this is a CEILING not a comfortable setting -- if reverse still parks, go to 13 (-19.0
+// peak) before looking anywhere else.
+// Braking is barely affected: g*tan(14) = 2.45 vs 3.19 m/s^2 at 18, and DRIVE_MAX_VEL
+// 0.65 was sized against 12, so the stopping distance is still better than the config
+// that braked acceptably.
+// WHAT WOULD SETTLE IT: a SLOW deliberate push through the -17..-23 band, watching for
+// where resistance first appears, rather than a full-range sweep that flies past it.
+// Both previous sweeps were too fast in exactly this region.
+const float LEAN_CLAMP_REAR = 14.0f; // deg : rear cap; soft contact ~-19, hard rest -25.3
 // 0.99 -> 0.97 (tau 0.50 s -> 0.17 s, pole 2 -> 6 rad/s). The velocity loop
 // crosses over near 2.5 rad/s, so the old 2 rad/s pole sat essentially ON the
 // crossover and ate ~51 deg of phase exactly where it hurt. That lag is what
