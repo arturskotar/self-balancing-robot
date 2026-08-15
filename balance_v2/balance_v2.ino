@@ -155,7 +155,7 @@ const long ENC_COUNTS_PER_REV = 546;
 // Post-EN-fix re-measure is COMPLETE (moving 10/10, static 18/18) and the flag is back
 // to 0. deadbandDetect changed after that run, so the next loaded run is a confirmation
 // with the twitch artefact removed -- worth one pass before trusting 18 to a decimal.
-#define DEADBAND_TEST 0
+#define DEADBAND_TEST 1
 // +1 = positive PWM = physical BACKWARD (all existing deadband figures). -1 = FORWARD.
 // This is the sign of the FIRST pass only; the test alternates every pass. See the
 // caveat at LEFT_DEADBAND_MOVING.
@@ -964,13 +964,22 @@ const float FLOOR_KNEE     = 2.5f;  // PWM-effort units
 //     injected a differential. With the floors now EQUAL that differential is zero and
 //     the max() is a no-op -- still correct, but no longer load-bearing.
 //
-// AND THE FREE-SPIN RE-RUN CLOSED THE L@21 ANOMALY. Post-fix the LEFT is the tightest
-// channel in the file -- spread 1 in both directions, against 8..12 with 21-count
-// outliers before. An enable that was not reliably asserted would leave that
-// half-bridge undriven at low duty, letting the ramp climb past the real threshold
-// before the wheel moved: rare, large, one-sided, and gone the moment the wiring was
-// fixed. That is ac0b305's "left-channel anomaly", and it was never a measurement
-// artefact or a bad sample -- it was the same EN fault, seen from a different angle.
+// THE L@21 ANOMALY IS **NOT** CLOSED. It briefly looked closed: post-fix free-spin put
+// the LEFT at spread 1 in both directions, against 8..12 with 21-count outliers before,
+// and the obvious story was an enable that was not reliably asserted leaving the
+// half-bridge undriven at low duty. That story is WRONG, or at least incomplete.
+// The 2026-08-15 loaded CONFIRMATION run, taken after the EN fix, pass 1:
+//     dL EXACTLY 0 for 32 consecutive steps while dR broke at 18 and reached -496.
+//     L finally moved at 33.
+// Same signature as every historical event -- left stuck, right spinning freely -- so
+// whatever this is survived the EN repair. ac0b305's blocker stands, restated:
+//   * all three known events are PASS 1, the first ramp after power-up
+//   * dL sat at EXACTLY 0, with none of the +/-1..2 jitter every other pass shows,
+//     which fits a truly locked wheel and a silent encoder channel equally well
+// DISCRIMINATOR IS THE PILOT'S EYES, not more telemetry: during such a pass, does the
+// left wheel physically sit still while the robot pivots around it? If it moves and the
+// log says 0, the encoder channel is dropping out and every L/R figure is suspect. Ask
+// before theorising -- this is exactly the observation ac0b305 needed and never got.
 //
 // WATCH, NOT YET ACTIONABLE: post-fix R backward reads 13, 12, 9. Across both sessions
 // R-back is 9,9,9,11,12,13 against R-fwd 9,9,9,10,10,10 -- an upward tail on one side
@@ -1020,6 +1029,13 @@ const int RIGHT_DEADBAND_MOVING = 10;   // ditto -- keep these two equal without
 // asymmetry" and "the asymmetry was a single-sample artefact" cannot be separated.
 // Both fit. What is certain is that it is not there now, and that neither story
 // supports carrying an 11-count differential.
+//
+// CONFIRMED by a second loaded 6-pass run with the deadbandDetect twitch fix in place:
+//     back(+1)  L 33, 18, 17    R 18, 17, 19
+//     fwd (-1)  L 16, 20, 16    R 17, 21, 17
+// Discarding the pass-1 L@33 dropout (see the L@21 note above -- it is a channel fault,
+// not a breakaway), L reads 16,18,20,17,16 and R reads 17,17,18,19,21,17. Both median
+// 17-18 across two independent loaded runs, so 18/18 stands.
 //
 // These are MEDIANS OF A WIDE DISTRIBUTION, not thresholds. Half the samples sit above
 // 18; loaded stick-slip is severe and always has been. Do not treat 18 as the PWM at
