@@ -77,7 +77,13 @@ MPU9250 imu;
 //   - fitting dt = 1/(f*256) gives t_on ~4-5.5 us, not the ~8 us assumed from the
 //     datasheet, so frequency buys ~3 counts of floor rather than ~7. The remaining
 //     6-9 counts are real unloaded mechanical friction. FLOOR_KNEE 2.5 stays.
-const int MOTOR_PWM_HZ = 1200;   // do NOT raise without re-running DEADBAND_TEST
+// SWEEP CONCLUDED: 2000 Hz. 1200 REPRODUCIBLY BROKE THE LEFT CHANNEL (L@21 twice, with
+// dL -25 against dR -360) -- a floor cannot RISE as frequency falls, so that is not the
+// turn-on-delay model, it is the left driver misbehaving at 1200. Note the hardware
+// split in the boot banner: L is 6/9 on ONE submodule (FlexPWM2_2 A/B) while R is 22/23
+// on TWO (FlexPWM4_0A, 4_1A). A left-only, frequency-dependent fault fits that exactly.
+// DO NOT GO BELOW 2000 without re-checking the left channel.
+const int MOTOR_PWM_HZ = 2000;   // do NOT raise without re-running DEADBAND_TEST
 const int MOTOR_PWM_BITS = 8;    // analogWrite range is explicitly 0..255 on every channel
 
 // ---- Encoder pins (Waveshare DCGM-3865, connector silkscreen "M V A B G M")-
@@ -146,7 +152,7 @@ const long ENC_COUNTS_PER_REV = 546;
 // roughly that much the gap is BTS7960 turn-on delay and a lower PWM frequency fixes it;
 // if they barely move it is real friction and the answer is mechanical.
 // SET BACK TO 0 BEFORE FLYING -- this replaces the balance loop entirely.
-#define DEADBAND_TEST 1
+#define DEADBAND_TEST 0
 
 // ---- Burst logger ----------------------------------------------------------
 // 100 ms telemetry cannot resolve the drive oscillation: clean alternation every
@@ -812,10 +818,17 @@ const float FLOOR_KNEE     = 2.5f;  // PWM-effort units
 // CAVEAT: DEADBAND_TEST ramps positive PWM only, so these are one-direction
 // figures. Breakaway can differ by direction (backlash, gearbox preload), and the
 // turn logs hint that it does. Worth measuring both ways eventually.
-const int LEFT_DEADBAND_MOVING  = 11;
-const int RIGHT_DEADBAND_MOVING = 13;
-const int LEFT_DEADBAND_STATIC  = 15;
-const int RIGHT_DEADBAND_STATIC = 27;
+// RESCALED for MOTOR_PWM_HZ 4482 -> 2000 (2026-08-14). These were all measured at 4482.
+// The free-spin sweep gave 4482 L13/R12 -> 2000 L11/R9, i.e. deltas of -2 and -3, and
+// the BTS7960 turn-on delay is an ADDITIVE pwm-count offset that does not depend on
+// mechanical load -- so the same deltas transfer exactly to the loaded figures. This is
+// arithmetic, not extrapolation.
+// Still worth a loaded re-measure to confirm: hold the robot upright, wheels on the
+// ground, DEADBAND_TEST 1. If the right static comes back near 24 this was right.
+const int LEFT_DEADBAND_MOVING  = 9;    // was 11 @4482
+const int RIGHT_DEADBAND_MOVING = 10;   // was 13 @4482
+const int LEFT_DEADBAND_STATIC  = 13;   // was 15 @4482
+const int RIGHT_DEADBAND_STATIC = 24;   // was 27 @4482
 // A wheel counts as "moving" only if it makes NET progress: at least
 // WHEEL_MOVE_COUNTS ticks in one direction across a WHEEL_WINDOW_TICKS window.
 // NOT "any tick recently" -- that was the first attempt and it was wrong. Under
