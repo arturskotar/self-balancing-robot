@@ -58,32 +58,7 @@ MPU9250 imu;
 // band that smooth driving lives in. 4482 Hz is the Teensy default and the
 // frequency the known-good balance + the 11/13 deadbands were measured at.
 // Set explicitly on all four pins so the value is documented, not inherited.
-// SWEEP IN PROGRESS 2026-08-14 -- 4482 measured free-spin L@13 R@12 and L@14 R@13 on a
-// repeat, so repeatability is +/-1 count. Now at 2000; 1200 next. RESTORE TO 4482 unless
-// the sweep says otherwise, and never raise it (see the note above about turn-on delay).
-// SWEEP RESULTS (free-spin breakaway, wheels off the ground, positive PWM = backward):
-//         L     R
-//   4482  13    12    (repeat 14 / 13, so repeatability is +/-1 count)
-//   2000  11     9
-//   1200  21     8    <- R lands exactly on the predicted 8; L is NOT monotonic
-// A floor cannot RISE as frequency falls, so L@21 is a bad sample, not a measurement.
-// UNRESOLVED, and it blocks interpreting any of this: at 1200 the log shows dL -14
-// (barely moved) and dR -358 (spun freely), but the pilot saw the RIGHT wheel barely
-// move. If the encoder channels are mislabelled then every left/right constant in this
-// file is attached to the wrong wheel. DO NOT TUNE DEADBANDS UNTIL THAT IS SETTLED.
-// Conclusions that survive either way:
-//   - the 15/27 LOADED asymmetry is not electrical. Off the ground both wheels break
-//     within a count of each other at every frequency, so no PWM change narrows it.
-//   - fitting dt = 1/(f*256) gives t_on ~4-5.5 us, not the ~8 us assumed from the
-//     datasheet, so frequency buys ~3 counts of floor rather than ~7. The remaining
-//     6-9 counts are real unloaded mechanical friction. FLOOR_KNEE 2.5 stays.
-// SWEEP CONCLUDED: 2000 Hz. 1200 REPRODUCIBLY BROKE THE LEFT CHANNEL (L@21 twice, with
-// dL -25 against dR -360) -- a floor cannot RISE as frequency falls, so that is not the
-// turn-on-delay model, it is the left driver misbehaving at 1200. Note the hardware
-// split in the boot banner: L is 6/9 on ONE submodule (FlexPWM2_2 A/B) while R is 22/23
-// on TWO (FlexPWM4_0A, 4_1A). A left-only, frequency-dependent fault fits that exactly.
-// DO NOT GO BELOW 2000 without re-checking the left channel.
-const int MOTOR_PWM_HZ = 2000;   // do NOT raise without re-running DEADBAND_TEST
+const int MOTOR_PWM_HZ = 4482;   // do NOT raise without re-running DEADBAND_TEST
 const int MOTOR_PWM_BITS = 8;    // analogWrite range is explicitly 0..255 on every channel
 
 // ---- Encoder pins (Waveshare DCGM-3865, connector silkscreen "M V A B G M")-
@@ -145,87 +120,7 @@ const long ENC_COUNTS_PER_REV = 546;
 // RIGHT_DEADBAND_STATIC from each wheel's own first-move value. It does NOT
 // measure the *_MOVING floors -- those are the free-spin figures, taken with the
 // wheels off the ground. Then set this back to 0.
-// ENABLED 2026-08-14 to measure the right-vs-left breakaway asymmetry (27 vs 15) that
-// is the root of the rear stall -- see FLOOR_KNEE. Run at MOTOR_PWM_HZ 4482, then 2000,
-// then 1200, and fit: deadband = t_on * f_pwm * 256 + mechanical. Predicted driver-delay
-// term at t_on ~8 us is 9.2 / 4.1 / 2.5 counts respectively, so if the floors fall by
-// roughly that much the gap is BTS7960 turn-on delay and a lower PWM frequency fixes it;
-// if they barely move it is real friction and the answer is mechanical.
-// SET BACK TO 0 BEFORE FLYING -- this replaces the balance loop entirely.
-// Post-EN-fix re-measure is COMPLETE (moving 10/10, static 18/18) and the flag is back
-// to 0. deadbandDetect changed after that run, so the next loaded run is a confirmation
-// with the twitch artefact removed -- worth one pass before trusting 18 to a decimal.
 #define DEADBAND_TEST 0
-// +1 = positive PWM = physical BACKWARD (all existing deadband figures). -1 = FORWARD.
-// This is the sign of the FIRST pass only; the test alternates every pass. See the
-// caveat at LEFT_DEADBAND_MOVING.
-const int DEADBAND_TEST_SIGN = 1;
-// MULTI-PASS, 2026-08-15. One flash and one power-up runs DEADBAND_TEST_PASSES ramps
-// with the sign alternating each pass, then prints a summary table.
-//
-// IT HAS ALREADY ANSWERED THE QUESTION IT WAS BUILT FOR -- see LEFT_DEADBAND_MOVING for
-// the numbers. Direction is not a variable and the free-spin floor is ~10 on both
-// wheels. Kept because any future deadband claim needs a distribution, not a sample.
-//
-// WHY REPEATS: repeatability stopped being an assumption and became the measurement.
-// A +1 run came back L@21 R@8 where the 2000 Hz sweep recorded L@11 R@9 -- and
-// L@21 / R@8 / dR ~ -360 is a replay of the 1200 Hz line that ac0b305 discarded as a
-// bad sample on the grounds that a floor cannot rise as frequency falls. Two events
-// looked like a bimodal left channel, which would have made the "+/-1 count" premise
-// under every deadband figure in this file false. Six passes said otherwise: L@21 did
-// not reproduce, and each wheel's spread is 2-4 counts. A single ramp cannot tell an
-// outlier from a regime. Three per direction can.
-//
-// WHY ALTERNATE rather than run a block of + then a block of -: a block comparison
-// confounds direction with anything that drifts across the session (motor warming,
-// battery sag). Alternating puts both directions on the same drift.
-//
-// Each pass re-seeds after the rotor has coasted to a stop, so the passes also sample
-// different rotor rest positions -- which is the standing hypothesis for the left
-// channel: a commutator dead spot, where breakaway depends on where the rotor stopped.
-// If that is what this is, the answer is neither a deadband constant nor a mechanical
-// hunt, and per-direction constants would be fitting a number to a coin flip.
-//
-// >>> RESOLVE THE ENCODER CHANNEL LABELS FIRST (ENCODER_TEST). ac0b305 is still
-// >>> blocking: the pilot saw the RIGHT wheel barely moving while the log said dL
-// >>> stuck / dR spinning, and this run reproduced that too. If the channels are
-// >>> swapped, every L/R constant here is on the wrong wheel and these passes will
-// >>> just mislabel a real result.
-const int DEADBAND_TEST_PASSES   = 6;      // 3 per direction
-const int DEADBAND_TEST_DWELL_MS = 1500;   // coast-down between passes, motors off
-
-// ---- Idle-brake experiment --------------------------------------------------
-// The two bridges idle in OPPOSITE states -- left coasts, right brakes; see the
-// retraction block at LEFT_DEADBAND_MOVING. The BTS7960 enable pins are not wired to
-// the MCU, so the RIGHT cannot be made to coast. The reverse IS reachable in firmware:
-// driving BOTH inputs of a BTS7960 HIGH puts both outputs at VCC, shorting the motor
-// just as both-LOW shorts it to ground. Either way it is a brake, and it works whether
-// that module's enables are strapped high or follow the inputs -- which is what makes
-// this testable without knowing the left module's jumpering.
-// NOT shoot-through: each half-bridge drives one FET, the halves are independent, and
-// a stationary motor generates no back-EMF so a braked idle draws no current.
-//
-// SUPERSEDED 2026-08-15: the EN wiring was found and fixed, both bridges now idle in
-// the same state, and the asymmetry this was built to explain is gone. Kept because it
-// is still the only way to A/B brake-vs-coast from firmware -- if a limit cycle wants
-// passive damping later, or if the two wheels now both COAST and breakaway needs help,
-// this is the lever. The original framing follows.
-//
-// THE TEST: set to 1, run DEADBAND_TEST LOADED, and read the LEFT static figures.
-//   climbs from ~13 toward the right's ~24 -> brake drag is worth ~11 counts of
-//     breakaway, the 13-vs-24 asymmetry is explained, and nothing is mechanically wrong
-//   does not move                          -> the brake is not the mechanism and the
-//     24 still needs an explanation
-// A second effect rides along and this test cannot separate it: with the enables
-// following the inputs the left also uses FAST decay during PWM off-time while the
-// right uses SLOW decay, which changes torque per unit duty independently of anything
-// at rest. If the left static moves but not all the way, suspect both are in play.
-//
-// EXPERIMENT ONLY, SET BACK TO 0. Braking both wheels IS symmetric and would kill the
-// veer, but it doubles down on the stiction wall this whole file is fighting. With the
-// enables unreachable the shipped mitigation stays the per-side constants.
-#define LEFT_IDLE_BRAKE 0
-const int MOTOR_PWM_FULL = 255;            // MOTOR_PWM_BITS 8 -> full-scale count
 
 // ---- Burst logger ----------------------------------------------------------
 // 100 ms telemetry cannot resolve the drive oscillation: clean alternation every
@@ -539,27 +434,6 @@ const float VEL_I_ROLL_MIN = 0.20f;  // rev/s : below this the integral is froze
 // carries stiction-fighting wind into the cruise) without blocking the only term
 // that could grow. Ramp rate is KVEL_I * velError ~ 0.25 deg/s at full stick, so
 // it takes several seconds to matter; raise KVEL_I if that is too slow.
-
-// COAST BRAKING (2026-08-14, "a bit lazy break").
-// The integral was zeroed the instant the stick centred (`if (!driving)`), which
-// collapsed the loop's braking authority from LEAN_CLAMP 18 deg to whatever
-// Kpos*posError + Kvel*velError happened to be -- measured at 1.8 deg on release,
-// BELOW the ~6-7 deg breakaway lean. So the robot could not brake at all: it
-// coasted on rolling friction alone. Measured from the log, stick centred at
-// 0.44 rev/s: 0.35 rev of travel over 1.7 s, ending parked with a permanent
-// 0.25 rev position error it never recovered (POS -0.397 against PSET -0.146,
-// held by static friction against a 1.68 deg lean).
-// Fix: keep integrating while the wheels are still ROLLING, stick or no stick.
-// With targetVel 0, velError = -forwardVel, so the counter-lean ramps at
-// KVEL_I*|v| = 24*0.44 = 10.6 deg/s and clears breakaway in ~0.6 s instead of
-// never. VEL_I_ROLL_MIN is reused as the rest detector, and below it the integral
-// is ZEROED, not frozen: a frozen integral parked just above breakaway would
-// creep, stop, creep again -- the standstill stick-slip hunt this project already
-// knows about (see the 2026-08-14 burst finding in MIGRATION_TEENSY.md).
-// This does NOT touch the stick-reversal brake, which is a separate path and is
-// authority- and LEAN_LPF-limited rather than dead. See LEAN_LPF.
-#define COAST_BRAKE 1
-
 // Keep drive velocity feedback at the neutral-loop gain. Doubling it drove
 // leanRaw into the +/-5 deg clamp for most held-stick samples, so encoder ripple
 // could only move the command away from saturation and was fed back asymmetrically.
@@ -605,191 +479,7 @@ const float DRIVE_KVEL_MULTIPLIER = 1.0f;
 // than an arbitrary one. Component sum is 6*1.5 + 3*0.4 + 9 = 19.2, so this still binds
 // and the conditional integration behind it still fires.
 // IT WILL FALL FORWARD if the wheels do not break away -- that is the accepted trade.
-// 18 -> 12 (2026-08-14). THIS IS NOW A MECHANICAL LIMIT, NOT A TUNING CHOICE.
-// Manual tilt sweep, disarmed, measured on the bench:
-//     forward rest  pitch +27.31  =  LEAN ACT +30.53   (held 1.2 s)
-//     rear settle   pitch -18.89  =  LEAN ACT -15.67   (damped settle, steady)
-//     rear hard     pitch -27.29  =  LEAN ACT -24.07   (held 2.0 s)
-// The chassis has 30.5 deg of FORWARD lean and only 15.7 deg of REAR lean before it
-// sits down on its rear contact. At 18 the commanded pitch is -21.22, i.e. 2.3 deg
-// PAST the angle where the robot stops being an inverted pendulum and becomes a
-// tripod -- so every full-reverse command drove it onto its own backstop and parked.
-// Signature of that deadlock, seen three times: LEAN RAW pinned at -18, encoders
-// frozen for 1.2-3.0 s, pitch held at -20.6..-21.5 (the free rest at -18.89 plus
-// ~1.8 deg of motor reaction torque, since PWM 7-15 is under the 15/27 breakaway so
-// the wheel never turns but the motor still pushes), and u stuck at +0.4..+0.6 deg of
-// error so the inner loop kept asking for MORE backward rotation -- which it can only
-// get by driving the wheels FORWARD. That is the "reverse commands wheels forward"
-// report: correct control law, unreachable target.
-// 12 leaves 3.7 deg of margin under the 15.67 sit-down, and forward drive never
-// exceeded 9.43 deg of lean even at Vmax 0.90, so nothing that currently works loses
-// authority. Braking should IMPROVE rather than suffer: a hard stop used to command
-// -18 and put the robot on its backstop, which killed the brake it was asking for.
-// Symmetric on purpose. An asymmetric clamp (~26 forward / 12 rear) would recover the
-// unused forward range, but nothing needs it yet and one number is easier to reason
-// about. The real fix is mechanical: move the rear contact back or up and the rear
-// range grows toward the forward 30.5, at which point this can rise again.
-// NOTE the fall/recovery latches cannot fire on this chassis -- FALL_CUTOFF_DEG 45 and
-// RECOVERY_GIVEUP_DEG 32 are both ABOVE the mechanical maxima (30.53 fwd, 24.07 rear),
-// so the robot can never tilt far enough to trip either. That is why it pushed into
-// the stop for 3 s instead of giving up. Left alone for now: fixing it properly needs
-// per-direction thresholds, and this clamp keeps it away from the stop in the first place.
-// SPLIT PER DIRECTION (2026-08-14), immediately after the symmetric 12 shipped.
-// A symmetric clamp has to be sized for the WORSE side, and here the two sides differ
-// by 2x, so 12 starved forward to fix rear. Measured in the very next drive log:
-// LEAN RAW pinned at exactly 12.00 for 4+ s of held forward stick while VELI kept
-// climbing (7.42 -> 7.63) and PERR stayed open at 0.55-0.73 -- the loop asking for
-// more lean than it was allowed, in the direction that has 30.5 deg of physical room.
-// Forward goes back to 18, which is not a guess: it is the value in every good
-// forward-drive log to date, and forward has never actually exceeded 9.43 deg of lean
-// under it. Rear stays at 12, which is the measured sit-down limit and non-negotiable.
-// Gating on sign(leanRaw) is safe here in a way the old friction-FF gates were not:
-// both limits are far from zero, so a misclassification near the crossing changes
-// nothing (|leanRaw| ~ 0 is nowhere near either bound), and the two branches differ
-// only in HOW MUCH authority is allowed -- never in which direction it points.
-// CORRECTION, same day: the log cited above was CONTAMINATED -- the USB tether was
-// fouling the right wheel. That drag is what held forwardVel at 0.15 against a target
-// of 0.51, and a permanently open velError is exactly what winds VELI into the clamp.
-// So "forward pinned at 12" is an artifact of the tether, not proof that clean-ground
-// forward needs more than 12. Do not cite that log as evidence for anything.
-// THE SPLIT STILL STANDS, on the geometry rather than on that log:
-//   - the chassis is measurably asymmetric (30.53 fwd vs 15.67 rear), so ONE number
-//     has to be sized for the worse side and is wrong-shaped for the better one;
-//   - 18 forward is not speculative, it is the value every good forward-drive log ran
-//     at, so this restores known-good forward while keeping the new measured rear cap;
-//   - it costs nothing measurable: forward has never exceeded 9.43 deg on clean ground,
-//     so 12 vs 18 should be invisible until something actually loads the wheels.
-// Corollary worth remembering: a dragging wheel and a too-low clamp look IDENTICAL in
-// telemetry (RAW pinned, VELI at its ceiling, velError open, robot slower than asked).
-// Distinguish them by LEAN ACT vs speed -- a real 13 deg lean must produce g*tan(13) =
-// 2.3 m/s^2, and if the robot is not accelerating, something external is eating it.
-// Headroom check: 18 forward leaves 12.5 deg to the +30.53 stop; 12 rear leaves 3.7 deg
-// to the -15.67 sit-down. If forward pins at 18 under Vmax 0.90 there is room to ~24
-// before the geometry bites, but do not go there without a CLEAN log showing 18 saturating.
-// 18 -> 24, 2026-08-15. The forward cap was the binding constraint and it was binding against
-// nothing: the 2026-08-15 flight held LEAN RAW 18.00 = CMD 18.00 for seconds at a stretch --
-// RAW equalling CMD exactly means the request was being truncated -- while TARGET sat at
-// BALANCE_SETPOINT + 18 = 14.78 against a forward stop at +30.53. Half the forward range was
-// never used. Raising DRIVE_MAX_VEL 0.65 -> 1.00 made this worse by asking for more velocity,
-// hence more lean, into the same ceiling.
-// 24 puts TARGET at 20.78 and leaves ~9.7 deg to the stop. Forward overshoot is small in
-// practice (PITCH tracks TARGET within ~1 deg while driving, peaking ~16 against a 14.78
-// target), so that margin is real, unlike the rear where overshoot eats most of it.
-// NOT symmetric with the rear, on purpose: the chassis has 30.5 deg forward and ~19 to the rear
-// soft contact, and LEAN_CLAMP_REAR 14 already puts the rear TARGET at -17.2, i.e. nearly on
-// the stop. Forward has room to give; rear does not. See LEAN_CLAMP_REAR.
-// 24 -> 18, 2026-08-15: back to the value that flew. Raising it to 24 was a response to the
-// forward clamp saturating, but the saturation was an artefact of DRIVE_MAX_VEL having been
-// widened 0.65 -> 1.00 in the same session; with the throttle back at 0.65 the forward lean
-// demand peaks near 13 deg and never reaches this cap. Nothing about the lean geometry
-// needed changing, and the pilot's ask was about throttle, not lean.
-// One observation kept from that excursion, with its caveat: the chassis settled at PITCH
-// -21.0 on release, disarmed. That is a RELEASE settle, not a limit -- see LEAN_CLAMP_REAR.
-// 18 -> 24 AGAIN, 2026-08-15. That revert to 18 was itself the overcorrection -- I undid a
-// justified change along with an unjustified one. Pilot: "why do we reduce the angles again?
-// we measure forward angle near 32 degrees and a rear 20+ degrees."
-//   clamp 18 -> TARGET +14.78, against a measured forward stop near +32 = ~17 deg unused
-//   clamp 24 -> TARGET +20.78, ~11 deg spare, still a wide margin
-// BALANCE_SETPOINT -3.22 shifts every target rearward, SPENDING rear budget and BUYING
-// forward budget. That asymmetry, not a difference in the chassis, is most of why the two
-// caps sit so far apart -- the rear is nearly maxed at 14 against the ~20 deg rear figure
-// once the ~1 deg of pitch overshoot is counted, while the forward has room to spare.
-// This cap has nothing to do with the 8 Hz jitter; raising it neither causes nor fixes it.
-const float LEAN_CLAMP_FWD  = 24.0f; // deg : forward authority cap (measured stop ~+32)
-// 12 -> 18 (2026-08-14). THE -15.67 SIT-DOWN WAS NOT REAL. A second manual sweep,
-// disarmed, back-to-front, measured the rear rest at PITCH -28.5 = LEAN ACT -25.3, held
-// steady for a full second -- and swept straight THROUGH -18.9 on the way up at 34-42
-// deg/s with no pause. The -15.67 that this clamp was sized against was a dynamic settle
-// in the earlier sweep, taken during the period when the tether was fouling the right
-// wheel, not a hard contact. Forward agrees across both sweeps (+30.53 / +29.97), which
-// is what made the rear disagreement easy to miss.
-// Corroborating evidence I should have weighted higher at the time: 18 ran for weeks of
-// logs without ever sitting the robot down, and the reported regression after cutting to
-// 12 was exactly "it falls and can't recover" plus "dead angles are too narrow".
-// Restored symmetric with LEAN_CLAMP_FWD. Rear room is ~25 deg, so 18 leaves ~7 deg of
-// margin for the 2.78 deg of measured overshoot -- comfortable, and the same margin the
-// forward side has always run with.
-// LESSON: a rest angle reached by RELEASING the chassis is not a limit. It is wherever
-// the torques happened to balance on that entry. A limit is where it STOPS on a slow
-// deliberate push, and it must reproduce across sweeps before anything gets sized to it.
-// 18 -> 14. THERE ARE TWO REAR CONTACTS and the sweeps each found a different one:
-//   ~-19 to -21  soft/compliant -- the first sweep SETTLED at -18.89 here; the second
-//                swept through at 34-42 deg/s without pausing, which is what a
-//                compliant contact does to a fast hand sweep. Real, just not hard.
-//   -25.3        hard rest, found by the slow sweep, held steady for a full second.
-// At 18 the commanded pitch is -3.22 - 18 = -21.22, landing inside the soft band, and
-// EVERY logged reverse stall parked at -20.6..-21.5 with the encoders frozen for 1-3 s.
-// That is the loop driving itself onto the soft contact: pitch reaches target, ERR falls
-// to ~+0.5, u drops to ~2, PWM ~8 which is under the 15/27 breakaway, and nothing moves.
-// Reads as "reverse commands the wheels forward" because the inner loop still wants a
-// few tenths more backward rotation and rolling forward is how you get it.
-// 14 puts the command at -17.22; add the 2.78 deg of measured overshoot and the peak is
-// -20.0, just clear of the -20.6 where the stalls begin. That is ~0.6 deg of margin, so
-// this is a CEILING not a comfortable setting -- if reverse still parks, go to 13 (-19.0
-// peak) before looking anywhere else.
-// Braking is barely affected: g*tan(14) = 2.45 vs 3.19 m/s^2 at 18, and DRIVE_MAX_VEL
-// 0.65 was sized against 12, so the stopping distance is still better than the config
-// that braked acceptably.
-// WHAT WOULD SETTLE IT: a SLOW deliberate push through the -17..-23 band, watching for
-// where resistance first appears, rather than a full-range sweep that flies past it.
-// Both previous sweeps were too fast in exactly this region.
-// 16 -> 14, 2026-08-15 (same day, reverting my own +2). 14 is the value that flew; that
-// alone is sufficient reason to be back at it, independent of everything below.
-// OBSERVATION, NOT A MEASURED LIMIT: disarmed, motors off (PWML 0 PWMR 0), the chassis
-// settled at PITCH -21.0 +/- 0.15 and held it for a full second at RATE ~0 -- ten
-// consecutive samples, MS 20340..21340. At clamp 16 the rear TARGET is -19.22 and PITCH
-// peaked -20.14, within 0.9 deg of that.
-// ⚠️ DO NOT SIZE ANYTHING TO -21.0. It is a RELEASE settle, which is exactly the class of
-// measurement that produced the bogus -15.67 rear limit and cost most of a session: a rest
-// angle reached by letting the chassis go is wherever the torques happened to balance on
-// that release, not where the chassis stops. It can also be the tether, which has caused
-// four wrong conclusions on this robot. A real limit is where the chassis stops under a
-// slow deliberate push AND reproduces across sweeps. The prior two-sweep manual measurement
-// says the rear rest is PITCH -28.5, far beyond this. Until a push sweep reproduces -21,
-// treat it as an open question, not a number.
-// Confirmed independently by free-body arithmetic on the same flight: sustained PITCH -19.2
-// with VF 0.02 and POS moving 0.169 -> 0.163, six millimetres in 1.5 s. A free body at 19.2
-// deg accelerates backward at g*tan(19.2) = 3.4 m/s^2 = 3.8 m of travel over that interval.
-// Off by ~600x. Something external is carrying the load; at that angle it is the stop.
-// Sizing at 14: TARGET -17.22, plus the ~0.9 deg overshoot this log shows = peak ~-18.1,
-// leaving 2.9 deg to the stop.
-// THE REAR CANNOT BE OPENED UP FURTHER, and this is geometry rather than tuning. Usable rear
-// lean is 21.0 - 3.22 = 17.8 deg, because BALANCE_SETPOINT -3.22 shifts every target rearward
-// and so spends 3.2 deg of the rear budget before the clamp sees any of it. The same offset
-// BUYS forward room (stop +30.53 -> 33.75 deg of usable lean), which is why LEAN_CLAMP_FWD
-// can sit at 24 with margin to spare while the rear is maxed at 14. Reverse acceleration
-// authority is therefore about half of forward and will stay that way until the CoM moves.
-// ---- superseded: original 14 -> 16 rationale, kept because the reasoning was sound and only
-// the input number was wrong ----
-// Pilot reports the same truncation-and-jitter in reverse as forward,
-// and the log agrees: LEAN RAW -14.00 = CMD -14.00, pinned. Raised only 2 deg, not the 6 that
-// LEAN_CLAMP_FWD got, because the rear budget is not comparable:
-//   BALANCE_SETPOINT -3.22 SUBTRACTS from forward reach and ADDS to rear reach, so the same
-//   clamp number is worth 3.2 deg less one way and 3.2 deg more the other. At 24/14 the
-//   commanded pitch was +20.78 / -17.22 against limits of +30.53 / ~-19, i.e. 9.7 deg of
-//   forward margin and 1.8 of rear.
-// 16 puts the rear TARGET at -19.2, essentially ON the documented soft contact.
-// ⚠️ THE CONTACT FIGURE IS THE REAL UNCERTAINTY AND IT IS UNRESOLVED. This file says soft
-// contact ~-19; the 2026-06 chassis measurement says the tail sits down at -15.7. Those cannot
-// both be right, and the pilot reports visible clearance at the current lean, which fits
-// neither. Everything above is arithmetic on a number nobody has re-measured.
-// MEASURE IT BEFORE GOING FURTHER: disarmed, tip the chassis back by hand until the tail
-// touches, read PITCH off the telemetry. If it is past -22 this can go to 18-19 and match the
-// forward change; if it is near -16 then 14 was already too much and the earlier rear-stall
-// diagnosis (chassis resting on its tail under full reverse) applies at this setting too.
-// 14 -> 18, 2026-08-15. Pilot: "no, rear has range. it won't break away again, if we keep
-// reduced." Correct, and my 14 was resting on the weakest number in the file. The two
-// measurements that actually reproduced say the rear has room:
-//   - manual two-sweep, disarmed, back-to-front: rear rest at PITCH -28.5
-//   - pilot's working figure: rear 20+
-// against which clamp 18 gives TARGET -21.22 and, with the ~1 deg of tracking overshoot,
-// a peak near -22.2. The -21.0 release settle I sized 14 to is NOT a limit -- it is a
-// release settle, the same class of measurement as the discredited -15.67, and sizing to
-// it re-created exactly the reverse-breakaway problem this session started with.
-// 18/18 fwd/rear is also the pairing the file records as "the config that has always
-// worked"; forward is now higher still at 24 because the forward budget is genuinely
-// bigger (see LEAN_CLAMP_FWD, and note BALANCE_SETPOINT -3.22 spends rear and buys forward).
-const float LEAN_CLAMP_REAR = 18.0f; // deg : rear cap; rear rest -28.5 (two-sweep), pilot 20+
+const float LEAN_CLAMP = 18.0f;  // deg : outer-loop authority cap (sole saturation point)
 // 0.99 -> 0.97 (tau 0.50 s -> 0.17 s, pole 2 -> 6 rad/s). The velocity loop
 // crosses over near 2.5 rad/s, so the old 2 rad/s pole sat essentially ON the
 // crossover and ate ~51 deg of phase exactly where it hurt. That lag is what
@@ -804,43 +494,6 @@ const float LEAN_CLAMP_REAR = 18.0f; // deg : rear cap; rear rest -28.5 (two-swe
 // cascade the outer loop derives lean from measured position/velocity error, so
 // that failure mode does not carry over unchanged -- but this is still the knob
 // to slow down first if the outer loop starts oscillating.
-// 0.97 -> 0.95 (2026-08-14): "when I try to brake, it takes too much time to take
-// effect and the bot crashes sometimes". This is the LAG half of that complaint.
-// tau = DT/(1-alpha): 0.005/0.03 = 167 ms at 0.97, 0.005/0.05 = 100 ms at 0.95.
-// Measured cost at 0.97 on a full reversal: leanRaw reached the clamp in 400 ms, then
-// leanCmd needed another 700 ms to follow it (-13.42 -> -17.94, which is 4.3 tau and
-// matched the model to two decimals). At 0.95 that tail is ~410 ms, so ~290 ms comes
-// off a maneuver that is running out of room.
-// Not lower yet: the outer-loop corner goes 0.95 Hz -> 1.6 Hz against an inner loop
-// closing around 3-5 Hz. Cascade rule of thumb wants the outer loop 3-5x slower than
-// the inner, and 1.6 Hz is already only ~2-3x. 0.94 is the next step if 0.95 is clean;
-// past that the two loops start arguing. This is still the first knob to RAISE if the
-// outer loop oscillates -- the old "0.95 ran away" note predates the cascade and does
-// not carry over unchanged, but it is not nothing either.
-// THIS DOES NOT FIX THE ASYMMETRY, and cannot: forward->backward braking needs REAR
-// lean, capped at 12 by the chassis, while backward->forward braking gets the forward
-// 18. That is 2.08 vs 3.19 m/s^2 of available deceleration (g*tan), i.e. the good
-// direction has 53% more, which is exactly the reported "way faster and better".
-// Software cannot close that gap; moving the rear contact can. See LEAN_CLAMP_REAR.
-// WATCH: a faster command means a faster body rotation into the lean, and rotational
-// momentum means pitch overshoots leanCmd by more, not less. Rear margin is only
-// 3.7 deg (clamp 12 vs sit-down 15.67) and overshoot was already ~1.3 deg in steady
-// drive. If LEAN ACT touches -15.7 during a hard stop the robot is ON its backstop
-// mid-brake, which removes the braking entirely -- and that is the likeliest
-// explanation for "crashes sometimes". If that shows up, this goes back to 0.97 and
-// the answer is mechanical, not a gain.
-// 0.95 -> 0.97, reverted same day. 0.95 was never flown; it was traded away as soon as
-// the overshoot budget became clear. Rear margin is the scarce resource, not response
-// time: pitch overshoot past leanCmd is what consumes the 3.7 deg between LEAN_CLAMP_REAR
-// 12 and the -15.67 sit-down, and a faster command rotates the body faster into the lean,
-// so it overshoots MORE. 0.97 is also the only alpha where the overshoot is actually
-// measured (2.78 deg peak, rear side, MS 32705 of the good brake log) -- going faster
-// invalidated that number in the dangerous direction.
-// EXCHANGE RATE, still unmeasured: slower leanCmd -> less overshoot -> more of the 15.67
-// usable -> a higher LEAN_CLAMP_REAR, which is worth ~8.5% deceleration per degree. That
-// may well beat the lag it costs, but it is a guess until the overshoot is measured at
-// this alpha. Do that before going to 0.98 (tau 250 ms), or the trade is blind in both
-// directions: giving up known response time for unknown headroom.
 const float LEAN_LPF   = 0.97f;  // EMA on leanCmd (~170 ms). Higher = slower outer loop.
 // HARD BACKSTOP ONLY. The primary anti-windup is now conditional integration
 // against LEAN_CLAMP, applied in the outer loop below.
@@ -897,78 +550,6 @@ const float OUT_DEADZONE   = 0.5f;  // ignore PD outputs smaller than this (PWM 
 // Sized against the observed ring: u swings +/-9 during a drive, so 5.0 softens more
 // than half of that amplitude while leaving the floor fully applied for real drive
 // efforts (9-30). Raise it if the 8 Hz ring persists; lower it if breakaway suffers.
-// 5.0 -> 2.5. THE REAR BREAKAWAY DEAD ZONE. Clean tether-free reverse log: the stall
-// angle FOLLOWS THE COMMAND (clamp 18 parked at pitch -20.6, clamp 14 parks at -17.2),
-// which rules out the fixed rear contact I chased for several commits. What actually
-// happens is that the loop reaches its commanded lean, ERR falls to ~0, and there is
-// no effort left to break static friction with.
-// The arithmetic: pwm = deadband*(|u|/FLOOR_KNEE) + |u|, so at FLOOR_KNEE 5 the RIGHT
-// wheel needs |u| >= 3.7 just to reach its own 27-count static floor. In the stall |u|
-// oscillates 0.15..3.7 and flips sign every tick or two -- peak PWM measured 23 against
-// a breakaway of 27, never once reached. A ramped floor below the knee is by
-// construction incapable of breaking away: it is a dead zone of +/-3.7 effort.
-// Forward escapes it by breaking away early during the lean ramp-in, when ERR is still
-// large, after which the MOVING deadband is only 11/13.
-// 2.5 halves the dead zone to |u| >= 1.9 for the right wheel. NOT lower: the knee exists
-// because a floor applied as a STEP at the zero crossing has infinite incremental gain
-// and generated an 8 Hz limit cycle (see the note at DRIVE_FRICTION_FF). 2.5 keeps a
-// ramp, just a steeper one. If an 8 Hz buzz reappears at standstill, go back up.
-// The right wheel's 27 vs the left's 15 is the real asymmetry underneath this -- the
-// deadband sweep (DEADBAND_TEST, wheels off the ground) is what would decompose that
-// into BTS7960 turn-on delay vs actual friction, and it has still never been run.
-// 2.5 -> 1.0, 2026-08-15. The ramp existed to cut incremental gain at the zero crossing
-// and starve the 8 Hz limit cycle. That cycle turned out to be the CHATTERING FLOOR (see
-// mapEffortToPwm) and died with it: post-fix burst shows PWM holding one sign for tens of
-// samples, |u| ~1.5 not 4-6, RATE +/-3 not +/-30, and no periodicity at all. With the
-// cycle gone the ramp is pure loss, and it was the thing blocking breakaway.
-// Measured, same flight: 5.7 s at full stick moved the wheels 17 counts while LEAN CMD
-// wound to 16.6 deg. pwm = floor*(|u|/KNEE) + |u|, checked against the log --
-//     U 1.06 -> 17.9*0.424 + 1.06 =  8.6 -> PWML  8
-//     U 1.88 -> 17.9*0.752 + 1.88 = 15.3 -> PWML 15
-// Sustained effort ran |u| 0.5..1.9, so PWM sat at 8..15 against a breakaway of 18. The
-// wheel COULD NOT move, however long the stick was held; the inner loop tracked its lean
-// happily the whole time (ERR ~0.2) because the failure is downstream of it.
-// At 1.0 the same |u| 1.06 gives 17.9 + 1.06 = 19.0 and clears breakaway. Chosen as the
-// value where the OBSERVED sustained efforts clear the MEASURED floor -- not tuned by feel.
-// NOTE this is the opposite direction from what the old comment here implied, and lower
-// KNEE means HIGHER incremental gain near zero (floor/KNEE + 1 = 18.9, was 8.2). If a
-// limit cycle returns, do NOT simply raise this back: the principled fix is to ramp on the
-// LOW-PASSED |u| instead of the instantaneous one, so a sustained demand gets the whole
-// floor while a dithering one averages to nothing. That machinery already exists at
-// DRIVE_FRICTION_FF and is currently disabled.
-// ⚠️ REVERTED 1.0 -> 2.5, 2026-08-15, SAME DAY. KNEE 1.0 was strictly worse: it brought
-// the limit cycle back BIGGER and did not fix breakaway either. Flight burst at 1.0:
-//   * u peaks every ~27 samples at 200 Hz = 7.4 Hz, |u| up to 10 (was ~1.5 at KNEE 2.5)
-//   * PWM slams 0 -> +/-18..28 with a zero crossing every ~10-13 samples. At KNEE 1.0 the
-//     ramp saturates by |u| = 1.0, so the map is a near-RELAY: B133 u -0.61 -> -11,
-//     B134 u 0.78 -> +14, B135 u 2.40 -> +19. Incremental gain 18.9, as predicted.
-//   * ENC deltas still 0-3 counts. The wheel gets +20 for ~65 ms then -20 for ~65 ms and
-//     nets zero, which is the ORIGINAL failure with a louder amplitude.
-// THE LESSON, and it invalidates the reasoning that led to 1.0: what blocks breakaway is
-// not the PWM magnitude at a given |u|, it is that u itself DITHERS THROUGH ZERO. Any
-// memoryless map of |u| to PWM alternates with it and nets ~0 thrust; raising the floor
-// gain only makes the dither more violent. The map is the wrong place to fix this.
-// The fix has to use TIME: ramp on the LOW-PASSED |u| so a sustained demand earns the
-// whole floor and a dithering one earns none. That machinery is at DRIVE_FRICTION_FF and
-// is disabled. Do not touch FLOOR_KNEE again as a breakaway lever.
-// 2.5 -> 5.0, 2026-08-15. 5.0 is the value in tag v2-drive-works, i.e. the last build where
-// drive actually worked, and we never came back to it. The 2.5 was reached by going 2.5 ->
-// 1.0 (pilot: "made it worse. To jittery, can't break away") and then "reverting" -- but the
-// revert landed on 2.5, not on the 5.0 that flew. So the knee has been below its known-good
-// value this whole session while I looked for the jitter elsewhere.
-// It is also the right lever on paper. This knee sets the incremental gain at the zero
-// crossing, which the notes in mapEffortToPwm and DRIVE_GAIN_SCHEDULE both name as the
-// limit-cycle generator: gain = floor/FLOOR_KNEE + 1.
-//     knee 1.0 -> 19.0   (flown, clearly worse)
-//     knee 2.5 ->  8.2   (current, jitters)
-//     knee 5.0 ->  4.6   (tag value, drive worked)
-// The trend across the two flown points already runs the right way; 5.0 continues it and is
-// the only point on the line with evidence FOR it rather than against.
-// Note the floor itself moved 15/27 -> 18/18 since the tag, so 5.0 is not a literal restore
-// of the old gain (it was 15/5+1 = 4.0 on the left wheel then, 4.6 now) -- close enough that
-// the tag's behaviour should reappear if the knee is what matters.
-// Cost of a larger knee: full friction compensation arrives later, |effort| must reach 5.0
-// rather than 2.5 for the whole floor. Drive efforts run 9-30, so this costs nothing there.
 const float FLOOR_KNEE     = 5.0f;  // PWM-effort units
 
 // ---- Per-side stiction compensation ----------------------------------------
@@ -1026,183 +607,13 @@ const float FLOOR_KNEE     = 5.0f;  // PWM-effort units
 // the right wheel 12 more PWM than the left. If a mechanical fix brings the right
 // side back near 15, re-run this test and lower it.
 //
-// DIRECTION IS NOT A VARIABLE. Settled 2026-08-15, 6 interleaved free-spin passes:
-//               L                    R
-//   back(+1)    12, 11, 10  -> 11.0   9, 11, 9  -> 9.7
-//   fwd (-1)     9,  8, 12  ->  9.7   9, 10, 9  -> 9.3
-// All 12 samples lie in 8..12. Each wheel's OWN spread (2-4 counts) exceeds the
-// fwd/rev difference (1.3 on L, 0.3 on R) and the ranges overlap in both directions,
-// so the fwd/rev gap is not resolvable above the noise. mapEffortToPwm keeps ONE
-// constant per wheel for both signs; a per-sign floor would be fitting a constant to
-// noise. Do not reopen this without a measurement that beats +/-2 counts.
-// The old caveat here (backlash/gearbox preload, "the turn logs hint that it does")
-// and the mirrored-motor argument in a06ce6c are both answered: NO.
-//
-// L@21 DID NOT REPRODUCE. Six passes, max L is 12. The two historical L@21 events
-// (1200 Hz sweep, and one 2000 Hz run) are a rare excursion -- 2 in 8 backward ramps,
-// 0 in 3 here -- not a bimodal constant. Nothing to compensate; noted so the next
-// person who meets one knows it is a known rare event and not a new regime.
-//
-// LEFT AND RIGHT ARE THE SAME WHEEL OFF THE GROUND: ~10 counts, both channels, both
-// directions, now across three independent free-spin datasets. The 9/10 MOVING split
-// below is BELOW the resolution of the measurement -- it is not evidence of a real
-// difference, and nothing should be built on top of it.
-// So the loaded 13-vs-24 asymmetry is LOAD-DEPENDENT: it appears only with the
-// robot's weight through the gearbox and vanishes free-spinning. Not electrical
-// (frequency sweep), not directional (this test), and not the rig -- pilot confirms
-// no hand side-load during the loaded runs (2026-08-15).
-//
-// ⚠️ NOT MECHANICAL. RETRACTED 2026-08-15, and the 2026-08-13 "suspect a MECHANICAL
-// fault on the right drivetrain" warning above goes with it. Pilot, hands on the
-// hardware: the right wheel is tighter to turn by hand ONLY WHEN THE ROBOT IS POWERED.
-// Power off, both wheels spin the same. Friction does not switch off with the battery.
-//
-// That is ELECTROMAGNETIC BRAKING. A motor spun by hand is a generator; short its
-// terminals and the current produces drag, leave them open and it coasts. On a BTS7960
-// both inputs LOW pulls both outputs low, shorting the motor -- brake. Kill the supply
-// and both bridges go high-impedance, so both wheels coast and feel identical. Exactly
-// the reported behaviour.
-//
-// The firmware idle state is SYMMETRIC -- motorRaw(0) and motorWriteWheel(pwm 0) both
-// write 0 to all four pins -- so the asymmetry is downstream of this file: enable (INH)
-// wiring, a bridge module difference, or a supply/ground fault on one channel.
-//
-// ISOLATED 2026-08-15, pilot by hand: LEFT had no drag either powered or unpowered.
-// RIGHT dragged only when powered. Two identical bridges idling in OPPOSITE states.
-// Both inputs low brakes ONLY if the enable pins are held high, so one module's
-// R_EN/L_EN were not doing what the other's were.
-//
-// ✅ FOUND AND FIXED 2026-08-15 (pilot): it was the EN wiring. Both wheels now behave
-// identically when powered.
-//
-// ⚠️⚠️ THEREFORE EVERY DEADBAND CONSTANT BELOW IS STALE. All of them -- 9/10 moving,
-// 13/24 static, and the 11/13 and 15/27 figures they descend from -- were measured
-// with one bridge braking at idle and the other coasting. The measurements were not
-// wrong, but the machine they described no longer exists.
-// The 13-vs-24 split is the urgent one: it now hands the right wheel 11 counts of PWM
-// to overcome a brake that has been removed. That is a real differential injected into
-// a balancing robot, and it will veer. DO NOT FLY until both are re-measured.
-// It also retires the last of the mechanical-fault thread: there was never anything
-// wrong with the right drivetrain, and the 2026-08-13 warning about a "MECHANICAL
-// fault ... over-tight hub, rubbing tire, misaligned motor mount" was chasing a jumper.
-//
-// RE-MEASURE BOTH, 6-pass -- BOTH DONE 2026-08-15:
-//   1. ✅ OFF THE GROUND -> *_MOVING, both 10.
-//   2. ✅ LOADED         -> *_STATIC, both 18. The 13-vs-24 split did not survive.
-// Consequences to walk through before flying, because three things were tuned against
-// an asymmetry that is no longer in the machine:
-//   - MAX_DEADBAND drops 24 -> 18, so the saturation-latch ceiling moves:
-//     SAT_EFFORT_FRAC*(MAX_PWM-MAX_DEADBAND) goes 81.7 -> 87.4, and the 78.85 quoted
-//     at FALL_CUTOFF_DEG was staler still (it dated from RIGHT_DEADBAND_STATIC 27).
-//     A DIFFERENT trip point, on top of the Kp-vs-Kpeff bug already open in that latch.
-//   - FLOOR_KNEE 2.5 sets incremental gain deadband/FLOOR_KNEE + 1, which was 10.6 on
-//     the right wheel and is now 8.2 on both. It was chosen against the limit cycle the
-//     old asymmetry produced.
-//   - driveControlDiff's one-floor-for-both-wheels fix exists because per-wheel floors
-//     injected a differential. With the floors now EQUAL that differential is zero and
-//     the max() is a no-op -- still correct, but no longer load-bearing.
-//
-// THE L@21 ANOMALY IS **NOT** CLOSED. It briefly looked closed: post-fix free-spin put
-// the LEFT at spread 1 in both directions, against 8..12 with 21-count outliers before,
-// and the obvious story was an enable that was not reliably asserted leaving the
-// half-bridge undriven at low duty. That story is WRONG, or at least incomplete.
-// The 2026-08-15 loaded CONFIRMATION run, taken after the EN fix, pass 1:
-//     dL EXACTLY 0 for 32 consecutive steps while dR broke at 18 and reached -496.
-//     L finally moved at 33.
-// Same signature as every historical event -- left stuck, right spinning freely -- so
-// whatever this is survived the EN repair.
-//
-// IT IS THE USB TETHER, almost certainly. A fourth loaded run with a BETTER TETHER put
-// the dropout in PASS 2 (dL exactly 0 from PWM 0 to 26, then 37 at 27), killing the
-// "always the first ramp after power-up" pattern. And this is a KNOWN rig artefact,
-// recorded 2026-06-30: the tether drags the LEFT wheel, and it was misread as a
-// friction asymmetry that time too. It accounts for every feature at once -- always the
-// left, EXACTLY zero counts (a wheel physically held, not a noisy sensor), intermittent,
-// and clearing once the ramp has enough PWM to drag the snag free.
-// So this is not an encoder dropout and not a drive fault. Before spending another
-// session on it: watch the left wheel during a stall and see whether the cable is
-// holding it. The measurement that actually settles it is an UNTETHERED run.
-//
-// THE TETHER DOES NOT INFLATE THE BASELINE -- RETRACTED. Three runs read L 18/17/16 and
-// R 18.5/17.5/16.5 as the tether improved, which looked monotonic and got committed in
-// 16272f6 as a ~2-count bias. A fourth run on the same tether came back L 18 / R 19.
-// Three points were not a trend. The tether causes discrete SNAGS; there is no evidence
-// it shifts the baseline. (Reading a trend out of three samples is the exact error this
-// whole thread has been about -- it does not stop being tempting once you have named it.)
-//
-// WATCH, NOT YET ACTIONABLE: post-fix R backward reads 13, 12, 9. Across both sessions
-// R-back is 9,9,9,11,12,13 against R-fwd 9,9,9,10,10,10 -- an upward tail on one side
-// only. Its own spread swamps the fwd/rev gap, so it is not a direction effect by this
-// file's own rule, and 3 samples per cell cannot carry a constant. Re-check if the
-// loaded run shows the same one-sided tail.
-// Expect FLOOR_KNEE 2.5 to need revisiting too -- it was tuned for the limit cycle
-// that the old asymmetry produced.
-//
-// WHY THIS IS THE MOST PROMISING LEAD IN THE FILE: brake drag on ONE channel opposes
-// breakaway from rest on that wheel and nothing else, which is the shape of the data --
-// the STATIC figures differ by 11 counts while the MOVING figures differ by 1. If the
-// right bridge brakes at zero command and the left coasts, the 13-vs-24 split is an
-// artefact of the electronics and there is nothing wrong with the drivetrain at all.
-// It would also be FIXABLE rather than compensated: coast (high-Z) at zero command
-// instead of braking. That needs the INH pins under firmware control; they are not
-// wired to the Teensy today.
-// DO NOT touch these constants until it is localised -- they are currently the only
-// thing making that wheel usable, whatever the cause turns out to be.
-// RESCALED for MOTOR_PWM_HZ 4482 -> 2000 (2026-08-14). These were all measured at 4482.
-// The free-spin sweep gave 4482 L13/R12 -> 2000 L11/R9, i.e. deltas of -2 and -3, and
-// the BTS7960 turn-on delay is an ADDITIVE pwm-count offset that does not depend on
-// mechanical load -- so the same deltas transfer exactly to the loaded figures. This is
-// arithmetic, not extrapolation.
-// Still worth a loaded re-measure to confirm: hold the robot upright, wheels on the
-// ground, DEADBAND_TEST 1. If the right static comes back near 24 this was right.
-// MOVING: re-measured 2026-08-15 AFTER the EN fix, 6 free-spin passes, median of 3
-// samples per wheel per direction. L 9,9,10,10,10,9 and R 9,9,10,10,12,13 -- median 10
-// on both, and no systematic L/R difference survives, so they are SYMMETRIC now. The
-// old 9/10 split expressed a difference the data never supported; equal floors also
-// stop injecting a differential into a command that should have none.
-const int LEFT_DEADBAND_MOVING  = 10;   // free-spin median, post-EN-fix 2026-08-15
-const int RIGHT_DEADBAND_MOVING = 10;   // ditto -- keep these two equal without evidence
-// STATIC: re-measured LOADED 2026-08-15 after the EN fix, 6 passes.
-//     back(+1)   L 16, 11, 18     R 18, 17, 19
-//     fwd (-1)   L 21, 18, 19     R 22, 18, 19
-// Medians 18 and 18.5; per-pass L-vs-R differences are 2, 1, 6, 0, 1, 0. The 13-vs-24
-// split is GONE and both wheels take 18. (The L@11 in pass 3 is a detector artefact --
-// the wheel twitched 6 counts and stalled until 16; deadbandDetect now rejects that.
-// Reading it as 16 puts L at 16,16,18 / 21,18,19.)
-//
-// HONEST CAVEAT ON WHY IT WENT AWAY: both wheels converged on ~18, which is close to
-// the mean of the old 13 and 24 -- and the original 2026-08-13 estimate was 18 before a
-// single ramp "corrected" it to 15/27. The loaded spread is wide (L 11..21, R 17..22),
-// so one ramp reading L@15 R@27 is fully consistent with both wheels having been ~18
-// all along. The pre-fix loaded test was never run 6-pass, so "the EN fix removed the
-// asymmetry" and "the asymmetry was a single-sample artefact" cannot be separated.
-// Both fit. What is certain is that it is not there now, and that neither story
-// supports carrying an 11-count differential.
-//
-// CONFIRMED by a second loaded 6-pass run with the deadbandDetect twitch fix in place:
-//     back(+1)  L 33, 18, 17    R 18, 17, 19
-//     fwd (-1)  L 16, 20, 16    R 17, 21, 17
-// Discarding the pass-1 L@33 dropout (see the L@21 note above -- it is a channel fault,
-// not a breakaway), L reads 16,18,20,17,16 and R reads 17,17,18,19,21,17. Both median
-// 17-18 across two independent loaded runs, so 18/18 stands.
-//
-// FOUR loaded runs now, 24 samples per wheel, artifacts excluded:
-//     run 3  L 17,27*,15,18,16,16   R 20,16,16,19,17,16   (*tether snag)
-//     run 4  L 19,19,14,17,17,19    R 20,19,16,19,17,20   (clean, no dropout)
-// POOLED across all four: 21 valid L samples median 17, 24 valid R samples median 18.
-// Same as the three-run pool, so the figure is stable and 18/18 stays. R runs about a
-// count above L consistently, which is not enough to split them -- and splitting would
-// reintroduce exactly the differential this file spent a session removing.
-//
-// STOP MEASURING. Four runs agree; further ramps buy noise, not precision. Erring high
-// is the safe side anyway: this project's failure mode has always been a wheel that
-// will not break away, never one that kicks too hard.
-//
-// These are MEDIANS OF A WIDE DISTRIBUTION, not thresholds. Half the samples sit above
-// 18; loaded stick-slip is severe and always has been. Do not treat 18 as the PWM at
-// which the wheel is guaranteed to move.
-const int LEFT_DEADBAND_STATIC  = 18;   // loaded median, post-EN-fix 2026-08-15
-const int RIGHT_DEADBAND_STATIC = 18;   // keep equal without evidence to split them
+// CAVEAT: DEADBAND_TEST ramps positive PWM only, so these are one-direction
+// figures. Breakaway can differ by direction (backlash, gearbox preload), and the
+// turn logs hint that it does. Worth measuring both ways eventually.
+const int LEFT_DEADBAND_MOVING  = 11;
+const int RIGHT_DEADBAND_MOVING = 13;
+const int LEFT_DEADBAND_STATIC  = 15;
+const int RIGHT_DEADBAND_STATIC = 27;
 // A wheel counts as "moving" only if it makes NET progress: at least
 // WHEEL_MOVE_COUNTS ticks in one direction across a WHEEL_WINDOW_TICKS window.
 // NOT "any tick recently" -- that was the first attempt and it was wrong. Under
@@ -1240,159 +651,11 @@ const int MAX_DEADBAND = (LEFT_DEADBAND_STATIC > RIGHT_DEADBAND_STATIC)
 // target sat BELOW one encoder count per tick (0.366 rev/s raw), so the loop was
 // regulating against a signal that was mostly quantization. 0.40 is still well under
 // the old 0.6 and gets a fuller x1 count per tick.
-// 0.40 -> 0.60 (2026-08-14), from v2-drive-works. NOTE THIS IS NOT JUST A SPEED CAP:
-// both outer-loop ramp terms scale with it, so the lean ramp goes (Kpos + KVEL_I)*Vmax
-// = 30*0.60 = 18 deg/s, up from 12, and LEAN_CLAMP 18 is now reached in ~1.0 s instead
-// of ~1.5 s. Expect it to lean into a command noticeably harder, not only run faster.
-// Encoder resolution improves too: at 0.25 the target sat BELOW one count (0.366 rev/s
-// at 200 Hz x1), at 0.40 it was ~1.1 counts, at 0.60 it is ~1.6 -- the velocity loop
-// finally has real signal rather than mostly quantization.
-// Ceiling is unchanged: 6*1.5 + 3*0.60 + 14 = 24.8, still clamped by LEAN_CLAMP 18.
-// 0.60 -> 0.90 (2026-08-14), "too slow, too sluggish, cannot overcome minor bumps".
-// EVIDENCE THIS IS THE RIGHT KNOB and not LEAN_CLAMP: in the 0.60 drive log the loop
-// was TRACKING its target, not straining against a ceiling -- TVEL 0.56 vs VF 0.55,
-// VERR 0.01, and LEAN RAW peaked at 9.43 against a clamp of 18 that never bound on
-// forward acceleration. The robot delivered exactly the speed it was asked for, so
-// the speed request is what was low. Raising LEAN_CLAMP would have done nothing here.
-// Ramp goes (Kpos + KVEL_I)*Vmax = 30*0.90 = 27 deg/s, up from 18, so LEAN_CLAMP is
-// reachable in 0.67 s instead of 1.0 -- it answers "sluggish" as well as "slow".
-// Bumps ride on the same term: a bump drops forwardVel, and the bigger the target the
-// bigger the resulting velError, so VELI winds at KVEL_I*velError and converts the
-// shortfall into lean (hence torque) faster than it did at 0.60.
-// DRIVE-ONLY BY CONSTRUCTION -- no gate needed. targetVel is identically 0 with the
-// drive stick centred, so every term this scales vanishes in plain balance and the
-// balancer keeps its tuning untouched. CH3 still scales it (cap 0.35..1.0), so this
-// raises the top of the throttle range rather than the whole range.
-// Ceiling invariant holds: 6*1.5 + 3*0.90 + 14 = 25.7, still over LEAN_CLAMP 18, so
-// that clamp remains the single saturation point behind the conditional integration.
-// Encoder resolution keeps improving: 0.90/0.366 = ~2.5 counts per tick at full stick.
-// WATCH: if LEAN RAW now starts pinning at +/-18 during forward acceleration (it did
-// not at 0.60), the clamp has become the binding constraint and IT is the next lever
-// -- and it would then need a drive-only gate, which this constant does not.
-// 0.90 -> 0.65 (2026-08-14). SIZED BY STOPPING DISTANCE, not by feel. Reported: braking
-// from forward takes too long and the robot crashes; the pilot's own read was "it keeps
-// driving forward to reach the lean, can't reach it, and crashes" -- which is the
-// non-minimum-phase surge (wheels must roll FORWARD to plant a backward lean; measured
-// at VF 0.65 -> 1.01 before the turnaround) failing because there is not enough room or
-// wheel authority left at speed.
-// The arithmetic I should have run when raising this. Stopping distance goes as
-//     d  ~  v^2 / (g * tan(theta_rear))
-// and the last few commits moved BOTH terms the wrong way at once:
-//     was:  Vmax 0.60, rear lean 18 deg -> a = 9.81*tan(18) = 3.19 m/s^2   (braked fine)
-//     then: Vmax 0.90, rear lean 12 deg -> a = 9.81*tan(12) = 2.09 m/s^2
-//     ratio = (0.90/0.60)^2 * (3.19/2.09) = 2.25 * 1.53 = 3.4x the stopping distance.
-// The 12 is not negotiable -- the chassis sits down at 15.67 deg of rear lean, see
-// LEAN_CLAMP_REAR -- so the speed is the only term left to move.
-// Reference points at the 12 deg rear cap, relative to the config that stopped well:
-//     0.49 = same distance    0.60 = 1.5x    0.69 = 2x    0.90 = 3.4x
-// 0.65 lands at ~1.8x: still quicker than the old 0.60 setup but stoppable. Go to 0.60
-// or 0.49 if it is still running out of room. Ramp comes down with it, (Kpos+KVEL_I)*Vmax
-// = 30*0.65 = 19.5 deg/s, so the forward clamp is reached in ~0.9 s.
-// THE REAL FIX IS MECHANICAL. Every degree recovered at the rear contact buys back
-// deceleration directly, and 18 deg rear would allow 0.90 again at this same distance.
-// TARGET VELOCITY SLEW (2026-08-14). The loop had no concept of BRAKING: it only ever
-// tracked a setpoint, so when momentum opposed the command all three outer terms
-// saturated at once and stayed there. Measured on a real forward->reverse slam
-// (MS 31590): LEAN POS -3.24, VEL -4.37, VELI -10.86, RAW -18.47 -> clamped. The
-// INTEGRAL was doing 59% of the braking -- a term that exists to trim a cruise had
-// become the primary brake authority, and it is the slowest thing in the loop.
-// velError sat at -1.25 rev/s for the whole maneuver, so VELI wound at KVEL_I*1.25 =
-// 30 deg/s and pinned in ~0.4 s. Consequences, all bad:
-//   1. the brake is bang-bang, not proportional -- max lean from 0.4 s until the
-//      velocity crosses zero, equally committed at 0.6 rev/s and at 0.05;
-//   2. a pinned maximum command is exactly what drives pitch past the -15.67 sit-down,
-//      because the demand never tapers so neither does the body rotation;
-//   3. at the crossing VELI is still at -13 and must unwind from saturation, so it
-//      over-reverses on the far side.
-// Fix is setpoint shaping, not another output clamp: ramp targetVel at a rate the robot
-// can actually follow, so velError stays proportional to the REMAINING deceleration
-// need. VELI then tracks instead of saturating and the lean bleeds off with the speed.
-// RATE, derived not guessed: the good brake shed 1.01 -> 0 rev/s in ~1.0 s at 18 deg of
-// rear lean = ~1.0 rev/s^2. Scaling by tan(12)/tan(18) = 0.655 for the current rear cap
-// gives ~0.7 rev/s^2, i.e. this asks for almost exactly the deceleration the chassis can
-// produce and no more.
-// ASYMMETRIC ON PURPOSE, and this is the part that matters: motion AWAY from zero is
-// rate-limited, motion TOWARD zero is instant. So releasing the stick still zeroes the
-// demand immediately (no added coast), backing off is immediate, and a full reversal
-// snaps the target to 0 first -- halving the initial velError spike from -1.25 to -0.6 --
-// and only then ramps out the far side at a plantable rate.
-// Why the sign test is not the kind of gate that killed the friction FF: it fires once
-// per direction change, its only effect is to move the target to ZERO (a value between
-// the old and new ones, never outside them), and it can never reverse the sign of
-// anything. A spurious fire costs a momentary drop in demand, not a full-amplitude PWM
-// flip. It also cannot chatter in the deadzone: DRIVE_STICK_DEADZONE makes driveIn
-// exactly 0 there, and 0 * x is never < 0.
-// Starts are not the cost they look like: 0.65 rev/s at 0.7 rev/s^2 is 0.93 s, and the
-// existing lean ramp is (Kpos + KVEL_I)*Vmax = 19.5 deg/s = ~0.9 s to the forward clamp.
-// The velocity ramp lands on top of a ramp that was already there, so it does not become
-// the binding constraint. Set TARGET_VEL_SLEW_LIMIT 0 to A/B it on the same flash.
-#define TARGET_VEL_SLEW_LIMIT 1
-const float TARGET_VEL_SLEW = 0.70f; // rev/s^2 : cap on how fast the velocity DEMAND grows
-// 0.65 -> 1.00, 2026-08-15, pilot asked for more speed. The old "conservative on purpose"
-// note below was about ENCODER RESOLUTION, and resolution gets BETTER as speed rises: one
-// count per 5 ms tick is 0.366 rev/s, so 0.65 is ~1.8 counts/tick and 1.00 is ~2.7. The
-// resolution argument constrains the LOW end, not this. The machine already demonstrates
-// the headroom -- VF hit 0.86 during aggressive drive on 2026-08-15 while the target was
-// capped at 0.65, i.e. it overshoots the old cap under its own power.
-// 1.00 -> 0.65, 2026-08-15: reverting my own change, which misread the request. The pilot
-// asked to "reduce the range" and "increase the lower bound" of the THROTTLE. Raising the
-// top end WIDENS the range -- the opposite of what was asked -- and the request is served
-// by DRIVE_MIN_VEL alone: 0.65 top with a 0.30 floor is a span of 0.35, narrower than the
-// 0.65 span it replaces, with the slow end lifted out of the dither zone.
-// The wider range also had a knock-on that cost three commits to chase: a 1.00 rev/s demand
-// makes velError large enough to drive the outer loop into LEAN_CLAMP_FWD and hold it there,
-// which reads in telemetry exactly like a lean clamp that is set too low. It was not; the
-// clamp only became binding because of this line. Back at 0.65 the forward lean demand
-// peaks around 13 deg and the 18 deg cap has margin again.
-const float DRIVE_MAX_VEL  = 0.65f; // rev/s at full stick. Original note: one encoder
+const float DRIVE_MAX_VEL  = 0.40f; // rev/s at full stick. Conservative on purpose: one encoder
                                     // count per 5 ms tick is already 0.366 rev/s (546 counts/rev),
                                     // so 0.6 rev/s is only ~1.6 counts/tick of resolution. Raise
                                     // this after the x4 hardware QuadEncoder upgrade (2184 cpr).
-// FLOOR ON THE COMMANDED SPEED, 2026-08-15, pilot request: more rpm and a NARROWER rpm range
-// on the throttle, with the lower bound raised. The stick used to map linearly from zero, so
-// just past the deadzone it asked for ~0.09 rev/s -- inside the regime where the wheels dither
-// without rolling (2026-08-15 flight: sustained |u| 0.5..1.9 gave PWM 8..15 against a measured
-// breakaway of 18, and the encoders moved 17 counts in 5.7 s). Anything the pilot could ask for
-// down there was unachievable, so the bottom of the stick travel was dead.
-// Now the stick maps its live travel onto DRIVE_MIN_VEL..DRIVE_MAX_VEL, so the smallest command
-// that is not zero is one the machine can actually execute. Observed rolling speeds are 0.2..0.5
-// rev/s and stuck ones are 0..0.1, so 0.30 sits clearly in the rolling regime.
-// The CH3 cap still scales BOTH ends, so slow mode stays slow -- the floor is a fraction of full
-// authority, not an absolute minimum speed. At cap 0.10 the floor is 0.03 rev/s and inert.
-// This does NOT fix breakaway, it stops ASKING for motion below it. If the wheels still refuse
-// at minimum stick, raise this; if it lurches off the centre detent, lower it.
-const float DRIVE_MIN_VEL  = 0.30f; // rev/s just outside the stick deadzone (scaled by the cap)
-// TURN MIXER PRIORITY (2026-08-14). Turning is differential -- effortL = u + turnCmd,
-// effortR = u - turnCmd -- so the fore-aft force, which is the SUM, is exactly 2u and
-// the turn cancels out of the pitch axis entirely. That is why turning has never upset
-// the balancer. BUT THE CANCELLATION ONLY HOLDS WHILE NEITHER WHEEL SATURATES.
-// The moment one wheel hits MAX_PWM, the clip is ONE-SIDED: u + turnCmd is truncated
-// and u - turnCmd is not, the sum stops being 2u, and the turn differential leaks into
-// COMMON MODE -- i.e. becomes a direct pitch disturbance, arriving exactly when the loop
-// has no authority left to reject it. Wheel RPM saturation does the same thing: past the
-// motor's speed limit extra PWM buys no extra torque, so the outer wheel silently stops
-// following its command. Reported symptom: spinning near max revs leaves no wheel speed
-// to plant a lean, so a reverse command cannot tip the body back at all.
-// Budget arithmetic that says this is real, not theoretical: DRIVE_MAX_VEL 0.65 plus the
-// ~0.5 rev/s of rotation seen in VROT traces asks the outer wheel for 1.15 rev/s, and the
-// highest wheel speed in ANY log is ~1.0 (the brake surge). Over-subscribed on paper.
-// Fix is mixer priority, the same rule flight controllers use for attitude vs yaw:
-//   (a) PWM budget  -- turn is clamped to whatever MAX_PWM headroom u has not taken, so
-//       the one-sided clip that breaks the cancellation can never happen;
-//   (b) speed budget -- turn fades as forward speed rises, so rotation cannot spend the
-//       RPM a lean needs. At rest the fade is 1.0, so spin-in-place is untouched.
-// Both only ever REDUCE |turnCmd| toward zero. Turn is never reversed, never boosted, and
-// yaw stays a stable decoupled axis -- so this cannot become the friction-FF failure.
-#define TURN_HEADROOM_LIMIT 1
-const float TURN_SPEED_FADE = 0.50f; // fraction of turn authority given up at full speed
-// 25 -> 16, 2026-08-15: pilot reports turns are still faster than the drive. Measured on that
-// flight, full turn stick produced TEFF up to +/-22 and VROT up to 0.61 rev/s while VF during
-// normal driving ran 0.4..0.5 -- so yaw rate was roughly 1.5x the fore-aft rate. 16 scales the
-// differential by 0.64 and brings the two into the same neighbourhood.
-// Note this is now the SECOND lever pulled in the same direction: DRIVE_MAX_VEL went 0.65 ->
-// 1.00 at the same time, so the drive/turn ratio moves by both. If turning ends up too slow,
-// undo this one before touching the speed.
-const float TURN_AUTHORITY = 16.0f; // PWM-effort differential at full turn stick
+const float TURN_AUTHORITY = 25.0f; // PWM-effort differential at full turn stick
 const float DRIVE_STICK_DEADZONE = 0.15f;
 const float TURN_STICK_DEADZONE  = 0.30f; // measured cross-axis reaches ~0.25 during straight drive
 const float DRIVE_SIGN     = +1.0f; // flip to -1 if the drive stick drives the wrong way
@@ -1477,30 +740,6 @@ const float TURN_SIGN      = +1.0f; // flip to -1 if the turn stick steers the w
 // The lean no longer needs a launch push anyway: at Kpos 6 / KVEL_I 24 / LEAN_CLAMP 18
 // it reaches 17-18 deg on its own, which was not true when the FF was designed.
 // Anything rebuilt here must be SINGLE-SIGNED. Do not reintroduce opposing phases.
-//
-// TRIED AND REVERTED SAME DAY, 2026-08-15. I built exactly the single-signed version this
-// note asks for -- LAUNCH and the lean gate deleted from the source, one phase, velError
-// aimed, nothing to misclassify -- and it FAILED HARDER than the two-phase one. Reverted in
-// 1d7de41 after one flight.
-// SINGLE-SIGNED IS NECESSARY BUT NOT SUFFICIENT. The flight (DBF ~18, ffFloor ~38):
-//     PITCH 8.47   TARGET 20.78   ERR -12.31   U 49.43   FFB -1.00   PWML 11
-//     cmd = 38 * (-1.00) + 49.43 = 11
-// The bias ate 38 of the PD's 49 for SECONDS. LEAN ACT froze at 11.7 while LEAN CMD ran to
-// 24.00 and the body never tilted: ERR pinned at -12.3, ENC dead at L -15 R -19, POS -0.031
-// unchanged over four seconds. That is the SAME cancellation the first attempt hit, and the
-// reason is the one written above -- I just talked myself out of it.
-// WHY REMOVING THE LAUNCH PHASE DOES NOT HELP: establishing a lean is non-minimum-phase.
-// The wheels must roll BACKWARD to tilt the body FORWARD. velError points at where we want
-// to END UP, so a velError-aimed bias opposes the wheel motion that builds the lean. That is
-// not a property of a "launch phase" that can be gated away -- it is true at EVERY instant
-// the lean is still being built, which while driving is most of them. My argument for
-// dropping LAUNCH was that the cascade builds the lean unaided now. It does, and it does so
-// BY ROLLING THE WHEELS BACKWARD, which is exactly what this bias cancels.
-// CONCLUSION, and this closes the direction rather than the architecture: velError IS THE
-// WRONG AIMING SIGNAL AT ALL TIMES, not merely at launch. Do not aim the floor at it again,
-// single-signed or otherwise. u has the right intent but no usable DC (it averages ~+0.2
-// across a stalled dither), so the sustained-demand idea needs a signal that is neither, or
-// a different mechanism entirely. Both obvious signals are now eliminated by experiment.
 #define DRIVE_FRICTION_FF 0
 const float FRICTION_FF_LPF    = 0.98f; // ~0.64 Hz corner at 200 Hz: passes the demand,
                                         // rejects the ring (14x down at 9 Hz).
@@ -1631,9 +870,7 @@ const float RATE_DEADZONE  = 5.0f;  // deg/s : NO LONGER gates the coast (gyro v
 const float FALL_CUTOFF_DEG = 45.0f; // trip the fall latch: |pitch| beyond this = it fell, stop fighting
 // A stand-up attempt must be BOUNDED or it cooks the motors. Two backstops now cover the
 // whole range: above ~39 deg of error the PD exceeds the saturation latch's threshold
-// (SAT_EFFORT_FRAC*(MAX_PWM-MAX_DEADBAND) = 87.4 since the 2026-08-15 re-measure took
-// MAX_DEADBAND 24 -> 18; it was 81.7 before that and the 78.85 written here previously
-// was staler still, from the 27 era -- i.e. 43.7 deg at Kp 2.0) and it latches
+// (SAT_EFFORT_FRAC*(MAX_PWM-MAX_DEADBAND) = 78.85, i.e. 39.4 deg at Kp 2.0) and it latches
 // in 0.5 s. BELOW that, between 25 and 39 deg, u sits under the sat threshold and the old
 // code would have pushed at ~60 PWM indefinitely against an obstacle -- which is exactly
 // the band this 31.6 deg pose lives in. Hence the explicit timeout.
@@ -1644,13 +881,7 @@ const float FALL_CUTOFF_DEG = 45.0f; // trip the fall latch: |pitch| beyond this
 // aggressive drive and latch the motors off mid-run. Still well under FALL_CUTOFF_DEG.
 const float         RECOVERY_GIVEUP_DEG   = 32.0f; // deg of error that counts as "still down"
 const unsigned long RECOVERY_GIVEUP_TICKS = 400;   // 2 s at 200 Hz, then give up and latch
-// 8 -> 12 (2026-08-14): "it disables and doesn't read commands at all until I physically
-// push it". This is the angle that made it stay dead. Once `fallen` latches, NOTHING
-// re-arms until the accel angle is back inside this window, and 8 deg is tight enough
-// that the robot has to be held almost perfectly upright to clear it. 12 still requires
-// a deliberate stand-up -- the rear sit-down is 15.67 and the forward stop 30.53, so a
-// robot that is actually down reads far outside 12 and cannot self-clear by lying there.
-const float FALL_REARM_DEG  = 12.0f; // re-arm ONLY when the absolute accel angle is back within this of
+const float FALL_REARM_DEG  = 8.0f;  // re-arm ONLY when the absolute accel angle is back within this of
                                      // the setpoint -- a gyro-drifting pitch estimate on its back can't
                                      // restart the motors, only physically standing it up does.
 
@@ -1704,8 +935,6 @@ float velocityLeanI = 0.0f;
 float frictionUSlow = 0.0f;   // low-passed u; aims the friction floor (DRIVE_FRICTION_FF)
 bool  frictionLeanUp = false; // latched LAUNCH -> CRUISE phase for the friction floor
 float ffFloorFilt = 47.0f;    // slew-limited FF floor; starts at the stopped value
-float plainFloorFilt = 18.0f; // same, for the no-FF path; starts at the STATIC figure so
-                              // the first breakaway from rest is not under-compensated
 bool  integralRollingPrev = false;            // edge-detect stall -> rolling for the integral reset
 unsigned long lastControlMicros = 0;
 int controlHz = 0;   // measured control-loop frequency (should read ~200; if lower, we're falling behind)
@@ -1726,7 +955,6 @@ float positionRev = 0.0f;                     // avg wheel position, revs from h
 float posSetpoint = 0.0f;                     // OUTER-LOOP TARGET position (rev). The drive stick
                                               // integrates into this; the loop always chases it.
 float targetVelLog = 0.0f;                    // latest commanded wheel velocity (rev/s)
-float targetVelSlewed = 0.0f;                 // rate-limited copy of it; see TARGET_VEL_SLEW
 float turnCmdLog = 0.0f;                      // post-deadzone differential effort
 int   motorPwmL = 0, motorPwmR = 0;           // signed PWM actually sent to each IBT-2
 
@@ -1901,11 +1129,8 @@ void setup() {
   Serial.println("ENCODER_TEST mode: motors OFF. Roll each wheel by hand "
                  "(1 turn = ~546 counts = 1.00 rev).");
 #elif DEADBAND_TEST
-  Serial.print("DEADBAND_TEST mode: OFF THE GROUND measures MOVING, ON THE FLOOR "
-               "measures STATIC. ");
-  Serial.print(DEADBAND_TEST_PASSES);
-  Serial.println(" passes, direction alternating, summary at the end. "
-                 "Do not touch the wheels between passes.");
+  Serial.println("DEADBAND_TEST mode: wheels OFF THE GROUND. Ramping PWM; "
+                 "set LEFT/RIGHT_DEADBAND_STATIC from 'first-move L@' and 'R@'.");
 #elif IMU_TEST
   Serial.println("IMU_TEST mode: motors OFF. Hold + slowly tilt FORWARD then BACK. "
                  "aPitch & gX should rise together tilting forward (consistent sign).");
@@ -1927,14 +1152,7 @@ void motorRaw(int pwm) {
     analogWrite(LEFT_MOTOR_FORWARD_PIN, 0);  analogWrite(LEFT_MOTOR_REVERSE_PIN, pwm);
     analogWrite(RIGHT_MOTOR_FORWARD_PIN, 0); analogWrite(RIGHT_MOTOR_REVERSE_PIN, pwm);
   } else {
-#if LEFT_IDLE_BRAKE
-    // Both inputs HIGH -> both outputs at VCC -> left motor shorted -> brake, matching
-    // the state the right bridge sits in on its own. See LEFT_IDLE_BRAKE.
-    analogWrite(LEFT_MOTOR_FORWARD_PIN, MOTOR_PWM_FULL);
-    analogWrite(LEFT_MOTOR_REVERSE_PIN, MOTOR_PWM_FULL);
-#else
     analogWrite(LEFT_MOTOR_FORWARD_PIN, 0);  analogWrite(LEFT_MOTOR_REVERSE_PIN, 0);
-#endif
     analogWrite(RIGHT_MOTOR_FORWARD_PIN, 0); analogWrite(RIGHT_MOTOR_REVERSE_PIN, 0);
   }
 }
@@ -1956,14 +1174,6 @@ void motorWriteWheel(int forwardPin, int reversePin, int pwm, int &lastSign) {
     analogWrite(forwardPin, 0);
     analogWrite(reversePin, -pwm);
   } else {
-#if LEFT_IDLE_BRAKE
-    if (forwardPin == LEFT_MOTOR_FORWARD_PIN) {   // see LEFT_IDLE_BRAKE: both HIGH = brake
-      analogWrite(forwardPin, MOTOR_PWM_FULL);
-      analogWrite(reversePin, MOTOR_PWM_FULL);
-      lastSign = 0;                               // leaving brake needs no reversal blanking
-      return;
-    }
-#endif
     analogWrite(forwardPin, 0);
     analogWrite(reversePin, 0);
   }
@@ -1987,17 +1197,9 @@ void motorPerWheel(int pwmL, int pwmR) {
 // ffBias (-1..+1, see DRIVE_FRICTION_FF) aims the floor at the outer loop's SUSTAINED
 // demand instead of at the sign of this tick's effort. At 0 this is the original map
 // exactly, so standing balance is unchanged.
-// plainFloor is the CONTINUOUS blend of the static and moving figures (see
-// driveControlDiff). It replaces the binary `moving ? dbMoving : dbStatic` this function
-// used to do for itself -- that gate chattered at the loop rate and square-waved the
-// floor. 2026-08-15 flight, consecutive telemetry samples with the wheels barely turning:
-//     DBL 10M DBR 10M  ->  DBL 18S DBR 18S  ->  DBL 10M DBR 18S  ->  DBL 18S DBR 10M
-// an 8-count step in the floor every tick, on both wheels, independently. The continuous
-// ffRoll blend that fixes exactly this was already built -- but only the ffBias branch
-// below ever used it, and with DRIVE_FRICTION_FF 0 that branch is inert, so the chattering
-// gate was the live path the whole time. Same bug as the one fixed at FF_FLOOR_LPF, in the
-// other half of the function.
-int mapEffortToPwm(float effort, float ffBias, float ffFloor, float plainFloor) {
+int mapEffortToPwm(float effort, float ffBias, float ffFloor, bool moving,
+                   int dbMoving, int dbStatic) {
+  int deadband = moving ? dbMoving : dbStatic;
   if (ffBias != 0.0f) {
     // One-sided friction compensation plus the raw PD effort. An effort that averages
     // to zero now averages to the bias, not to a relay twice its own amplitude.
@@ -2018,7 +1220,7 @@ int mapEffortToPwm(float effort, float ffBias, float ffFloor, float plainFloor) 
   // gets the whole floor, and drive efforts run 9-30.
   float ramp = fabs(effort) / FLOOR_KNEE;
   if (ramp > 1.0f) ramp = 1.0f;
-  int pwm = (int)constrain(plainFloor * ramp + fabs(effort), 0.0f, (float)MAX_PWM);
+  int pwm = (int)constrain((float)deadband * ramp + fabs(effort), 0.0f, (float)MAX_PWM);
   return effort > 0.0f ? pwm : -pwm;
 }
 
@@ -2053,21 +1255,10 @@ void driveControlDiff(float uL, float uR, float ffBias, float ffRoll) {
   float ffFloorTarget = (fStatic + FRICTION_FF_BOOST) * (1.0f - ffRoll) + fMoving * ffRoll;
   ffFloorFilt = FF_FLOOR_LPF * ffFloorFilt + (1.0f - FF_FLOOR_LPF) * ffFloorTarget;
   float ffFloor = ffFloorFilt;
-  // THE PLAIN PATH GETS A CONTINUOUS FLOOR TOO (2026-08-15). The old claim here was that
-  // wheelMoving could keep governing this path because "the floor only augments |effort|
-  // and a step in it cannot reverse the command". True in isolation, and still beside the
-  // point: the floor is multiplied by the ramp and added to |effort|, so an 8-count step
-  // in it is an 8-count step in PWM at constant effort, and the gate chatters every tick.
-  // Combined with the sign flip of a limit cycle that is a +/-21 square wave into a wheel
-  // trying to break away -- see mapEffortToPwm for the log. Blend on measured speed like
-  // the FF path does: same ffRoll, same LPF, no gate, nothing to chatter.
-  // ONE FLOOR FOR BOTH WHEELS is now exactly right rather than a compromise: the deadbands
-  // were re-measured symmetric (10/10 moving, 18/18 static), so a common floor injects no
-  // differential at all.
-  float plainTarget = fStatic * (1.0f - ffRoll) + fMoving * ffRoll;
-  plainFloorFilt = FF_FLOOR_LPF * plainFloorFilt + (1.0f - FF_FLOOR_LPF) * plainTarget;
-  int pwmL = mapEffortToPwm(uL, ffBias, ffFloor, plainFloorFilt);
-  int pwmR = mapEffortToPwm(uR, ffBias, ffFloor, plainFloorFilt);
+  // wheelMoving still governs the plain sign-of-u path (no FF), where the floor only
+  // augments |effort| and a step in it cannot reverse the command.
+  int pwmL = mapEffortToPwm(uL, ffBias, ffFloor, wheelMovingL, LEFT_DEADBAND_MOVING,  LEFT_DEADBAND_STATIC);
+  int pwmR = mapEffortToPwm(uR, ffBias, ffFloor, wheelMovingR, RIGHT_DEADBAND_MOVING, RIGHT_DEADBAND_STATIC);
   motorPerWheel(pwmL, pwmR);
 }
 
@@ -2127,163 +1318,30 @@ void encoderTestLoop() {
   Serial.print(" R ");             Serial.println(r / (float)ENC_COUNTS_PER_REV, 2);
 }
 
-// A wheel has broken free when it ADVANCES by DB_STEP_COUNTS within one 200 ms step AND
-// advances again on the following step. CUMULATIVE displacement is not enough: under
-// load a wheel takes up backlash, jumps a few counts and STALLS. Pass 3 of the
-// 2026-08-15 loaded run had dL reach 6 at PWM 11 then sit at exactly 6 through PWM 15
-// before really breaking at 16 -- the old bare "cumulative > 5" test recorded 11, five
-// counts early, and it was the single widest sample in that run. Requiring a second
-// advance rejects the twitch, and recording the FIRST of the two steps keeps a clean
-// break from being reported late.
-const int DB_STEP_COUNTS = 5;
-
-void deadbandDetect(int pwm, long d, long prevD, int &cand, long &candD, int &moved) {
-  if (moved) return;
-  if (cand) {
-    if (d >= candD + DB_STEP_COUNTS) { moved = cand; return; }  // advanced again: confirmed
-    cand = 0;                                                   // stalled: it was a twitch
-  }
-  if (d >= prevD + DB_STEP_COUNTS) { cand = pwm; candD = d; }   // provisional
-}
-
-// Per-wheel min/max across the passes that ran in one direction. Ignores 0 entries:
-// 0 means that wheel never broke free before MAX_PWM, which is not a threshold and must
-// not be averaged in as if it were one. Returns the number of valid samples.
-int deadbandSpread(const int *res, const int *sgn, int n, int want, int &lo, int &hi) {
-  int seen = 0;
-  for (int i = 0; i < n; i++) {
-    if (sgn[i] != want || res[i] == 0) continue;
-    if (!seen || res[i] < lo) lo = res[i];
-    if (!seen || res[i] > hi) hi = res[i];
-    seen++;
-  }
-  return seen;
-}
-
-// One line per wheel per direction: the range, not a single number. The range IS the
-// result -- if L comes back 11..21 while R comes back 8..9, the left wheel has no
-// deadband to tune and the next question is why it is bimodal, not what to set it to.
-void deadbandPrintDirection(const int *resL, const int *resR, const int *sgn,
-                            int n, int want) {
-  int lo = 0, hi = 0;
-  Serial.print(want > 0 ? "  back(+1)  L " : "  fwd (-1)  L ");
-  int seen = deadbandSpread(resL, sgn, n, want, lo, hi);
-  if (!seen) Serial.print("none");
-  else { Serial.print(lo); Serial.print(".."); Serial.print(hi);
-         Serial.print(" spread "); Serial.print(hi - lo); }
-  Serial.print("   R ");
-  lo = 0; hi = 0;
-  seen = deadbandSpread(resR, sgn, n, want, lo, hi);
-  if (!seen) Serial.println("none");
-  else { Serial.print(lo); Serial.print(".."); Serial.print(hi);
-         Serial.print(" spread "); Serial.println(hi - lo); }
-}
-
-void deadbandTestSummary(const int *resL, const int *resR, const int *sgn, int n) {
-  Serial.println();
-  Serial.println("==== DB_TEST SUMMARY ====");
-  Serial.println("pass  dir        L     R");
-  for (int i = 0; i < n; i++) {
-    Serial.print("  ");   Serial.print(i + 1);
-    Serial.print("   ");  Serial.print(sgn[i] > 0 ? "back(+1)  " : "fwd (-1)  ");
-    if (resL[i]) { Serial.print(resL[i]); } else { Serial.print("--"); }
-    Serial.print("    ");
-    if (resR[i]) { Serial.println(resR[i]); } else { Serial.println("--"); }
-  }
-  Serial.println("-- means the wheel never moved below MAX_PWM.");
-  deadbandPrintDirection(resL, resR, sgn, n, +1);
-  deadbandPrintDirection(resL, resR, sgn, n, -1);
-  // Read it in this order. Spread first, direction second: a per-direction deadband is
-  // only meaningful if each direction is tight enough to have a value at all.
-  Serial.println("READ: spread within a direction FIRST. If a wheel's own spread is as");
-  Serial.println("big as the fwd/rev gap, direction is not the variable and per-direction");
-  Serial.println("deadbands would be fitting a constant to noise. Only if both directions");
-  Serial.println("are tight (<=1) and differ does mapEffortToPwm need a per-sign floor.");
-  Serial.println("=========================");
-}
-
-// Deadband measurement: slowly ramp PWM, report the PWM at which each wheel first turns
-// (its stiction threshold). Run with the wheels off the ground.
-//
-// Runs DEADBAND_TEST_PASSES ramps back to back, alternating direction, then prints the
-// summary and stops. No reset or reflash between samples -- see DEADBAND_TEST_PASSES for
-// why repeats and interleaving are the point.
+// Deadband measurement: slowly ramp PWM, report the PWM at which each wheel
+// first turns (its stiction threshold). Run with the wheels off the ground.
 void deadbandTestLoop() {
   static bool seeded = false;
   static long baseL = 0, baseR = 0;
   static int  pwm = 0, movedL = 0, movedR = 0;     // 0 = wheel hasn't moved yet
-  static int  candL = 0, candR = 0;                // provisional breakaway, not yet confirmed
-  static long candDL = 0, candDR = 0, prevDL = 0, prevDR = 0;
-  static int  pass = 0;
-  static int  sign = DEADBAND_TEST_SIGN;
-  static bool coasting = false, finished = false;
   static unsigned long lastStep = 0;
-  static int  resL[DEADBAND_TEST_PASSES], resR[DEADBAND_TEST_PASSES];
-  static int  resSign[DEADBAND_TEST_PASSES];
-
-  if (finished) { motorRaw(0); return; }
-
-  if (!seeded) {
-    readEncoders(baseL, baseR);
-    seeded   = true;
-    lastStep = millis();
-    Serial.print("DB_TEST pass ");  Serial.print(pass + 1);
-    Serial.print("/");              Serial.print(DEADBAND_TEST_PASSES);
-    Serial.println(sign > 0 ? "  sign +1 (backward)" : "  sign -1 (forward)");
-  }
-
-  // Between passes: motors off, and WAIT for the rotor to coast to a stop before
-  // re-seeding the baseline. Re-seeding while it still turns carries the leftover
-  // rotation into the next pass and trips the >5-count move test at pwm 0, which would
-  // report a deadband of 0 and look like a spectacular result.
-  if (coasting) {
-    if (millis() - lastStep < (unsigned long)DEADBAND_TEST_DWELL_MS) return;
-    coasting = false;
-    seeded   = false;
-    pwm = 0; movedL = 0; movedR = 0;
-    candL = 0; candR = 0; candDL = 0; candDR = 0; prevDL = 0; prevDR = 0;
-    return;
-  }
-
+  if (!seeded) { readEncoders(baseL, baseR); seeded = true; lastStep = millis(); }
   if (millis() - lastStep < 200) return;           // step every 200 ms
   lastStep = millis();
 
   long l, r; readEncoders(l, r);
-  long dl = labs(l - baseL), dr = labs(r - baseR);
-  deadbandDetect(pwm, dl, prevDL, candL, candDL, movedL);   // see deadbandDetect: a
-  deadbandDetect(pwm, dr, prevDR, candR, candDR, movedR);   // twitch is not a breakaway
-  prevDL = dl; prevDR = dr;
+  if (!movedL && labs(l - baseL) > 5) movedL = pwm; // record the PWM that broke stiction
+  if (!movedR && labs(r - baseR) > 5) movedR = pwm;
 
-  Serial.print("DB_TEST p");           Serial.print(pass + 1);
-  Serial.print(sign > 0 ? "+" : "-");
-  Serial.print(" PWM ");               Serial.print(pwm);
+  Serial.print("DB_TEST PWM ");        Serial.print(pwm);
   Serial.print(" dL ");                Serial.print(l - baseL);
   Serial.print(" dR ");                Serial.print(r - baseR);
   Serial.print("  | first-move L@");   Serial.print(movedL);
   Serial.print(" R@");                 Serial.println(movedR);
 
-  if ((movedL && movedR) || pwm >= MAX_PWM) {      // pass done
-    motorRaw(0);
-    resL[pass] = movedL; resR[pass] = movedR; resSign[pass] = sign;
-    pass++;
-    if (pass >= DEADBAND_TEST_PASSES) {
-      deadbandTestSummary(resL, resR, resSign, DEADBAND_TEST_PASSES);
-      finished = true;
-      return;
-    }
-    sign     = -sign;                              // interleave the directions
-    coasting = true;
-    lastStep = millis();
-    return;
-  }
+  if ((movedL && movedR) || pwm >= MAX_PWM) { motorRaw(0); return; }  // done: stop ramping
   pwm++;
-  // sign +1 ramps positive PWM = physical BACKWARD (see motorRaw). Every deadband figure
-  // in this file was taken that way. mapEffortToPwm applies ONE constant per wheel to
-  // BOTH signs, so if breakaway differs by direction -- backlash, gearbox preload -- one
-  // direction is mis-compensated with no way to express it. Mirrored motors make that a
-  // robot-level fwd/rev asymmetry, because each motor runs in its opposite local
-  // direction between the two. The printed numbers stay magnitudes either way.
-  motorRaw(sign * pwm);
+  motorRaw(pwm);
 }
 
 // IMU sign/axis check: motors off, stream the accel-pitch and all three gyro
@@ -2466,7 +1524,6 @@ void loop() {
     frictionUSlow = 0.0f;
     frictionLeanUp = false;
     ffFloorFilt = (float)RIGHT_DEADBAND_STATIC + FRICTION_FF_BOOST;  // re-arm stopped
-    plainFloorFilt = (float)RIGHT_DEADBAND_STATIC;                   // ditto, no boost
     turnCmdLog = 0.0f;
     controlLog.targetPitch = BALANCE_SETPOINT;
     controlLog.pTerm = controlLog.iTerm = 0.0f;
@@ -2494,7 +1551,6 @@ void loop() {
     homeTicksSum = hl + hr;      // re-home under the robot while it's parked...
     posSetpoint  = 0.0f;         // ...and park the outer-loop target there too, so
     targetVelLog = 0.0f;         // re-arming never lurches toward a stale setpoint.
-    targetVelSlewed = 0.0f;      // ...including the slew state, so the ramp starts at rest
     satTicks     = 0;
     armedPrev    = false;        // next armed tick re-triggers the soft start
     driveCommandPrev = false;
@@ -2547,49 +1603,14 @@ void loop() {
   // a pure differential passes straight through). CH3 throttle caps both. With
   // BOTH sticks centered these are 0 and the balancer behaves exactly as before.
   float speedIn   = crsf::speed();
-  // 0.35 + 0.65*SPD -> 0.10 + 0.90*SPD (2026-08-14, "give 90 percent of the rpm to the
-  // throttle scale"). CH3 now owns 90 points of the range instead of 65: full stick is
-  // still 1.00 x Vmax, but the bottom drops from 0.35 to 0.10 so the knob actually
-  // spans the speed range instead of living in its top two thirds. The 0.10 floor is
-  // deliberate -- a true zero would make targetVel identically 0 at low throttle, which
-  // reads as "drive stick does nothing" rather than "drive slowly", and would also stop
-  // `driving` from ever latching. Worth knowing the range moved: the log that prompted
-  // this had SPD 0.33 -> cap 0.56; the same stick position is now cap 0.40, so a given
-  // throttle setting is SLOWER than before while full stick is unchanged.
-  float cap       = 0.10f + 0.90f * speedIn;                          // CH3 speed cap 0.10..1.0
+  float cap       = 0.35f + 0.65f * speedIn;                          // CH3 speed cap 0.35..1.0
   float driveRaw  = crsf::drive();
   float turnRaw   = crsf::turn();
   float driveIn   = driveRaw;
   float turnIn    = turnRaw;
   if (fabs(driveIn) < DRIVE_STICK_DEADZONE) driveIn = 0.0f;
   if (fabs(turnIn) < TURN_STICK_DEADZONE) turnIn = 0.0f;
-  // Map the stick's LIVE travel (deadzone..1) onto DRIVE_MIN_VEL..DRIVE_MAX_VEL instead of
-  // scaling from zero, so the first non-zero command is already a speed the wheels can hold.
-  // See DRIVE_MIN_VEL. driveIn is exactly 0 inside the deadzone, so a centred stick still
-  // commands exactly 0 and the balancer's standing behaviour is untouched.
-  float targetVelRaw = 0.0f;
-  if (driveIn != 0.0f) {
-    float live = (fabs(driveIn) - DRIVE_STICK_DEADZONE) / (1.0f - DRIVE_STICK_DEADZONE);
-    live = constrain(live, 0.0f, 1.0f);
-    float speed = DRIVE_MIN_VEL + live * (DRIVE_MAX_VEL - DRIVE_MIN_VEL);
-    targetVelRaw = DRIVE_SIGN * (driveIn > 0.0f ? 1.0f : -1.0f) * cap * speed;  // rev/s, + = fwd
-  }
-#if TARGET_VEL_SLEW_LIMIT
-  // See TARGET_VEL_SLEW. Away from zero is rate-limited so the demand stays plantable;
-  // toward zero is instant so a release still stops asking immediately. A sign flip
-  // drops the target to zero first, then ramps out the far side from there.
-  if (targetVelRaw * targetVelSlewed < 0.0f) targetVelSlewed = 0.0f;
-  if (fabs(targetVelRaw) <= fabs(targetVelSlewed)) {
-    targetVelSlewed = targetVelRaw;                                   // toward zero: free
-  } else {
-    const float step = TARGET_VEL_SLEW * DT;
-    targetVelSlewed += constrain(targetVelRaw - targetVelSlewed, -step, step);
-  }
-  float targetVel = targetVelSlewed;
-#else
-  targetVelSlewed = targetVelRaw;
-  float targetVel = targetVelRaw;
-#endif
+  float targetVel = DRIVE_SIGN * driveIn * cap * DRIVE_MAX_VEL;       // rev/s, + = forward
   float turnCmd   = TURN_SIGN  * turnIn  * cap * TURN_AUTHORITY;      // per-wheel PWM-effort diff
   targetVelLog = targetVel;
   turnCmdLog = turnCmd;
@@ -2635,16 +1656,7 @@ void loop() {
     launchRollingTicks = 0;
     controlLog.launchEvent = '-';
   } else if (!driving) {
-    if (driveCommandPrev) {
-      posSetpoint = positionRev;
-#if COAST_BRAKE
-      // Falling edge: drop the cruise trim so the coast brake starts from zero
-      // rather than unwinding a forward-signed integral through zero first. VELI
-      // read +3.48 at release, which at 10.6 deg/s is ~0.33 s of wrong-signed
-      // lean before braking could even begin.
-      velocityLeanI = 0.0f;
-#endif
-    }
+    if (driveCommandPrev) posSetpoint = positionRev;
     driveVelocityEffortLatched = false;
     launchAssistState = LAUNCH_IDLE;
     launchAssistDirection = 0;
@@ -2760,15 +1772,7 @@ void loop() {
   // not trimming a cruise, so it is discarded at breakaway and the integral
   // restarts from zero for the cruise it actually exists to trim.
   bool integralRolling = fabs(forwardVel) >= VEL_I_ROLL_MIN;
-#if COAST_BRAKE
-  // Still rolling counts as well as still commanded -- see COAST_BRAKE. The
-  // breakaway edge below cannot misfire during a coast: integralRolling is
-  // already true on stick release and stays true until the robot stops.
-  bool integralActive = driving || integralRolling;
-#else
-  bool integralActive = driving;
-#endif
-  if (!integralActive) {
+  if (!driving) {
     velocityLeanI = 0.0f;
   } else {
     if (integralRolling && !integralRollingPrev) velocityLeanI = 0.0f;   // breakaway
@@ -2793,14 +1797,11 @@ void loop() {
   // ceiling. On breakaway there is no lurch to unwind: forwardVel rises,
   // velError collapses, and positionRev catches posSetpoint, so all three terms
   // shrink on their own.
-  // Asymmetric: the chassis has 30.5 deg of forward lean and 15.7 deg of rear before it
-  // sits on its rear contact, so the saturation point differs by direction. + = forward.
-  float leanLimit = leanRaw >= 0.0f ? LEAN_CLAMP_FWD : LEAN_CLAMP_REAR;
-  if (fabs(leanRaw) >= leanLimit) {
+  if (fabs(leanRaw) >= LEAN_CLAMP) {
     posSetpoint   = posSetpointPrev;
     velocityLeanI = velocityLeanIPrev;
   }
-  leanRaw = constrain(leanRaw, -LEAN_CLAMP_REAR, LEAN_CLAMP_FWD);
+  leanRaw = constrain(leanRaw, -LEAN_CLAMP, LEAN_CLAMP);
   float leanCmdBefore = leanCmd;
   leanCmd = LEAN_LPF * leanCmd + (1.0f - LEAN_LPF) * leanRaw;
 #if STATIC_LEAN_TEST
@@ -3067,18 +2068,8 @@ void loop() {
   controlLog.frictionFF = frictionFF;
   controlLog.frictionLeanUp = frictionLeanUp;
 
-  // Balance has priority over turn; turn spends only what is left. See TURN_AUTHORITY.
-  float turnMix = turnCmd;
-#if TURN_HEADROOM_LIMIT
-  float pwmHeadroom = (float)MAX_PWM - fabs(u);            // (a) keep u + turn off the clip
-  if (pwmHeadroom < 0.0f) pwmHeadroom = 0.0f;
-  turnMix = constrain(turnMix, -pwmHeadroom, pwmHeadroom);
-  float speedFrac = constrain(fabs(forwardVel) / DRIVE_MAX_VEL, 0.0f, 1.0f);
-  turnMix *= (1.0f - TURN_SPEED_FADE * speedFrac);         // (b) leave RPM for the lean
-#endif
-  turnCmdLog = turnMix;   // TEFF reports what was APPLIED, not what the stick asked for
-  controlLog.effortL = u + turnMix;
-  controlLog.effortR = u - turnMix;
+  controlLog.effortL = u + turnCmd;
+  controlLog.effortR = u - turnCmd;
   // Continuous stopped->rolling blend for the FF floor. NOT gated on wheelMoving: that
   // flag toggles at encoder-noise level and square-waved the floor. See driveControlDiff.
   float ffRoll = constrain(fabs(forwardVel) / FRICTION_FF_ROLL_VEL, 0.0f, 1.0f);
@@ -3197,13 +2188,10 @@ void telemetry(float error, float rate, float u) {
   // DRIVE_LAUNCH_ASSIST went to 0, and misleading (it is not a start ANGLE).
   Serial.print(" FALLDEG "); Serial.print(FALL_CUTOFF_DEG, 1);
   Serial.print(" GBIAS "); Serial.print(gyroYBias, 2);
-  // DBF is the floor ACTUALLY in force this tick: one continuous blended value for both
-  // wheels now, so it can be read as a number rather than decoded from a chattering
-  // M/S gate. It should slew between the moving and static figures, never step.
-  // wheelMovingL/R are still shown (MV) because they remain the raw evidence of how
-  // violently the old gate was chattering -- but nothing in the PWM path reads them.
-  Serial.print(" DBF "); Serial.print(plainFloorFilt, 1);
-  Serial.print(" MV "); Serial.print(wheelMovingL ? "M" : "S");
+  // Floors actually in force this tick (M = moving/Coulomb, S = static breakaway).
+  Serial.print(" DBL "); Serial.print(wheelMovingL ? LEFT_DEADBAND_MOVING : LEFT_DEADBAND_STATIC);
+  Serial.print(wheelMovingL ? "M" : "S");
+  Serial.print(" DBR "); Serial.print(wheelMovingR ? RIGHT_DEADBAND_MOVING : RIGHT_DEADBAND_STATIC);
   Serial.print(wheelMovingR ? "M" : "S");
   Serial.print(" PWMHZ "); Serial.print(MOTOR_PWM_HZ);
   Serial.print(" SET "); Serial.println(sweepIdx + 1);
