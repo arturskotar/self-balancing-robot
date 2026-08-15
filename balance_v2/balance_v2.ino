@@ -972,14 +972,22 @@ const float FLOOR_KNEE     = 2.5f;  // PWM-effort units
 //     dL EXACTLY 0 for 32 consecutive steps while dR broke at 18 and reached -496.
 //     L finally moved at 33.
 // Same signature as every historical event -- left stuck, right spinning freely -- so
-// whatever this is survived the EN repair. ac0b305's blocker stands, restated:
-//   * all three known events are PASS 1, the first ramp after power-up
-//   * dL sat at EXACTLY 0, with none of the +/-1..2 jitter every other pass shows,
-//     which fits a truly locked wheel and a silent encoder channel equally well
-// DISCRIMINATOR IS THE PILOT'S EYES, not more telemetry: during such a pass, does the
-// left wheel physically sit still while the robot pivots around it? If it moves and the
-// log says 0, the encoder channel is dropping out and every L/R figure is suspect. Ask
-// before theorising -- this is exactly the observation ac0b305 needed and never got.
+// whatever this is survived the EN repair.
+//
+// IT IS THE USB TETHER, almost certainly. A fourth loaded run with a BETTER TETHER put
+// the dropout in PASS 2 (dL exactly 0 from PWM 0 to 26, then 37 at 27), killing the
+// "always the first ramp after power-up" pattern. And this is a KNOWN rig artefact,
+// recorded 2026-06-30: the tether drags the LEFT wheel, and it was misread as a
+// friction asymmetry that time too. It accounts for every feature at once -- always the
+// left, EXACTLY zero counts (a wheel physically held, not a noisy sensor), intermittent,
+// and clearing once the ramp has enough PWM to drag the snag free.
+// So this is not an encoder dropout and not a drive fault. Before spending another
+// session on it: watch the left wheel during a stall and see whether the cable is
+// holding it. The measurement that actually settles it is an UNTETHERED run.
+//
+// THE TETHER ALSO INFLATES THE LOADED NUMBERS GENERALLY, not just during snags. Loaded
+// medians across three runs as the tether improved: L 18/17/16, R 18.5/17.5/16.5 --
+// monotonic, both wheels, ~2 counts. Treat the constants below as an UPPER BOUND.
 //
 // WATCH, NOT YET ACTIONABLE: post-fix R backward reads 13, 12, 9. Across both sessions
 // R-back is 9,9,9,11,12,13 against R-fwd 9,9,9,10,10,10 -- an upward tail on one side
@@ -1036,6 +1044,13 @@ const int RIGHT_DEADBAND_MOVING = 10;   // ditto -- keep these two equal without
 // Discarding the pass-1 L@33 dropout (see the L@21 note above -- it is a channel fault,
 // not a breakaway), L reads 16,18,20,17,16 and R reads 17,17,18,19,21,17. Both median
 // 17-18 across two independent loaded runs, so 18/18 stands.
+//
+// THIRD loaded run, better tether: L 17,27*,15,18,16,16  R 20,16,16,19,17,16 (*tether
+// snag, see above). Pooling every valid loaded sample across all three runs gives
+// median L 17 / R 18, so 18/18 is within a count and stays -- but the per-run medians
+// fall as the tether improves, so the true untethered figure is LOWER than this.
+// Erring high is the safer direction here: this project's failure mode has always been
+// a wheel that will not break away, not one that kicks too hard.
 //
 // These are MEDIANS OF A WIDE DISTRIBUTION, not thresholds. Half the samples sit above
 // 18; loaded stick-slip is severe and always has been. Do not treat 18 as the PWM at
