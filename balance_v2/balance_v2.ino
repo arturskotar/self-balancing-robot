@@ -851,7 +851,22 @@ const float OUT_DEADZONE   = 0.5f;  // ignore PD outputs smaller than this (PWM 
 // LOW-PASSED |u| instead of the instantaneous one, so a sustained demand gets the whole
 // floor while a dithering one averages to nothing. That machinery already exists at
 // DRIVE_FRICTION_FF and is currently disabled.
-const float FLOOR_KNEE     = 1.0f;  // PWM-effort units
+// ⚠️ REVERTED 1.0 -> 2.5, 2026-08-15, SAME DAY. KNEE 1.0 was strictly worse: it brought
+// the limit cycle back BIGGER and did not fix breakaway either. Flight burst at 1.0:
+//   * u peaks every ~27 samples at 200 Hz = 7.4 Hz, |u| up to 10 (was ~1.5 at KNEE 2.5)
+//   * PWM slams 0 -> +/-18..28 with a zero crossing every ~10-13 samples. At KNEE 1.0 the
+//     ramp saturates by |u| = 1.0, so the map is a near-RELAY: B133 u -0.61 -> -11,
+//     B134 u 0.78 -> +14, B135 u 2.40 -> +19. Incremental gain 18.9, as predicted.
+//   * ENC deltas still 0-3 counts. The wheel gets +20 for ~65 ms then -20 for ~65 ms and
+//     nets zero, which is the ORIGINAL failure with a louder amplitude.
+// THE LESSON, and it invalidates the reasoning that led to 1.0: what blocks breakaway is
+// not the PWM magnitude at a given |u|, it is that u itself DITHERS THROUGH ZERO. Any
+// memoryless map of |u| to PWM alternates with it and nets ~0 thrust; raising the floor
+// gain only makes the dither more violent. The map is the wrong place to fix this.
+// The fix has to use TIME: ramp on the LOW-PASSED |u| so a sustained demand earns the
+// whole floor and a dithering one earns none. That machinery is at DRIVE_FRICTION_FF and
+// is disabled. Do not touch FLOOR_KNEE again as a breakaway lever.
+const float FLOOR_KNEE     = 2.5f;  // PWM-effort units
 
 // ---- Per-side stiction compensation ----------------------------------------
 // Every non-zero PID effort gets a static floor so the wheel actually moves.
