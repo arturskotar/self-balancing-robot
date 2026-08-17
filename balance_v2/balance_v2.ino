@@ -581,9 +581,10 @@ const float DRIVE_KVEL_MULTIPLIER = 1.0f;
 // WHAT NOW BINDS, in order (smallest first) -- the chassis is LAST:
 //     saturation latch   ~19.7 deg ACTUAL   <-- tightest, and it is a BUG, see below
 //     RECOVERY_GIVEUP    32 deg
-//     FALL_CUTOFF_DEG    45 deg             <-- disarms before the frame ever touches
+//     FALL_CUTOFF        63 fwd / 47 rear   <-- now AT the frame (was a symmetric 45)
 //     chassis            ~-51 rear / +61 fwd
-// THE ARMED ROBOT CAN NO LONGER REACH ITS OWN STOPS. FALL_CUTOFF_DEG 45 fires 6 deg before
+// SUPERSEDED: this held only while FALL_CUTOFF was a symmetric 45. It is now AT the frame,
+// so the armed robot CAN reach its stops. Old text kept for the arithmetic: 45 fired 6 deg before
 // the rear frame and 16 deg before the forward frame, so chassis contact is now reachable
 // only with the motors already disarmed. Every "the robot is sitting on its stop" style of
 // explanation for a stall is off the table while armed -- that was a live hypothesis at
@@ -636,15 +637,17 @@ const float DRIVE_KVEL_MULTIPLIER = 1.0f;
 // pilot." So the firmware stops deciding which part of the range is worth having. Both caps
 // go to 40, symmetric, and the pilot flies whatever is there.
 //
-// 40 IS THE MAXIMUM THAT IS NOT SELF-DEFEATING, and the reason is FALL_CUTOFF_DEG:
-//     if (fabs(pitch - BALANCE_SETPOINT) > FALL_CUTOFF_DEG) fallen = true;
-// That test is on the LEAN from the balance point, not on absolute pitch, so it is a direct
-// ceiling on this constant. Setting the clamp to 45 would command exactly the angle that
-// latches the robot as fallen -- full stick would cut the motors. 40 leaves 5 deg for the
-// tracking overshoot (~1-2 deg steady, more through a hard reversal).
-// RECOVERY_GIVEUP_DEG 32 does NOT bind here: it gates on tracking ERROR, not on pitch, so a
-// large commanded lean is fine as long as the robot can follow it. It only fires when the
-// robot cannot, which is what it is for.
+// Sized against the FRAME, not against an arbitrary margin -- pilot: "we shouldn't
+// overconstrain it." The fall latch now sits at the measured frame contacts
+// (FALL_CUTOFF_FWD_DEG 63 / REAR 47, in lean), so these sit just inside those, leaving ~3 deg
+// for tracking overshoot so that commanding full stick does not itself trip the latch.
+// Two safety checks had to move first, and BOTH would have cut the motors at full stick:
+//   * FALL_CUTOFF_DEG was a single symmetric 45, below the frame in both directions.
+//     Now split and moved out to the frame.
+//   * RECOVERY_GIVEUP_DEG 32 gated on the LEAN, not on tracking error -- I had this
+//     backwards and said so out loud. Any commanded lean past 32 held for 2 s latched the
+//     robot as fallen. Harmless at LEAN_CLAMP 18, fatal at 44. Now gates on tracking error,
+//     which is what "the stand-up attempt timed out" actually means.
 //
 // WHAT THE PILOT IS ACCEPTING, stated plainly rather than prevented:
 //   * The rear TORQUE NULL at lean -14.98 (PITCH -18.2) is now INSIDE the range, not fenced
@@ -652,15 +655,12 @@ const float DRIVE_KVEL_MULTIPLIER = 1.0f;
 //     is the thing the 10 deg cap existed to avoid. See lean-equilibria notes.
 //   * Beyond the null the restoring torque opposes the commanded direction, so deep rear
 //     lean may drive the wrong way. Unmeasured; now reachable.
-//   * At full rear stick the actual lean can reach ~42, and FALL_CUTOFF fires at 45. The
-//     rear FRAME is at lean -47.8 (PITCH -51), so the latch still fires ~2.8 deg before the
-//     chassis touches -- but that is the narrowest margin anywhere in this file.
-//   * Forward is uncapped by geometry (frame at lean +64.2) and this is well inside it.
-// Was 18 fwd / 10 rear. If a latch-on-full-stick shows up in the log (STATE goes to the fall
-// latch with |LEAN ACT| ~45), drop both to 38 rather than raising FALL_CUTOFF_DEG -- that
-// cutoff is the last thing standing between an aggressive lean and the floor.
-const float LEAN_CLAMP_FWD  = 40.0f; // deg : forward cap. TARGET +36.78
-const float LEAN_CLAMP_REAR = 40.0f; // deg : rear cap.    TARGET -43.22, null at -18.2 is inside
+//   * At full rear stick the robot is 3 deg from the frame and the fall latch is what stops
+//     it. That is the intended behaviour now, not a margin failure.
+// Was 18 fwd / 10 rear, then 40/40. If the fall latch fires on full stick, drop these rather
+// than pushing FALL_CUTOFF past the frame -- past the frame there is nothing left to catch it.
+const float LEAN_CLAMP_FWD  = 60.0f; // deg : forward cap. Frame at lean +64.2, latch at 63
+const float LEAN_CLAMP_REAR = 44.0f; // deg : rear cap.    Frame at lean -47.8, latch at 47
 // Kept for the places that want a single worst-case figure (see LEAN_RATE_FF_MAX).
 const float LEAN_CLAMP = (LEAN_CLAMP_FWD > LEAN_CLAMP_REAR) ? LEAN_CLAMP_FWD : LEAN_CLAMP_REAR;
 // 0.99 -> 0.97 (tau 0.50 s -> 0.17 s, pole 2 -> 6 rad/s). The velocity loop
@@ -741,7 +741,7 @@ unsigned long sweepLastMs = 0;
 // SAT_EFFORT_FRAC * (MAX_PWM - MAX_DEADBAND), so it moves 87.4 -> 115.9 with this. The
 // effort half of that latch is now even less likely to bind, which is fine -- since the
 // 2026-08-15 fix the ANGLE half (SAT_TRIP_DEG 39) is what actually decides, and it is
-// unaffected by this constant. FALL_CUTOFF_DEG 45 remains the real ceiling on angle.
+// unaffected by this constant. FALL_CUTOFF (63 fwd / 47 rear, at the frame) is the ceiling.
 // WATCH MOTOR HEAT AND CURRENT. This is the constant most likely to cook something; the
 // previous note said the same and it still applies with more force at 140.
 const int   MAX_PWM        = 140;   // ceiling, 0-255. 80 -> 110 -> 140 (140 mm wheels)
@@ -1076,7 +1076,7 @@ const unsigned long SAT_TIMEOUT_TICKS = 100;   // 0.5 s at 200 Hz
 // COST, stated honestly: a motor pinned at less than SAT_TRIP_DEG no longer latches through
 // THIS path. That is deliberate -- pinned effort at a recoverable angle is the loop working,
 // not failing, and it is what the old test could not distinguish. RECOVERY_GIVEUP_DEG (32,
-// with its own timeout) covers the band above it, and FALL_CUTOFF_DEG 45 covers the top.
+// with its own timeout) covers the band above it, and FALL_CUTOFF at the frame covers the top.
 const float         SAT_TRIP_DEG    = 39.0f;   // deg of |error| that also has to be true
 
 // ---- Coast band (motor protection): rest the motors near balance -----------
@@ -1099,7 +1099,25 @@ const float RATE_DEADZONE  = 5.0f;  // deg/s : NO LONGER gates the coast (gyro v
 // At 31.6 deg of error the PD asks for Kp*31.6 = 63 PWM against a 110 ceiling, which is
 // authority it already has; the cutoff was the only thing in the way. Beyond ~45 deg the
 // accel pitch gets ambiguous and it is genuinely on its back, so that is the new line.
-const float FALL_CUTOFF_DEG = 45.0f; // trip the fall latch: |pitch| beyond this = it fell, stop fighting
+// ══ SPLIT AND MOVED TO THE FRAME 2026-08-15, ON PILOT'S CALL ══
+// "the hard ceiling should be the rest degree. when the bot leans on the frame."
+// Right: below frame contact the robot is still on its wheels and could in principle
+// recover, so latching at 45 was giving up with travel still in hand. Measured frame
+// contacts (LEAN_SWEEP, 140 mm wheels), converted to LEAN = pitch - BALANCE_SETPOINT:
+//     rear     PITCH -51  ->  lean -47.8   -> cutoff 47
+//     forward  PITCH +61  ->  lean +64.2   -> cutoff 63
+// Asymmetric because the chassis is, and because BALANCE_SETPOINT -3.22 shifts the two
+// directions oppositely. A single symmetric number would have to take the rear value and
+// would then throw away 17 deg of forward travel.
+//
+// THE OLD 45 RESTED PARTLY ON A FALSE PREMISE. Its comment said "beyond ~45 deg the accel
+// pitch gets ambiguous". It does not: accelPitch() is atan2(ax, az), which is single-valued
+// through +/-180, and the LEAN_SWEEP run read +61 and -51 cleanly and stably for seconds.
+// There is no sensor reason to stop at 45.
+// WHAT IS STILL TRUE: past the frame the robot IS down, and fighting it there just cooks
+// motors. That is what these now mark, and nothing else.
+const float FALL_CUTOFF_FWD_DEG  = 63.0f; // lean beyond this = on the forward frame, stop fighting
+const float FALL_CUTOFF_REAR_DEG = 47.0f; // lean beyond this = on the rear frame, stop fighting
 // A stand-up attempt must be BOUNDED or it cooks the motors. Two backstops now cover the
 // whole range: above SAT_TRIP_DEG (39) of error, with the output also pinned, the saturation
 // latch fires in 0.5 s.
@@ -1114,7 +1132,7 @@ const float FALL_CUTOFF_DEG = 45.0f; // trip the fall latch: |pitch| beyond this
 // the worst observed ACTUAL overshoot was 18.5 deg, so this cannot false-trip on a drive.
 // 25 -> 32. Had to move with LEAN_CLAMP: a commanded 18 deg overshoots in practice
 // (~1.4x observed), so 25 would false-trip the give-up timeout during a normal
-// aggressive drive and latch the motors off mid-run. Still well under FALL_CUTOFF_DEG.
+// aggressive drive and latch the motors off mid-run. Still well under FALL_CUTOFF.
 const float         RECOVERY_GIVEUP_DEG   = 32.0f; // deg of error that counts as "still down"
 const unsigned long RECOVERY_GIVEUP_TICKS = 400;   // 2 s at 200 Hz, then give up and latch
 const float FALL_REARM_DEG  = 8.0f;  // re-arm ONLY when the absolute accel angle is back within this of
@@ -2161,10 +2179,18 @@ void loop() {
   // near the setpoint. On its back the gyro-based pitch drifts and can dip under
   // the cutoff -> without the latch the motors flail. Keying re-arm off the
   // accelerometer means only physically standing it up restarts them.
-  if (!fallen && fabs(pitch - BALANCE_SETPOINT) > FALL_CUTOFF_DEG) fallen = true;
+  // Per-direction, at the measured frame contacts. See FALL_CUTOFF_FWD_DEG.
+  if (!fallen && (error > FALL_CUTOFF_FWD_DEG || error < -FALL_CUTOFF_REAR_DEG)) fallen = true;
   // Bounded stand-up attempt: below the saturation latch's reach the PD would otherwise
   // push at ~60 PWM forever against whatever it is lying on. See RECOVERY_GIVEUP_DEG.
-  if (!fallen && fabs(error) > RECOVERY_GIVEUP_DEG) {
+  // GATES ON TRACKING ERROR, NOT LEAN. It used the `error` above, which is the LEAN from the
+  // balance point -- so any COMMANDED lean past 32 held for 2 s latched the robot as fallen.
+  // Harmless while LEAN_CLAMP was 18, fatal the moment the lean is released to the pilot:
+  // full stick would cut the motors mid-manoeuvre. What this check is for is "the robot
+  // cannot reach the angle it is trying to hold", and that is tracking error. leanCmd is the
+  // previous tick's value here (it is computed further down); one tick of lag is nothing
+  // against a 2 s timeout.
+  if (!fallen && fabs(pitch - (BALANCE_SETPOINT + leanCmd)) > RECOVERY_GIVEUP_DEG) {
     if (++recoverTicks > RECOVERY_GIVEUP_TICKS) {
       recoverTicks = 0;
       fallen = true;
@@ -2670,7 +2696,8 @@ void telemetry(float error, float rate, float u) {
   Serial.print(" Vmax "); Serial.print(DRIVE_MAX_VEL, 2);
   // Was printing LAUNCH_ASSIST_EFFORT under a "Bstart" label -- stale since
   // DRIVE_LAUNCH_ASSIST went to 0, and misleading (it is not a start ANGLE).
-  Serial.print(" FALLDEG "); Serial.print(FALL_CUTOFF_DEG, 1);
+  Serial.print(" FALLDEG "); Serial.print(FALL_CUTOFF_FWD_DEG, 0);
+  Serial.print("/");         Serial.print(FALL_CUTOFF_REAR_DEG, 0);
   Serial.print(" GBIAS "); Serial.print(gyroYBias, 2);
   // DBF is the floor ACTUALLY IN FORCE this tick -- the blended, filtered value both wheels
   // now share. The old DBL/DBR printed what the moving/static GATE would have chosen, which
