@@ -973,6 +973,29 @@ const float SOFT_START_SEC = 0.7f;
 #define SATURATION_LATCH 1
 const float         SAT_EFFORT_FRAC  = 0.95f;  // fraction of usable effort range that counts as pinned
 const unsigned long SAT_TIMEOUT_TICKS = 100;   // 0.5 s at 200 Hz
+// FIXED 2026-08-15: the latch used the effort test ALONE, and effort is not an angle.
+// Threshold is SAT_EFFORT_FRAC * (MAX_PWM - MAX_DEADBAND) = 0.95 * (110 - 18) = 87.4, and
+// |u| ~ Kpeff * |error|, so the angle it really trips at depends on which gain is live:
+//     Kpeff 2.0 (balancing) -> 87.4 / 2.0 = 43.7 deg
+//     Kpeff 4.0 (driving)   -> 87.4 / 4.0 = 21.9 deg
+// A 2x swing in a safety threshold, driven by a gain schedule that has nothing to do with
+// safety -- and the tighter half lands while DRIVING, which is when large transient tracking
+// errors actually happen. The surrounding comments (see FALL_CUTOFF_DEG) reason about this
+// latch as a fixed "above ~39 deg" angle backstop, which it has never been at drive gains.
+// This has not been firing because ERR stays near 0 in normal driving, so u stays far below
+// 87.4. It becomes a live hazard the moment LEAN_CLAMP goes up: bigger commanded leans mean
+// bigger transient ERR through a stick reversal, and 22 deg for half a second is reachable.
+// FIX: require BOTH conditions -- the output genuinely pinned AND the angle genuinely
+// hopeless. The angle test is on `error` directly, so it cannot be rescaled by a gain.
+//     Kpeff 2.0 -> effort trips at 43.7, angle at 39.0 -> latch at 43.7 (effort binds)
+//     Kpeff 4.0 -> effort trips at 21.9, angle at 39.0 -> latch at 39.0 (angle binds)
+// Gain dependence collapses from 2.0x to 1.12x, and both ends now sit in the 39-44 band the
+// design already assumed.
+// COST, stated honestly: a motor pinned at less than SAT_TRIP_DEG no longer latches through
+// THIS path. That is deliberate -- pinned effort at a recoverable angle is the loop working,
+// not failing, and it is what the old test could not distinguish. RECOVERY_GIVEUP_DEG (32,
+// with its own timeout) covers the band above it, and FALL_CUTOFF_DEG 45 covers the top.
+const float         SAT_TRIP_DEG    = 39.0f;   // deg of |error| that also has to be true
 
 // ---- Coast band (motor protection): rest the motors near balance -----------
 // Within ANGLE_DEADZONE of the (leaned) target AND wheels stopped -> command 0.
@@ -996,9 +1019,13 @@ const float RATE_DEADZONE  = 5.0f;  // deg/s : NO LONGER gates the coast (gyro v
 // accel pitch gets ambiguous and it is genuinely on its back, so that is the new line.
 const float FALL_CUTOFF_DEG = 45.0f; // trip the fall latch: |pitch| beyond this = it fell, stop fighting
 // A stand-up attempt must be BOUNDED or it cooks the motors. Two backstops now cover the
-// whole range: above ~39 deg of error the PD exceeds the saturation latch's threshold
-// (SAT_EFFORT_FRAC*(MAX_PWM-MAX_DEADBAND) = 78.85, i.e. 39.4 deg at Kp 2.0) and it latches
-// in 0.5 s. BELOW that, between 25 and 39 deg, u sits under the sat threshold and the old
+// whole range: above SAT_TRIP_DEG (39) of error, with the output also pinned, the saturation
+// latch fires in 0.5 s.
+// (The figure quoted here used to be "78.85, i.e. 39.4 deg at Kp 2.0". Both halves were
+// wrong: 78.85 was computed with the pre-EN-fix MAX_DEADBAND of 27 and is now 87.4, and the
+// "39.4 deg" only ever held at Kp 2.0 -- at the Kpeff 4.0 used while driving the same effort
+// meant 21.9 deg. The latch now tests the angle explicitly so this number means what it
+// says at both gains. See SAT_TRIP_DEG.) BELOW that, between 25 and 39 deg, u sits under the sat threshold and the old
 // code would have pushed at ~60 PWM indefinitely against an obstacle -- which is exactly
 // the band this 31.6 deg pose lives in. Hence the explicit timeout.
 // 25 deg is chosen to clear normal driving: LEAN_CLAMP caps the COMMANDED lean at 14 and
@@ -2287,9 +2314,13 @@ void loop() {
   // --- Inner-loop saturation latch -------------------------------------------
   // mapEffortToPwm() tops out at MAX_PWM, so the usable effort range is
   // (MAX_PWM - MAX_DEADBAND). Sitting at 95% of that for half a second means
-  // the inner loop is pinned and losing -- latch instead of stalling the motors.
-  if (fabs(u) > SAT_EFFORT_FRAC * (float)(MAX_PWM - MAX_DEADBAND)) satTicks++;
-  else                                                             satTicks = 0;
+  // the inner loop is pinned -- but pinned is not the same as LOSING, and effort alone
+  // cannot tell them apart because |u| ~ Kpeff * |error| and Kpeff doubles while driving.
+  // Require the angle to be hopeless too; see the note at SAT_TRIP_DEG for the arithmetic.
+  const bool effortPinned  = fabs(u)     > SAT_EFFORT_FRAC * (float)(MAX_PWM - MAX_DEADBAND);
+  const bool angleHopeless = fabs(error) > SAT_TRIP_DEG;
+  if (effortPinned && angleHopeless) satTicks++;
+  else                               satTicks = 0;
   if (satTicks > SAT_TIMEOUT_TICKS) {
     satTicks = 0;
     fallen = true;   // re-arms off the ABSOLUTE accel angle, so this cannot deadlock
