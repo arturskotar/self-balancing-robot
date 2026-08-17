@@ -884,11 +884,22 @@ const int MAX_DEADBAND = (LEFT_DEADBAND_STATIC > RIGHT_DEADBAND_STATIC)
 // target sat BELOW one encoder count per tick (0.366 rev/s raw), so the loop was
 // regulating against a signal that was mostly quantization. 0.40 is still well under
 // the old 0.6 and gets a fuller x1 count per tick.
-const float DRIVE_MAX_VEL  = 0.40f; // rev/s at full stick. Conservative on purpose: one encoder
-                                    // count per 5 ms tick is already 0.366 rev/s (546 counts/rev),
-                                    // so 0.6 rev/s is only ~1.6 counts/tick of resolution. Raise
-                                    // this after the x4 hardware QuadEncoder upgrade (2184 cpr).
-const float TURN_AUTHORITY = 25.0f; // PWM-effort differential at full turn stick
+// 0.40 -> 0.65, 2026-08-15. THE RESOLUTION ARGUMENT ABOVE RUNS THE WRONG WAY and should not
+// have held this down. One encoder count per 5 ms tick is 0.366 rev/s, so:
+//     0.40 rev/s -> 1.1 counts/tick   (worse resolution)
+//     0.65 rev/s -> 1.8 counts/tick   (better)
+// Going FASTER improves the velocity estimate; it is standing still that starves it. The
+// real constraint on top speed is stopping distance, and 0.65 is the value that analysis
+// produced (0.90 -> 0.65) and that was flying before the reset to v2-drive-works.
+// With 140 mm wheels 0.65 rev/s = 0.29 m/s, up from 0.176.
+const float DRIVE_MAX_VEL  = 0.65f; // rev/s at full stick; sized by stopping distance
+// Lower bound on the commanded speed once the stick is out of its deadzone. Without it the
+// first usable stick position asks for a crawl that sits inside the dither band and never
+// breaks away, which is what "can't break away on small throttle values" was. Span is now
+// 0.30..0.65 rather than 0..0.40 -- narrower AND faster at the bottom.
+const float DRIVE_MIN_VEL  = 0.30f; // rev/s just outside the stick deadzone (scaled by the cap)
+// 25 -> 16: "turns are still faster" than the forward drive they are mixed into.
+const float TURN_AUTHORITY = 16.0f; // PWM-effort differential at full turn stick
 const float DRIVE_STICK_DEADZONE = 0.15f;
 const float TURN_STICK_DEADZONE  = 0.30f; // measured cross-axis reaches ~0.25 during straight drive
 const float DRIVE_SIGN     = +1.0f; // flip to -1 if the drive stick drives the wrong way
@@ -2129,7 +2140,17 @@ void loop() {
   float turnIn    = turnRaw;
   if (fabs(driveIn) < DRIVE_STICK_DEADZONE) driveIn = 0.0f;
   if (fabs(turnIn) < TURN_STICK_DEADZONE) turnIn = 0.0f;
-  float targetVel = DRIVE_SIGN * driveIn * cap * DRIVE_MAX_VEL;       // rev/s, + = forward
+  // DRIVE_MIN_VEL floor: the stick's live range maps to MIN..MAX rather than 0..MAX, so the
+  // first usable stick position asks for a speed the robot can actually break away at
+  // instead of a crawl inside the dither band. driveIn is already zeroed inside the stick
+  // deadzone above, so this cannot creep at neutral.
+  float targetVel = 0.0f;
+  if (driveIn != 0.0f) {
+    float live = (fabs(driveIn) - DRIVE_STICK_DEADZONE) / (1.0f - DRIVE_STICK_DEADZONE);
+    live = constrain(live, 0.0f, 1.0f);
+    float speed = DRIVE_MIN_VEL + live * (DRIVE_MAX_VEL - DRIVE_MIN_VEL);
+    targetVel = DRIVE_SIGN * (driveIn > 0.0f ? 1.0f : -1.0f) * cap * speed;  // rev/s, + = fwd
+  }
   float turnCmd   = TURN_SIGN  * turnIn  * cap * TURN_AUTHORITY;      // per-wheel PWM-effort diff
   targetVelLog = targetVel;
   turnCmdLog = turnCmd;
