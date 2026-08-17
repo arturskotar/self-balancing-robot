@@ -240,6 +240,43 @@ const float STATIC_LEAN_DEG = 6.0f;  // deg of commanded lean, held continuously
 // the IMU library remapped axes (use that getter). Set back to 0 when done.
 #define IMU_TEST 0
 
+// ---- Lean-limit sweep ------------------------------------------------------
+// Set to 1 to MEASURE where the chassis actually stops. Motors off throughout.
+//
+// WHY THIS EXISTS RATHER THAN JUST READING IMU_TEST BY EYE. The rear limit has been
+// "measured" three times and come back -19, -15.7 and -21.0, and firmware was sized to each
+// of them in turn. Every one of those was read off a scrolling stream or taken from a
+// RELEASE settle -- where the chassis lands when you let go, which is wherever the torques
+// happened to balance on that particular release, not where the chassis stops.
+//
+// The rule this enforces, already stated at LEAN_CLAMP_REAR: a limit is where the chassis
+// stops under a SLOW DELIBERATE PUSH, and it must REPRODUCE ACROSS SWEEPS. So this mode
+// refuses to report an angle until the body has been genuinely stationary
+// (|rate| < LEAN_SWEEP_REST_DPS) for LEAN_SWEEP_REST_MS, and it prints the running
+// distribution per direction so the spread is visible instead of inferred.
+//
+// Pitch comes from the ACCELEROMETER, not the fused estimate: the robot is stationary at the
+// moment of measurement, so there is no linear acceleration to corrupt it and no gyro drift
+// to accumulate. The gyro is used only to decide "is it holding still".
+//
+// HOW TO RUN:
+//   1. Flash with this at 1. Robot on the floor, disarmed. Motors stay off the whole time.
+//   2. Push the chassis SLOWLY forward until it stops on its own. Hold it there, hands
+//      steady, until a "rest" line prints. Do not force past the stop.
+//   3. Return upright, then repeat for the rear.
+//   4. Do BOTH DIRECTIONS AT LEAST TWICE, ideally three times. The summary prints each
+//      direction's spread; if a direction's spread is more than ~1 deg, the chassis is not
+//      stopping on a hard feature and no single number should be trusted from it.
+//   5. Set back to 0.
+// A push that is too fast shows up as PEAK well beyond REST -- that is momentum, not travel,
+// and the peak is reported separately so it cannot be mistaken for the limit.
+#define LEAN_SWEEP 0
+const float         LEAN_SWEEP_REST_DPS = 2.0f;   // |deg/s| below this counts as stationary
+const unsigned long LEAN_SWEEP_REST_MS  = 400;    // ...held this long = a genuine stop
+const float         LEAN_SWEEP_MIN_DEG  = 8.0f;   // ignore rests near upright (that is a hand,
+                                                  // not a stop); well inside any real limit
+const int           LEAN_SWEEP_MAX_REST = 8;      // per direction, for the spread table
+
 // ---- IMU calibration -------------------------------------------------------
 // PITCH-AXIS GYRO: the MPU9250 lib (0.4.8) reports pitch-axis rotation on the Y
 // gyro, inverted vs the accel-pitch convention (confirmed with IMU_TEST: tilting
@@ -1185,6 +1222,12 @@ void setup() {
 #elif IMU_TEST
   Serial.println("IMU_TEST mode: motors OFF. Hold + slowly tilt FORWARD then BACK. "
                  "aPitch & gX should rise together tilting forward (consistent sign).");
+#elif LEAN_SWEEP
+  Serial.println("LEAN_SWEEP mode: motors OFF, robot on the FLOOR.");
+  Serial.println("Push SLOWLY to the forward stop, HOLD steady until a REST line prints,");
+  Serial.println("return upright, then repeat to the rear. Do each direction 2-3 times.");
+  Serial.println("Only HELD angles are recorded. A release settle is not a limit, and a");
+  Serial.println("peak far beyond the rest means you pushed too fast -- redo that one.");
 #endif
 }
 
@@ -1544,6 +1587,76 @@ void imuTestLoop() {
   Serial.print(" aZ ");             Serial.println(imu.getAccZ(), 2);
 }
 
+// Lean-limit sweep: report only angles the chassis actually HELD. See LEAN_SWEEP.
+void leanSweepPrintSpread(const char *label, const float *v, int n) {
+  Serial.print("  "); Serial.print(label); Serial.print(" ");
+  if (n == 0) { Serial.println("no rests recorded"); return; }
+  float lo = v[0], hi = v[0], sum = 0.0f;
+  for (int i = 0; i < n; i++) {
+    if (v[i] < lo) lo = v[i];
+    if (v[i] > hi) hi = v[i];
+    sum += v[i];
+    Serial.print(v[i], 2); Serial.print(" ");
+  }
+  Serial.print(" | n "); Serial.print(n);
+  Serial.print("  mean ");   Serial.print(sum / n, 2);
+  Serial.print("  spread "); Serial.print(hi - lo, 2);
+  // The whole point of the mode: say out loud whether the number is usable.
+  Serial.println((hi - lo) <= 1.0f ? "  -> TIGHT, usable"
+                                   : "  -> LOOSE, do not size to this");
+}
+
+void leanSweepLoop() {
+  motorRaw(0);                                    // motors stay off for the entire mode
+  static unsigned long lastPrint = 0, restSince = 0;
+  static bool  resting = false, armed = true;
+  static float fwd[LEAN_SWEEP_MAX_REST], rear[LEAN_SWEEP_MAX_REST];
+  static int   nFwd = 0, nRear = 0;
+  static float peakFwd = 0.0f, peakRear = 0.0f;
+
+  imu.update();
+  const float p    = accelPitch();
+  const float rate = fabs(imu.getGyroY() - gyroYBias);   // magnitude only; sign irrelevant here
+
+  if (p > peakFwd)  peakFwd  = p;                 // peaks include momentum -- reported, not used
+  if (p < peakRear) peakRear = p;
+
+  // A rest is |pitch| past the deadzone AND the body holding still for a sustained window.
+  // `armed` stops one long hold from printing repeatedly: the chassis must move again
+  // (leave the rest condition) before another rest can be recorded.
+  const bool still = (rate < LEAN_SWEEP_REST_DPS) && (fabs(p) >= LEAN_SWEEP_MIN_DEG);
+  if (still) {
+    if (!resting) { resting = true; restSince = millis(); }
+    else if (armed && (millis() - restSince) >= LEAN_SWEEP_REST_MS) {
+      armed = false;
+      float *arr = (p > 0.0f) ? fwd : rear;
+      int   &n   = (p > 0.0f) ? nFwd : nRear;
+      if (n < LEAN_SWEEP_MAX_REST) arr[n++] = p;
+      Serial.println();
+      Serial.print("LEAN_SWEEP  REST  ");
+      Serial.print(p > 0.0f ? "FWD  pitch +" : "REAR pitch ");
+      Serial.print(p, 2);
+      Serial.print("   peak this direction ");
+      Serial.print(p > 0.0f ? peakFwd : peakRear, 2);
+      Serial.println(p > 0.0f ? "  (peak >> rest = pushed too fast)" : "");
+      leanSweepPrintSpread("FWD ", fwd,  nFwd);
+      leanSweepPrintSpread("REAR", rear, nRear);
+      Serial.println();
+    }
+  } else {
+    resting = false;
+    if (fabs(p) < LEAN_SWEEP_MIN_DEG) armed = true;   // back near upright: ready for the next
+  }
+
+  if (millis() - lastPrint < 100) return;             // live stream at 10 Hz
+  lastPrint = millis();
+  Serial.print("LEAN_SWEEP pitch "); Serial.print(p, 2);
+  Serial.print("  rate ");           Serial.print(rate, 1);
+  Serial.print("  ");                Serial.print(still ? (resting ? "HOLDING" : "still") : "moving");
+  Serial.print("  | rests F/R ");    Serial.print(nFwd);
+  Serial.print("/");                 Serial.println(nRear);
+}
+
 // Update filtered wheel velocities from the counters. Call once per control
 // tick (uses the fixed DT). rev/s = Δticks / counts-per-rev / dt, then EMA.
 void updateVelocity() {
@@ -1662,6 +1775,9 @@ void loop() {
   return;
 #elif IMU_TEST
   imuTestLoop();       // motors off; stream accel-pitch + gyro axes (hand-tilt to check signs)
+  return;
+#elif LEAN_SWEEP
+  leanSweepLoop();     // motors off; push slowly to each stop, reports only HELD angles
   return;
 #endif
 
