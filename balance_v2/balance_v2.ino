@@ -270,7 +270,7 @@ const float STATIC_LEAN_DEG = 6.0f;  // deg of commanded lean, held continuously
 //   5. Set back to 0.
 // A push that is too fast shows up as PEAK well beyond REST -- that is momentum, not travel,
 // and the peak is reported separately so it cannot be mistaken for the limit.
-#define LEAN_SWEEP 0
+#define LEAN_SWEEP 1
 const float         LEAN_SWEEP_REST_DPS = 2.0f;   // |deg/s| below this counts as stationary
 const unsigned long LEAN_SWEEP_REST_MS  = 400;    // ...held this long = a genuine stop
 const float         LEAN_SWEEP_MIN_DEG  = 8.0f;   // ignore rests near upright (that is a hand,
