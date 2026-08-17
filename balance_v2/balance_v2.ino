@@ -494,7 +494,31 @@ const float KVEL_I = 24.0f;      // velocity-error memory (rev/s*s -> deg lean)
 // saturates before LEAN_CLAMP binds: 14/9.6 = 1.46 s, and the clamp binds at 1.5 s. The
 // component sum is 9 + 1.2 + 14 = 24.2, well over LEAN_CLAMP 18, so that clamp stays the
 // single saturation point with the conditional integration behind it.
-const float VEL_I_CLAMP = 14.0f; // deg; must exceed the stiction lean, not sit under it
+// 14 -> 24, 2026-08-15. THIS IS THE CONSTANT THAT ACTUALLY LIMITS LEAN, and it took until
+// now to notice. LEAN_CLAMP was raised to 60 fwd / 44 rear to "release the lean" and the
+// change was INERT, because the three outer-loop terms are separately capped and their sum
+// was the real ceiling:
+//     Kpos * POS_ERROR_CLAMP = 6.0 * 1.5 = 9.0
+//     Kveff * velError                  ~ 1.2
+//     VEL_I_CLAMP                       = 14.0   <-- dominant
+//                                         ------
+//                                          24.2 deg, and the logs top out at RAW 18.95
+// So no LEAN_CLAMP above ~24 could ever bind. At 24 the sum becomes ~34 deg of reachable
+// lean, which clears the rear torque null at lean -14.98 with real room on the far side --
+// the point of releasing it in the first place. Still inside FALL_CUTOFF_REAR 47 and well
+// inside the frame.
+// WHY IT IS NEEDED AT ALL, and it is a workaround not a fix: the chassis is only slightly
+// top-heavy, so L (CoM height above the axle) is small, and acceleration goes as
+// g * L*sin(pitch) / (R + L*cos(pitch)). A small L means a large lean buys little force, so
+// the loop has to wind further to get the same acceleration out of a weak pendulum. Raising
+// the CoM is the real fix and makes this constant matter less. Pilot is moving mass up.
+// THE COST IS WINDUP. The integral can now store 24 deg instead of 14, so anything that
+// unwinds it does so from further out. Conditional integration freezes it at saturation and
+// the breakaway edge detector zeroes it on the stall->rolling transition, so the designed
+// path is covered -- but WATCH THE BREAKAWAY LURCH. If the robot snaps hard when the wheels
+// finally free, this is where it came from, and the answer is a lower number here, not more
+// damping in the inner loop.
+const float VEL_I_CLAMP = 24.0f; // deg; must exceed the stiction lean, not sit under it
 // The integral may only TRIM A CRUISE, never fight stiction. While the wheels are
 // not actually rolling, velError reports a stalled drivetrain rather than a speed
 // shortfall, and integrating that just winds to the clamp -- so the term arrives
