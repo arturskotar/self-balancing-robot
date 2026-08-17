@@ -597,7 +597,44 @@ const float DRIVE_KVEL_MULTIPLIER = 1.0f;
 // LEFT AT 18 DELIBERATELY. Sizing it to the new geometry before the latch is fixed would
 // just move the clamp behind a limit that fires earlier, and this file has enough history
 // of numbers sized against the wrong constraint.
-const float LEAN_CLAMP = 18.0f;  // deg : outer-loop authority cap (sole saturation point)
+// ══ SPLIT PER DIRECTION 2026-08-15, AND THE REAR NUMBER GOES DOWN, NOT UP ══
+// LEAN_SWEEP found a STABLE EQUILIBRIUM AT PITCH -18.2 (motors off, 23 consecutive samples
+// between -18.09 and -18.34 at |rate| 0.0-0.4, spread 0.25). The pilot had already named it:
+// the chassis has distinct points of balance, and "when the lean is similar to those points
+// it can't move".
+//
+// THAT IS THE STALL. Gravity torque about the contact patch is ZERO at an equilibrium, so a
+// commanded lean placed there has no drive authority by construction. The loop reaches the
+// target, ERR -> 0, u -> 0, PWM -> 0, and the robot sits. It was never failing to track --
+// it was arriving. Every "leans well but doesn't move" log this session is a target landing
+// on an equilibrium:
+//     LEAN_CLAMP_REAR 14 -> TARGET -3.22 - 14 = -17.22, observed PITCH -17.2..-18.2,
+//                           ERR ~0, U ~0, PWM 0, POS frozen for seconds
+//     and on the 120 mm wheels the same thing forward, at the +20.8 equilibrium:
+//                           PITCH 20.78 TARGET 20.78 ERR 0.00 U -0.01 PWM 0 0
+// The forward trap is GONE with the 140 mm wheels (pilot: "front disappeared with the new
+// wheels"), which is why forward always drove better than reverse this session. The rear one
+// remains.
+//
+// SO THE REAR CLAMP MUST MOVE AWAY FROM -18.2, AND WE SPENT THE SESSION MOVING IT TOWARD.
+// 14 -> 16 -> 18 walked the target from 1.0 deg short of the equilibrium to 3.0 deg past it.
+// 10 puts TARGET at -13.22, a clear 5.0 deg short.
+// WHY THE SHALLOW SIDE: between upright and -18.2 the gravity torque carries the body
+// further back, which is the direction that produces reverse drive. Past -18.2 the restoring
+// torque reverses and works against the commanded direction. The shallow side is also inside
+// every other limit and is ground the robot demonstrably traverses.
+// NOT YET CONFIRMED: whether the far side is usable at all. If a nudge past -18.2 continues
+// away rather than returning, the equilibrium is not stable in the way assumed here and the
+// useful band is the other one. Sizing to the shallow side does not depend on that answer;
+// placing the target ON the equilibrium is wrong either way.
+//
+// FORWARD IS UNCHANGED AT 18 and stays evidence-based: TARGET +14.78 is proven in flight,
+// there is no forward equilibrium left to avoid, and the real forward limits are far away
+// (RECOVERY_GIVEUP 32, FALL_CUTOFF 45, frame +61). Raise it separately if reverse comes good.
+const float LEAN_CLAMP_FWD  = 18.0f; // deg : forward cap. TARGET +14.78, no equilibrium in reach
+const float LEAN_CLAMP_REAR = 10.0f; // deg : rear cap. TARGET -13.22, 5.0 deg short of -18.2
+// Kept for the places that want a single worst-case figure (see LEAN_RATE_FF_MAX).
+const float LEAN_CLAMP = (LEAN_CLAMP_FWD > LEAN_CLAMP_REAR) ? LEAN_CLAMP_FWD : LEAN_CLAMP_REAR;
 // 0.99 -> 0.97 (tau 0.50 s -> 0.17 s, pole 2 -> 6 rad/s). The velocity loop
 // crosses over near 2.5 rad/s, so the old 2 rad/s pole sat essentially ON the
 // crossover and ate ~51 deg of phase exactly where it hurt. That lag is what
@@ -2209,11 +2246,14 @@ void loop() {
   // ceiling. On breakaway there is no lurch to unwind: forwardVel rises,
   // velError collapses, and positionRev catches posSetpoint, so all three terms
   // shrink on their own.
-  if (fabs(leanRaw) >= LEAN_CLAMP) {
+  // Per-direction now: the rear cap is set by an equilibrium at -18.2 and the forward one is
+  // not, so a single symmetric number cannot serve both. See LEAN_CLAMP_FWD / _REAR.
+  const float leanLimit = (leanRaw >= 0.0f) ? LEAN_CLAMP_FWD : LEAN_CLAMP_REAR;
+  if (fabs(leanRaw) >= leanLimit) {
     posSetpoint   = posSetpointPrev;
     velocityLeanI = velocityLeanIPrev;
   }
-  leanRaw = constrain(leanRaw, -LEAN_CLAMP, LEAN_CLAMP);
+  leanRaw = constrain(leanRaw, -LEAN_CLAMP_REAR, LEAN_CLAMP_FWD);
   float leanCmdBefore = leanCmd;
   leanCmd = LEAN_LPF * leanCmd + (1.0f - LEAN_LPF) * leanRaw;
 #if STATIC_LEAN_TEST
