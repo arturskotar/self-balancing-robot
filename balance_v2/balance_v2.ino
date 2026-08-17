@@ -270,6 +270,20 @@ const float STATIC_LEAN_DEG = 6.0f;  // deg of commanded lean, held continuously
 //   5. Set back to 0.
 // A push that is too fast shows up as PEAK well beyond REST -- that is momentum, not travel,
 // and the peak is reported separately so it cannot be mistaken for the limit.
+//
+// ⚠️ KNOWN LIMITATION, FOUND THE FIRST TIME THIS WAS RUN. A rest detector proves the body is
+// STATIONARY. It cannot prove the body is SELF-SUPPORTED. A hand holding steady and a chassis
+// sitting on its stop are identical to a gyro, so this mode WILL happily record a hand hold
+// as a limit -- the first run produced a "rear limit" of -9.53 after the chassis had been to
+// -54.56, which was simply the operator holding it near upright at the end of the sweep.
+// The peak-vs-rest warning above now catches that case, but the discrimination is ultimately
+// TACTILE and belongs to the operator: only push until you feel the frame come up solid, and
+// throw away any rest that did not come with that feeling.
+//
+// ⚠️ accelPitch() IS ONLY VALID WHEN STILL. It reads gravity, so any hand acceleration adds
+// straight into the angle. The rest gate (|rate| < LEAN_SWEEP_REST_DPS) exists partly for
+// this reason. It also means the LIVE stream during a fast sweep is not trustworthy as an
+// angle -- read the REST lines, not the scroll.
 #define LEAN_SWEEP 1
 const float         LEAN_SWEEP_REST_DPS = 2.0f;   // |deg/s| below this counts as stationary
 const unsigned long LEAN_SWEEP_REST_MS  = 400;    // ...held this long = a genuine stop
@@ -551,6 +565,33 @@ const float DRIVE_KVEL_MULTIPLIER = 1.0f;
 // than an arbitrary one. Component sum is 6*1.5 + 3*0.4 + 9 = 19.2, so this still binds
 // and the conditional integration behind it still fires.
 // IT WILL FALL FORWARD if the wheels do not break away -- that is the accepted trade.
+// ══ 140 mm WHEELS, LEAN_SWEEP 2026-08-15: GEOMETRY IS NO LONGER THE BINDING LIMIT. ══
+// Every lean figure in this file predates the 120 -> 140 mm wheel change and is now stale.
+// Re-measured with LEAN_SWEEP (motors off, slow push to a stop the pilot confirmed by feel
+// as "hard stop - solid bot frame"):
+//     forward  +55.0 .. +55.3   (clean: four samples at |rate| 0.2-2.4, spread ~0.3)
+//     rear     -50.1 .. -54.6   (MESSY: bounced over ~3.3 deg for two seconds; treat as
+//                                ~-52 +/- 2 and re-measure before sizing anything to it.
+//                                accelPitch() is only valid when still, and rate was
+//                                1-15 deg/s through most of that stretch.)
+// Against the OLD figures of ~+30 / -25, the extra 10 mm of axle height did not widen the
+// range so much as remove the feature that was catching. Confirm the rear before trusting
+// the exact number, but the direction of the result is not in doubt.
+//
+// WHAT NOW BINDS, in order (smallest first) -- the chassis is LAST:
+//     saturation latch   ~19.7 deg ACTUAL   <-- tightest, and it is a BUG, see below
+//     RECOVERY_GIVEUP    32 deg
+//     FALL_CUTOFF_DEG    45 deg             <-- disarms before the frame ever touches
+//     chassis            ~52-55 deg
+// So raising this clamp past ~19 buys nothing today: the saturation latch fires first. That
+// latch computes its trip point at Kp 2.0 (78.85 effort = 39.4 deg) but the loop runs at
+// Kpeff 4.0 while driving, so it really trips near half that. Fixing that Kp-vs-Kpeff
+// mismatch is the prerequisite for using any of the range the new wheels just unlocked --
+// it is a real bug, it predates this branch, and it is now the tightest constraint on the
+// robot rather than a background annoyance.
+// LEFT AT 18 DELIBERATELY. Sizing it to the new geometry before the latch is fixed would
+// just move the clamp behind a limit that fires earlier, and this file has enough history
+// of numbers sized against the wrong constraint.
 const float LEAN_CLAMP = 18.0f;  // deg : outer-loop authority cap (sole saturation point)
 // 0.99 -> 0.97 (tau 0.50 s -> 0.17 s, pole 2 -> 6 rad/s). The velocity loop
 // crosses over near 2.5 rad/s, so the old 2 rad/s pole sat essentially ON the
@@ -1636,9 +1677,21 @@ void leanSweepLoop() {
       Serial.print("LEAN_SWEEP  REST  ");
       Serial.print(p > 0.0f ? "FWD  pitch +" : "REAR pitch ");
       Serial.print(p, 2);
+      const float pk = (p > 0.0f) ? peakFwd : peakRear;
       Serial.print("   peak this direction ");
-      Serial.print(p > 0.0f ? peakFwd : peakRear, 2);
-      Serial.println(p > 0.0f ? "  (peak >> rest = pushed too fast)" : "");
+      Serial.print(pk, 2);
+      // BUGFIX: this warning used to be `p > 0.0f ? "..." : ""`, i.e. keyed on DIRECTION
+      // rather than on the discrepancy. It therefore fired on every forward rest (even when
+      // peak and rest agreed to 0.6 deg) and NEVER on a rear one -- including the rear rest
+      // that reported -9.53 after a peak of -54.56, a 45 deg miss, which is the exact case
+      // it exists to catch. Key it on the actual gap, both directions.
+      if (fabs(pk) - fabs(p) > 2.0f) {
+        Serial.print("  <-- PEAK IS ");
+        Serial.print(fabs(pk) - fabs(p), 1);
+        Serial.print(" DEG BEYOND THIS REST: not a stop. Either you pushed past and came ");
+        Serial.print("back, or this is a hand hold. REDO.");
+      }
+      Serial.println();
       leanSweepPrintSpread("FWD ", fwd,  nFwd);
       leanSweepPrintSpread("REAR", rear, nRear);
       Serial.println();
