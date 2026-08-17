@@ -701,7 +701,20 @@ const float LEAN_CLAMP = (LEAN_CLAMP_FWD > LEAN_CLAMP_REAR) ? LEAN_CLAMP_FWD : L
 // cascade the outer loop derives lean from measured position/velocity error, so
 // that failure mode does not carry over unchanged -- but this is still the knob
 // to slow down first if the outer loop starts oscillating.
-const float LEAN_LPF   = 0.97f;  // EMA on leanCmd (~170 ms). Higher = slower outer loop.
+// 0.97 -> 0.95, 2026-08-15. tau = -DT/ln(a): 164 ms -> 98 ms, so the outer-loop lag roughly
+// halves. This value was flown once before and reverted with the note "rear margin is
+// scarcer than response time" -- THAT REASON HAS EXPIRED. Rear margin was scarce when the
+// fall latch was a symmetric 45 deg of lean and the frame angle was unknown/wrong. The frame
+// is now measured (rear contact at lean -47.8) and the latch sits at 47, with reachable lean
+// ~34 deg (VEL_I_CLAMP 24). There is ~13 deg of unused rear travel, so trading a little of
+// it for response time is no longer the trade it was.
+// This is pure lag reduction and costs nothing in windup: the EMA only smooths leanCmd, it
+// does not store anything. Contrast VEL_I_CLAMP, where more range does mean more to unwind.
+// The 0.95-"RAN AWAY" warning above is older still and predates the cascade entirely; see
+// that note for why it does not carry over. This remains the first knob to slow back down if
+// the OUTER loop starts oscillating -- distinguishable from the inner-loop ring by frequency,
+// outer-loop oscillation is slow (order 1 Hz), the floor-driven limit cycle was ~8 Hz.
+const float LEAN_LPF   = 0.95f;  // EMA on leanCmd (~98 ms). Higher = slower outer loop.
 // HARD BACKSTOP ONLY. The primary anti-windup is now conditional integration
 // against LEAN_CLAMP, applied in the outer loop below.
 //
