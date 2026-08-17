@@ -568,21 +568,26 @@ const float DRIVE_KVEL_MULTIPLIER = 1.0f;
 // ══ 140 mm WHEELS, LEAN_SWEEP 2026-08-15: GEOMETRY IS NO LONGER THE BINDING LIMIT. ══
 // Every lean figure in this file predates the 120 -> 140 mm wheel change and is now stale.
 // Re-measured with LEAN_SWEEP (motors off, slow push to a stop the pilot confirmed by feel
-// as "hard stop - solid bot frame"):
-//     forward  +55.0 .. +55.3   (clean: four samples at |rate| 0.2-2.4, spread ~0.3)
-//     rear     -50.1 .. -54.6   (MESSY: bounced over ~3.3 deg for two seconds; treat as
-//                                ~-52 +/- 2 and re-measure before sizing anything to it.
-//                                accelPitch() is only valid when still, and rate was
-//                                1-15 deg/s through most of that stretch.)
+// as "hard stop - solid bot frame"), two sweeps:
+//     forward  +61.0   run 2 held 60.6..61.6 across ~17 samples at |rate| 0.0-2.0
+//     rear     ~-51    run 1 -50.1..-53.4, run 2 -49.4..-51.7; the overlap is -50..-51.7
+// Run 1's forward readings (a hold at 49.7, then 55.3) were UNDER-PUSHES, not disagreement:
+// the operator held mid-sweep, pushed further, and released before reaching the frame. Only
+// run 2 actually arrived. Worth remembering when a repeat "disagrees" -- check whether the
+// earlier one ever got there before treating the difference as spread.
 // Against the OLD figures of ~+30 / -25, the extra 10 mm of axle height did not widen the
-// range so much as remove the feature that was catching. Confirm the rear before trusting
-// the exact number, but the direction of the result is not in doubt.
+// range so much as remove the feature that was catching.
 //
 // WHAT NOW BINDS, in order (smallest first) -- the chassis is LAST:
 //     saturation latch   ~19.7 deg ACTUAL   <-- tightest, and it is a BUG, see below
 //     RECOVERY_GIVEUP    32 deg
 //     FALL_CUTOFF_DEG    45 deg             <-- disarms before the frame ever touches
-//     chassis            ~52-55 deg
+//     chassis            ~-51 rear / +61 fwd
+// THE ARMED ROBOT CAN NO LONGER REACH ITS OWN STOPS. FALL_CUTOFF_DEG 45 fires 6 deg before
+// the rear frame and 16 deg before the forward frame, so chassis contact is now reachable
+// only with the motors already disarmed. Every "the robot is sitting on its stop" style of
+// explanation for a stall is off the table while armed -- that was a live hypothesis at
+// 120 mm and it is dead at 140 mm.
 // So raising this clamp past ~19 buys nothing today: the saturation latch fires first. That
 // latch computes its trip point at Kp 2.0 (78.85 effort = 39.4 deg) but the loop runs at
 // Kpeff 4.0 while driving, so it really trips near half that. Fixing that Kp-vs-Kpeff
@@ -1641,8 +1646,17 @@ void leanSweepPrintSpread(const char *label, const float *v, int n) {
   }
   Serial.print(" | n "); Serial.print(n);
   Serial.print("  mean ");   Serial.print(sum / n, 2);
-  Serial.print("  spread "); Serial.print(hi - lo, 2);
   // The whole point of the mode: say out loud whether the number is usable.
+  // n < 2 MUST NOT BE CALLED TIGHT. A single sample has a spread of zero by definition, and
+  // the first version printed "spread 0.00 -> TIGHT, usable" off one reading -- which is
+  // precisely the fit-a-constant-to-noise error this mode was built to prevent. It said
+  // exactly that about a 49.65 that turned out to be a mid-push hand hold 11 deg short of
+  // the real stop, and about a -9.53 taken 45 deg away from the peak.
+  if (n < 2) {
+    Serial.println("  spread n/a  -> ONE SAMPLE, NOT A MEASUREMENT. Sweep this direction again.");
+    return;
+  }
+  Serial.print("  spread "); Serial.print(hi - lo, 2);
   Serial.println((hi - lo) <= 1.0f ? "  -> TIGHT, usable"
                                    : "  -> LOOSE, do not size to this");
 }
