@@ -284,7 +284,7 @@ const float STATIC_LEAN_DEG = 6.0f;  // deg of commanded lean, held continuously
 // straight into the angle. The rest gate (|rate| < LEAN_SWEEP_REST_DPS) exists partly for
 // this reason. It also means the LIVE stream during a fast sweep is not trustworthy as an
 // angle -- read the REST lines, not the scroll.
-#define LEAN_SWEEP 1
+#define LEAN_SWEEP 0
 const float         LEAN_SWEEP_REST_DPS = 2.0f;   // |deg/s| below this counts as stationary
 const unsigned long LEAN_SWEEP_REST_MS  = 400;    // ...held this long = a genuine stop
 const float         LEAN_SWEEP_MIN_DEG  = 8.0f;   // ignore rests near upright (that is a hand,
