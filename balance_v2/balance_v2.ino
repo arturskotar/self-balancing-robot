@@ -631,8 +631,36 @@ const float DRIVE_KVEL_MULTIPLIER = 1.0f;
 // FORWARD IS UNCHANGED AT 18 and stays evidence-based: TARGET +14.78 is proven in flight,
 // there is no forward equilibrium left to avoid, and the real forward limits are far away
 // (RECOVERY_GIVEUP 32, FALL_CUTOFF 45, frame +61). Raise it separately if reverse comes good.
-const float LEAN_CLAMP_FWD  = 18.0f; // deg : forward cap. TARGET +14.78, no equilibrium in reach
-const float LEAN_CLAMP_REAR = 10.0f; // deg : rear cap. TARGET -13.22, 5.0 deg short of -18.2
+// ══ OPENED RIGHT UP 2026-08-15, ON PILOT'S CALL ══
+// "release all lean. Doesn't matter if it's usable or not. I should be controlled by the
+// pilot." So the firmware stops deciding which part of the range is worth having. Both caps
+// go to 40, symmetric, and the pilot flies whatever is there.
+//
+// 40 IS THE MAXIMUM THAT IS NOT SELF-DEFEATING, and the reason is FALL_CUTOFF_DEG:
+//     if (fabs(pitch - BALANCE_SETPOINT) > FALL_CUTOFF_DEG) fallen = true;
+// That test is on the LEAN from the balance point, not on absolute pitch, so it is a direct
+// ceiling on this constant. Setting the clamp to 45 would command exactly the angle that
+// latches the robot as fallen -- full stick would cut the motors. 40 leaves 5 deg for the
+// tracking overshoot (~1-2 deg steady, more through a hard reversal).
+// RECOVERY_GIVEUP_DEG 32 does NOT bind here: it gates on tracking ERROR, not on pitch, so a
+// large commanded lean is fine as long as the robot can follow it. It only fires when the
+// robot cannot, which is what it is for.
+//
+// WHAT THE PILOT IS ACCEPTING, stated plainly rather than prevented:
+//   * The rear TORQUE NULL at lean -14.98 (PITCH -18.2) is now INSIDE the range, not fenced
+//     off. Commanding through it will feel dead -- that is the physics, not a fault, and it
+//     is the thing the 10 deg cap existed to avoid. See lean-equilibria notes.
+//   * Beyond the null the restoring torque opposes the commanded direction, so deep rear
+//     lean may drive the wrong way. Unmeasured; now reachable.
+//   * At full rear stick the actual lean can reach ~42, and FALL_CUTOFF fires at 45. The
+//     rear FRAME is at lean -47.8 (PITCH -51), so the latch still fires ~2.8 deg before the
+//     chassis touches -- but that is the narrowest margin anywhere in this file.
+//   * Forward is uncapped by geometry (frame at lean +64.2) and this is well inside it.
+// Was 18 fwd / 10 rear. If a latch-on-full-stick shows up in the log (STATE goes to the fall
+// latch with |LEAN ACT| ~45), drop both to 38 rather than raising FALL_CUTOFF_DEG -- that
+// cutoff is the last thing standing between an aggressive lean and the floor.
+const float LEAN_CLAMP_FWD  = 40.0f; // deg : forward cap. TARGET +36.78
+const float LEAN_CLAMP_REAR = 40.0f; // deg : rear cap.    TARGET -43.22, null at -18.2 is inside
 // Kept for the places that want a single worst-case figure (see LEAN_RATE_FF_MAX).
 const float LEAN_CLAMP = (LEAN_CLAMP_FWD > LEAN_CLAMP_REAR) ? LEAN_CLAMP_FWD : LEAN_CLAMP_REAR;
 // 0.99 -> 0.97 (tau 0.50 s -> 0.17 s, pole 2 -> 6 rad/s). The velocity loop
