@@ -661,8 +661,25 @@ int sweepIdx = -1;                 // active set (-1 = not started yet)
 unsigned long sweepLastMs = 0;
 
 // ---- Output mapping --------------------------------------------------------
-const int   MAX_PWM        = 110;   // ceiling, 0-255. Raised 80->110 for authority to recover large
-                                    // backward falls. WATCH motor heat/current as you push this up.
+// 110 -> 140, 2026-08-15, for the 140 mm wheels. Ground force is torque/R, so the 120 -> 140
+// wheel change cut the force available at any given PWM by 1/1.167. Holding the ceiling at
+// 110 therefore quietly REDUCED the robot's peak accelerating force by 14% relative to the
+// build these gains were tuned on. 110 * 1.167 = 128 restores parity; 140 restores it and
+// adds ~9% of genuine new headroom, which is what "release some PWM" asks for.
+// Still only 55% of the 255 range, so there is more available if it proves useful.
+// WHAT THIS DOES AND DOES NOT BUY: it raises the TOP end -- recovery from large angles, and
+// peak acceleration. It does NOT help breakaway. Breakaway happens at small commanded
+// effort, where PWM is plainFloor*ramp + |u| and the FLOOR dominates; the ceiling is not in
+// that expression. Peak PWM across every log this session was 37-50 against a ceiling of
+// 110, so this changes nothing in normal operation and only shows up in the transients.
+// KNOCK-ON, do not miss it: the saturation latch threshold is
+// SAT_EFFORT_FRAC * (MAX_PWM - MAX_DEADBAND), so it moves 87.4 -> 115.9 with this. The
+// effort half of that latch is now even less likely to bind, which is fine -- since the
+// 2026-08-15 fix the ANGLE half (SAT_TRIP_DEG 39) is what actually decides, and it is
+// unaffected by this constant. FALL_CUTOFF_DEG 45 remains the real ceiling on angle.
+// WATCH MOTOR HEAT AND CURRENT. This is the constant most likely to cook something; the
+// previous note said the same and it still applies with more force at 140.
+const int   MAX_PWM        = 140;   // ceiling, 0-255. 80 -> 110 -> 140 (140 mm wheels)
 const float OUT_DEADZONE   = 0.5f;  // ignore PD outputs smaller than this (PWM units)
 // Effort over which the stiction floor ramps in from 0 to full, instead of stepping.
 // Sized against the observed ring: u swings +/-9 during a drive, so 5.0 softens more
