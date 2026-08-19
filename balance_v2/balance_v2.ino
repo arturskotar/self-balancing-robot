@@ -547,6 +547,9 @@ const float VEL_I_CLAMP = 14.0f; // deg; must exceed the stiction lean, not sit 
 // and -0.03 -> -0.00 mid-stall with VF never reading above 0.05. 0.20 requires a
 // real roll, clear of a single-count spike.
 const float VEL_I_ROLL_MIN = 0.20f;  // rev/s : below this the integral is frozen
+// Fraction of the velocity integral KEPT when the wheels first break loose. 0.0 = the old
+// hard reset, 1.0 = no dump at all. See the note at the dump itself for the flight evidence.
+const float VEL_I_BREAKAWAY_KEEP = 0.5f;
 // FINDING 2026-08-14, bench: gating the integral OFF below this speed was a
 // CATCH-22. It required rolling before the integral could build, but building was
 // what would start the roll -- so on a stalled drive VELI sat at 0.01 forever.
@@ -2525,13 +2528,33 @@ void loop() {
   // attempt) was a catch-22: it required rolling to build, and building was what
   // started the roll. The windup problem is handled at the other end instead --
   // on the stall -> rolling transition whatever accumulated was fighting stiction,
-  // not trimming a cruise, so it is discarded at breakaway and the integral
-  // restarts from zero for the cruise it actually exists to trim.
+  // not trimming a cruise, so MOST of it is shed at breakaway -- most, not all: see
+  // VEL_I_BREAKAWAY_KEEP. A full reset fired while the demand was still entirely unmet.
   bool integralRolling = fabs(forwardVel) >= VEL_I_ROLL_MIN;
   if (!driving) {
     velocityLeanI = 0.0f;
   } else {
-    if (integralRolling && !integralRollingPrev) velocityLeanI = 0.0f;   // breakaway
+    // BREAKAWAY DUMP, SOFTENED. This used to be a hard `velocityLeanI = 0.0f`.
+    // CONFIRMED IN FLIGHT, three times in one run -- the moment VF crosses VEL_I_ROLL_MIN
+    // the whole accumulated lean is discarded:
+    //     MS 16674  VELI  24.00  VF 0.12   ->   MS 16774  VELI  0.37  VF 0.32
+    //     MS  9054  VELI  24.00  VF 0.13   ->   MS  9154  VELI  0.53  VF 0.46
+    //     MS 13864  VELI -24.00  VF -0.09  ->   MS 13964  VELI -0.10  VF -0.23
+    // and it RE-FIRES every time VF dips back under the threshold and rises again, which the
+    // same log does repeatedly (0.32 -> 0.84 -> 0.46 -> 0.20 -> 0.34 -> 0.14 -> 0.23). That
+    // is the "leans, moves, then forgets the lean" symptom, as a stick-slip cycle.
+    //
+    // The rationale above is sound but the TIMING is wrong, by its own words: it discards
+    // "for the cruise it actually exists to trim" -- yet at the instant it fires VERR is
+    // -0.65, the full demand, and there is no cruise. It sheds the lean exactly when
+    // sustained lean is most needed, right as the robot begins to accelerate.
+    // Keeping a fraction instead of zeroing sheds most of the stiction-fighting wind while
+    // leaving enough to carry the acceleration. VEL_I_BREAKAWAY_KEEP 0.0 reproduces the old
+    // behaviour EXACTLY, so this cannot introduce a failure mode the previous build did not
+    // already have; 1.0 disables the dump altogether.
+    // 0.5 IS A FIRST VALUE, not a derived one. If the robot now overshoots the commanded
+    // speed and has to unwind, lower it. If it still forgets the lean at breakaway, raise it.
+    if (integralRolling && !integralRollingPrev) velocityLeanI *= VEL_I_BREAKAWAY_KEEP;
     velocityLeanI += KVEL_I * velError * DT;
     velocityLeanI = constrain(velocityLeanI, -VEL_I_CLAMP, VEL_I_CLAMP);
   }
