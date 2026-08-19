@@ -963,8 +963,25 @@ const float TURN_AUTHORITY = 32.0f; // PWM-effort differential at full turn stic
 // Fraction of TURN_AUTHORITY still available at ZERO throttle. Turn is scaled by the live
 // throttle so rotation cannot out-run translation; this floor keeps a stationary pivot
 // possible. 0 = no turning at all unless the drive stick is off centre.
-const float TURN_THROTTLE_FLOOR = 0.30f;
+// 0.30 -> 0.75, 2026-08-19. Pilot: "rotation is not engaged by the wheels spinning in
+// opposite directions. One wheel just stalls."
+// THAT IS A MIXING FAILURE, NOT A WEAK TURN. effortL = u + turnCmd, effortR = u - turnCmd,
+// and each is floored INDEPENDENTLY by mapEffortToPwm. Counter-rotation needs the two
+// efforts to have OPPOSITE SIGNS, which needs |turnCmd| > |u| -- the turn has to beat the
+// balance effort, not merely reduce it on one side. Below that the wheels are driven the
+// same way and one is simply weaker; if its |effort| lands under FLOOR_KNEE it gets a
+// fraction of the floor, drops below breakaway, and sits still while the other spins.
+// At 0.30 a stationary pivot had turnCmd = 0.30 * 32 = 9.6 against a |u| that runs 2-6 with
+// regular spikes past 10, so it lost the sign contest much of the time. 0.75 gives 24, clear
+// of typical |u| and above the 18 static floor on its own.
+// Throttle scaling is kept -- turn still grows with the stick, which is what was asked for.
+// What changed is that a pivot in place is no longer starved to the point of not working.
+const float TURN_THROTTLE_FLOOR = 0.75f;
 const float DRIVE_STICK_DEADZONE = 0.15f;
+// Consecutive ticks of NO drive demand required before the drive state is torn down.
+// 20 ticks = 100 ms at 200 Hz, which covers several dropped CRSF frames and is well under
+// what a pilot perceives as lag on stop. See the release debounce in the control loop.
+const int DRIVE_RELEASE_TICKS = 20;
 const float TURN_STICK_DEADZONE  = 0.30f; // measured cross-axis reaches ~0.25 during straight drive
 const float DRIVE_SIGN     = +1.0f; // flip to -1 if the drive stick drives the wrong way
 const float TURN_SIGN      = +1.0f; // flip to -1 if the turn stick steers the wrong way
@@ -1401,6 +1418,9 @@ unsigned long recoverTicks = 0;                // ticks spent above RECOVERY_GIV
 bool  wheelMovingL = false, wheelMovingR = false;  // wheel turned within WHEEL_STILL_TICKS
 bool  armedPrev = false;                       // edge-detect the arm transition (soft start)
 bool  driveCommandPrev = false;                // edge-detect a fresh non-zero drive-stick command
+int   driveReleaseTicks = DRIVE_RELEASE_TICKS; // debounce on RELEASE only; see DRIVE_RELEASE_TICKS.
+                                               // MUST start EXPIRED -- at 0 it reads as "still driving"
+                                               // and the loop would boot into the drive state with no stick.
 bool  driveVelocityEffortLatched = false;      // strict engage, wider safety limits while active
 enum LaunchAssistState : uint8_t { LAUNCH_IDLE, LAUNCH_WAIT_LEAN, LAUNCH_PUSH, LAUNCH_DONE };
 LaunchAssistState launchAssistState = LAUNCH_IDLE;
@@ -2341,6 +2361,7 @@ void loop() {
     satTicks     = 0;
     armedPrev    = false;        // next armed tick re-triggers the soft start
     driveCommandPrev = false;
+    driveReleaseTicks = DRIVE_RELEASE_TICKS;  // disarm/fall: expire, don't leave a phantom drive
     driveVelocityEffortLatched = false;
     launchAssistState = LAUNCH_IDLE;
     launchAssistDirection = 0;
@@ -2365,6 +2386,7 @@ void loop() {
     leanCmd     = 0.0f;
     satTicks    = 0;
     driveCommandPrev = false;
+    driveReleaseTicks = DRIVE_RELEASE_TICKS;  // disarm/fall: expire, don't leave a phantom drive
     driveVelocityEffortLatched = false;
     launchAssistState = LAUNCH_IDLE;
     launchAssistDirection = 0;
@@ -2436,7 +2458,24 @@ void loop() {
   // does. On release, re-anchor the target at the measured position. Otherwise
   // a failed drive leaves PERR pinned at POS_ERROR_CLAMP and keeps commanding a
   // lean after the pilot lets go instead of returning to neutral balance.
-  bool driving = fabs(targetVel) > 0.001f;
+  // RELEASE DEBOUNCE. `driving` gates a FULL state wipe -- velocityLeanI = 0 in the outer
+  // loop, posSetpoint = positionRev here -- and it was a bare threshold on targetVel, which
+  // is itself a bare threshold on driveIn at DRIVE_STICK_DEADZONE. So ONE RC sample landing
+  // under 0.15, one dropped CRSF frame, one momentary link blip, and 20 deg of accumulated
+  // lean plus the whole position setpoint were gone; the re-engage on the next tick then hit
+  // `!driveCommandPrev` and reset them a second time. Recovery is the full ~2 s ramp, which
+  // is the "bot still looses lean from time to time" the pilot reports.
+  // THIRD INSTANCE OF THIS BUG CLASS in this file -- after the moving/static floor gate and
+  // the integral rolling detector. Bare threshold, noisy signal, destructive consequence.
+  // Debounced on release ONLY: demand engages instantly, and it takes DRIVE_RELEASE_TICKS
+  // consecutive ticks of no demand to disengage. targetVel itself is NOT held, so a genuine
+  // release still stops the robot promptly; all the debounce protects is the accumulated
+  // state. Cost of the window is ~1 deg of integral wound against a zero target, against the
+  // 20 deg it saves.
+  bool driveDemand = fabs(targetVel) > 0.001f;
+  if (driveDemand) driveReleaseTicks = 0;
+  else if (driveReleaseTicks < DRIVE_RELEASE_TICKS) driveReleaseTicks++;
+  bool driving = driveDemand || (driveReleaseTicks < DRIVE_RELEASE_TICKS);
   controlLog.driving = driving;
   int8_t driveDirection = targetVel > 0.0f ? +1 : -1;
   if (driving && (!driveCommandPrev || driveDirection != launchAssistDirection)) {
