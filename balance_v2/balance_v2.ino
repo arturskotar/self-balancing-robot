@@ -291,6 +291,21 @@ const float         LEAN_SWEEP_MIN_DEG  = 8.0f;   // ignore rests near upright (
                                                   // not a stop); well inside any real limit
 const int           LEAN_SWEEP_MAX_REST = 8;      // per direction, for the spread table
 
+// ---- Back-EMF feedforward measurement --------------------------------------
+// Set to 1 to measure K_EMF: the PWM needed per rev/s just to HOLD a wheel speed against
+// back-EMF. WHEELS OFF THE GROUND. Motors ARE driven in this mode -- it is the one test mode
+// here that spins them, so keep hands clear and let it run to the summary.
+// See emfTestLoop for what the number is for and how to sanity-check the fit.
+// Set back to 0 when done.
+#define EMF_TEST 0
+const int EMF_TEST_SIGN       = 1;    // which way to spin; magnitude is what matters
+const int EMF_TEST_PWM_START  = 10;   // start at the moving floor, below it nothing turns
+const int EMF_TEST_PWM_STEP   = 10;
+const int EMF_TEST_PWM_MAX    = 140;  // = MAX_PWM; no point characterising past what we command
+const int EMF_TEST_MAX_STEPS  = 16;   // (140-10)/10 + 1 = 14, with headroom
+const unsigned long EMF_SETTLE_MS = 700;  // free-spin rotor takes a few hundred ms to settle
+const unsigned long EMF_SAMPLE_MS = 400;  // average over this; long enough for many counts
+
 // ---- IMU calibration -------------------------------------------------------
 // PITCH-AXIS GYRO: the MPU9250 lib (0.4.8) reports pitch-axis rotation on the Y
 // gyro, inverted vs the accel-pitch convention (confirmed with IMU_TEST: tilting
@@ -1449,6 +1464,12 @@ void setup() {
   Serial.println("return upright, then repeat to the rear. Do each direction 2-3 times.");
   Serial.println("Only HELD angles are recorded. A release settle is not a limit, and a");
   Serial.println("peak far beyond the rest means you pushed too fast -- redo that one.");
+#elif EMF_TEST
+  Serial.println("EMF_TEST mode: WHEELS OFF THE GROUND. Free-spin PWM staircase.");
+  Serial.println("Do not touch the wheels. Each step settles, then averages speed.");
+  Serial.println("Reports a least-squares fit of PWM = K_EMF*rev/s + intercept per wheel.");
+  Serial.println("K_EMF is the feedforward gain; the intercept should land near the");
+  Serial.println("MOVING deadband (~10). If it does not, the linear model is wrong.");
 #endif
 }
 
@@ -1892,6 +1913,117 @@ void leanSweepLoop() {
 
   if (millis() - lastPrint < 100) return;             // live stream at 10 Hz
   lastPrint = millis();
+
+// ---- Back-EMF / velocity feedforward measurement (see EMF_TEST) -------------
+// Drives a PWM STAIRCASE with the wheels off the ground and records the STEADY free-spin
+// speed at each step, then least-squares fits PWM = K_EMF * rev/s + intercept.
+//
+// WHY THIS NUMBER MATTERS. Nothing in the control path supplies the voltage a motor needs
+// just to HOLD a speed against its own back-EMF. The only thing writing PWM is the inner PD,
+// which manufactures output from PITCH ERROR -- so at cruise the loop has to produce the
+// speed-holding voltage out of a standing pitch offset, and that offset grows with speed.
+// That is the "bot escapes the commanded lean at higher velocity" symptom: PITCH walks away
+// from TARGET as VF rises and ERR never returns to zero.
+// With K_EMF known, `pwm += K_EMF * wheelVel` supplies it directly and the PD goes back to
+// correcting disturbances only.
+//
+// THE FIT IS THE POINT, NOT THE RAW ROWS. Two things to check before trusting K_EMF:
+//   * the intercept should land near the MOVING deadband (~10). It is the PWM extrapolated
+//     to zero speed, which is exactly what that floor is. If it comes back at 40, the
+//     relationship is not linear over this range and a single gain will not model it.
+//   * the per-step slopes printed alongside should be roughly constant. Curvature means
+//     the motor is saturating (approaching no-load speed) and the fit should use only the
+//     lower steps.
+// Free-spin, not loaded, on purpose: this isolates back-EMF from load torque. A loaded run
+// would fold in rolling resistance and give a gain that is wrong the moment the load changes.
+void emfTestFit(const char *label, const float *v, const int *p, int n) {
+  // Fit only points that actually turned; a stalled step is not on the line.
+  float sv = 0, sp = 0, svp = 0, svv = 0; int m = 0;
+  for (int i = 0; i < n; i++) {
+    if (v[i] < 0.05f) continue;
+    sv += v[i]; sp += (float)p[i]; svp += v[i] * (float)p[i]; svv += v[i] * v[i]; m++;
+  }
+  Serial.print("  "); Serial.print(label); Serial.print("  ");
+  if (m < 3) { Serial.println("too few moving points to fit"); return; }
+  float den = m * svv - sv * sv;
+  if (fabs(den) < 1e-6f) { Serial.println("degenerate fit"); return; }
+  float k = (m * svp - sv * sp) / den;
+  float b = (sp - k * sv) / m;
+  Serial.print("K_EMF "); Serial.print(k, 1); Serial.print(" PWM per rev/s");
+  Serial.print("   intercept "); Serial.print(b, 1);
+  Serial.print("   n "); Serial.print(m);
+  Serial.println(b > 4.0f && b < 20.0f ? "   (intercept ~ moving deadband: model looks sane)"
+                                       : "   <-- intercept is NOT near the moving floor, be suspicious");
+}
+
+void emfTestLoop() {
+  static bool  seeded = false, finished = false, sampling = false;
+  static int   pwm = 0, idx = 0;
+  static unsigned long phaseStart = 0;
+  static long  encL0 = 0, encR0 = 0;
+  static int   pwmRec[EMF_TEST_MAX_STEPS];
+  static float velL[EMF_TEST_MAX_STEPS], velR[EMF_TEST_MAX_STEPS];
+
+  if (finished) { motorRaw(0); return; }
+  if (!seeded) {
+    pwm = EMF_TEST_PWM_START;
+    seeded = true;
+    sampling = false;
+    phaseStart = millis();
+    motorRaw(EMF_TEST_SIGN * pwm);
+    Serial.println("EMF_TEST  pwm   revL     revR    (settling first step)");
+  }
+
+  if (!sampling) {
+    if (millis() - phaseStart < EMF_SETTLE_MS) return;   // let the speed settle
+    readEncoders(encL0, encR0);                          // then start the measurement window
+    sampling   = true;
+    phaseStart = millis();
+    return;
+  }
+  if (millis() - phaseStart < EMF_SAMPLE_MS) return;
+
+  long l, r; readEncoders(l, r);
+  const float dt = (float)(millis() - phaseStart) / 1000.0f;
+  const float vl = fabs((float)(l - encL0)) / (float)ENC_COUNTS_PER_REV / dt;
+  const float vr = fabs((float)(r - encR0)) / (float)ENC_COUNTS_PER_REV / dt;
+
+  if (idx < EMF_TEST_MAX_STEPS) {
+    pwmRec[idx] = pwm; velL[idx] = vl; velR[idx] = vr;
+    Serial.print("EMF_TEST  ");   Serial.print(pwm);
+    Serial.print("   ");          Serial.print(vl, 3);
+    Serial.print("   ");          Serial.print(vr, 3);
+    // Incremental slope against the previous step: constant = linear = a single gain works.
+    if (idx > 0) {
+      float dvl = vl - velL[idx - 1], dvr = vr - velR[idx - 1];
+      float dp  = (float)(pwm - pwmRec[idx - 1]);
+      Serial.print("   dPWM/dv L ");
+      if (dvl > 0.01f) Serial.print(dp / dvl, 1); else Serial.print("--");
+      Serial.print("  R ");
+      if (dvr > 0.01f) Serial.print(dp / dvr, 1); else Serial.print("--");
+    }
+    Serial.println();
+    idx++;
+  }
+
+  pwm += EMF_TEST_PWM_STEP;
+  if (pwm > EMF_TEST_PWM_MAX || idx >= EMF_TEST_MAX_STEPS) {
+    motorRaw(0);
+    Serial.println();
+    Serial.println("==== EMF_TEST FIT ====");
+    emfTestFit("LEFT ", velL, pwmRec, idx);
+    emfTestFit("RIGHT", velR, pwmRec, idx);
+    Serial.println("Use the smaller K_EMF of the two if they differ; an over-large");
+    Serial.println("feedforward drives the loop, an under-large one just leaves some");
+    Serial.println("of the old standing offset behind.");
+    Serial.println("======================");
+    finished = true;
+    return;
+  }
+  sampling   = false;
+  phaseStart = millis();
+  motorRaw(EMF_TEST_SIGN * pwm);
+}
   Serial.print("LEAN_SWEEP pitch "); Serial.print(p, 2);
   Serial.print("  rate ");           Serial.print(rate, 1);
   Serial.print("  ");                Serial.print(still ? (resting ? "HOLDING" : "still") : "moving");
@@ -2020,6 +2152,9 @@ void loop() {
   return;
 #elif LEAN_SWEEP
   leanSweepLoop();     // motors off; push slowly to each stop, reports only HELD angles
+  return;
+#elif EMF_TEST
+  emfTestLoop();       // WHEELS OFF THE GROUND; PWM staircase, logs steady speed per step
   return;
 #endif
 
