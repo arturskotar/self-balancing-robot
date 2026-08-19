@@ -943,7 +943,31 @@ const int MAX_DEADBAND = (LEFT_DEADBAND_STATIC > RIGHT_DEADBAND_STATIC)
 // real constraint on top speed is stopping distance, and 0.65 is the value that analysis
 // produced (0.90 -> 0.65) and that was flying before the reset to v2-drive-works.
 // With 140 mm wheels 0.65 rev/s = 0.29 m/s, up from 0.176.
-const float DRIVE_MAX_VEL  = 0.65f; // rev/s at full stick; sized by stopping distance
+// 0.65 -> 0.90, 2026-08-19. Pilot: "lean loss on high Vel still exists".
+// AT THIS POINT THAT IS NOT A BUG, IT IS ARRIVAL. Every discrete wipe is now gone -- the
+// breakaway dump is once per engagement, `driving` is debounced, DRIVE_LAUNCH_ASSIST is 0 so
+// its velocity-gated block is inert, and posSetpoint has always been clamped to
+// positionRev +/- POS_ERROR_CLAMP so no hidden position debt accumulates. What is left is
+// the outer loop doing exactly what it is built to do:
+//     velError = targetVel - forwardVel  ->  0   as the robot reaches the commanded speed
+//     velocityLean  = Kvel * velError    ->  0
+//     velocityLeanI stops growing, and unwinds at KVEL_I * |velError| once forwardVel
+//                   overshoots -- 24 deg/s per rev/s of overshoot, which is FAST
+//     posError swings +1.5 -> -1.5 as positionRev outruns posSetpoint, taking positionLean
+//                   from +9 to -9
+// LEAN IS THE ACCELERATOR, NOT THE THROTTLE POSITION. Holding lean theta requires sustained
+// wheel acceleration of g*tan(theta); at the commanded speed there is no acceleration left to
+// demand, so the lean MUST collapse. It cannot be tuned away, only postponed by leaving
+// acceleration demand on the table -- which is what raising this does.
+// PWM budget at 0.90: EMF_FF_GAIN 35 * 0.90 = 31 PWM to hold the speed, plus ~10 moving
+// floor, so ~41 of MAX_PWM 140 is spent cruising and ~99 remains for the PD. Comfortable.
+// Motor ceiling for reference: (MAX_PWM 140 - intercept 4.6) / K_EMF 43.6 = 3.1 rev/s, so
+// this is still about a third of what the drivetrain could do.
+// HISTORY, because I got this wrong once: raising this 0.65 -> 1.00 on 2026-08-15 was a
+// misread of "reduce the range" and it pinned the outer loop against a LEAN_CLAMP that no
+// longer exists. Different situation -- the clamp is gone and more speed is what was asked
+// for -- but keep an eye on stopping distance, which is what originally sized this.
+const float DRIVE_MAX_VEL  = 0.90f; // rev/s at full stick; sized by stopping distance
 // Lower bound on the commanded speed once the stick is out of its deadzone. Without it the
 // first usable stick position asks for a crawl that sits inside the dither band and never
 // breaks away, which is what "can't break away on small throttle values" was. Span is now
