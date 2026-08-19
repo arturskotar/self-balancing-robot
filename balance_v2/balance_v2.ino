@@ -2512,6 +2512,13 @@ void loop() {
   // target is AHEAD of us -> we must travel forward -> lean FORWARD (+deg).
   // With targetVel = 0 and posSetpoint parked this is identically the baseline
   // law  leanRaw = -(Kpos*positionRev + Kvel*forwardVel).
+
+  // THE DRIVE STICK'S ONLY PATH INTO THE LOOP. Integrating targetVel here is what turns a
+  // velocity request into a position target the cascade then chases. Deleting this line by
+  // accident (2026-08-19, an over-wide line-range delete while removing the lean clamp) froze
+  // posSetpoint, so positionLean collapsed to ~0 and the robot leaned on VELI alone and never
+  // travelled. Symptom in telemetry: PSET constant while TVEL is nonzero, and PERR ~ 0.
+  posSetpoint += targetVel * DT;
   // Backstop only. This used to be the anti-windup mechanism, which capped the
   // loop's authority at Kpos*POS_ERROR_CLAMP permanently -- see POS_ERROR_CLAMP.
   posSetpoint = constrain(posSetpoint, positionRev - POS_ERROR_CLAMP,
