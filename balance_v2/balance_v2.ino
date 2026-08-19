@@ -297,7 +297,7 @@ const int           LEAN_SWEEP_MAX_REST = 8;      // per direction, for the spre
 // here that spins them, so keep hands clear and let it run to the summary.
 // See emfTestLoop for what the number is for and how to sanity-check the fit.
 // Set back to 0 when done.
-#define EMF_TEST 1
+#define EMF_TEST 0
 const int EMF_TEST_SIGN       = 1;    // which way to spin; magnitude is what matters
 const int EMF_TEST_PWM_START  = 10;   // start at the moving floor, below it nothing turns
 const int EMF_TEST_PWM_STEP   = 10;
