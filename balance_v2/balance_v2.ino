@@ -1270,6 +1270,52 @@ const float EMF_FF_GAIN = 35.0f;   // PWM per rev/s; 80% of the measured 43.6
 const float EMF_FF_SIGN = -1.0f;
 const float VEL_DEADZONE = 0.05f;   // rev/s : below this the wheels count as "stopped"
 
+// ---- Stall-breakaway assist -------------------------------------------------
+// THE LAST LEVER, after lean was proven exhausted. 2026-08-15 flight: both outer-loop terms
+// saturated (POS -9.00 at its cap, VELI -24.00 at its cap), LEAN ACT -35.6, and the robot
+// did not move. ERR 0.72 -> U 3.09 -> PWM 14, below the ~18 static floor. The inner loop had
+// ARRIVED at its target and had no reason to push, and no amount of extra lean changes that:
+// lean is not a torque command. When stiction is the blocker, only wheel torque helps.
+//
+// So this drives PWM from UNMET VELOCITY DEMAND instead of from pitch error.
+//
+// TWO PREVIOUS ATTEMPTS AT THIS IDEA FAILED. Both are in the DRIVE_FRICTION_FF note. What
+// killed them and what is different here:
+//   1. The two-phase version needed a gate between opposing phases, and every gate chattered
+//      on a ringing LEAN ACT. THIS HAS NO PHASES -- one direction, taken from the sign of the
+//      demand, which cannot flip while the stick is held.
+//   2. The single-phase version CANCELLED THE PD: 38*(-1.00) + 49.43 = 11, and the lean froze
+//      because the bias fought the very wheel motion that builds a lean (non-minimum phase).
+//      THAT IS WHAT SBA_U_MAX EXISTS FOR. This engages only while the PD is IDLE, so it
+//      cannot cancel a large PD command, and lean establishment -- where the PD is producing
+//      real output -- is exactly when it stays switched off.
+// In the stall log U sat at 0.3-3.5; through the lean build and the lurches it ran 10-45.
+// SBA_U_MAX 6 separates those cleanly.
+//
+// FOUR CONDITIONS, ALL REQUIRED. Engage only when the wheels are NOT turning, the PD is
+// idle, the pilot IS asking for speed, and the stick is actually held. Any one of them
+// opening collapses the assist at the same ramp rate.
+// RAMPED, never stepped: it grows until the wheels break loose, and the moment they do
+// forwardVel rises, the stall gate opens and it fades. There is no fixed pulse to time out
+// and nothing to unwind.
+//
+// ⚠️ ABORT CRITERIA FOR THE FLIGHT. Watch SBA in telemetry.
+//   * SBA nonzero while the robot is ROLLING  -> the stall gate is not releasing; set
+//     STALL_BREAKAWAY_ASSIST 0 and raise SBA_VEL_STALLED.
+//   * SBA chattering between + and -           -> the demand sign is flipping; this design
+//     is dead, same as its two predecessors, and it goes back to 0 for good.
+//   * A hard lurch on breakaway                -> SBA_PWM_MAX too high, or the ramp too fast.
+//   * Robot drives with no stick               -> the `driving` gate has failed; abort.
+#define STALL_BREAKAWAY_ASSIST 1
+const float SBA_VEL_STALLED = 0.05f;  // rev/s : below this the wheels count as not turning
+const float SBA_U_MAX       = 6.0f;   // engage only while |u| is under this (PD idle)
+const float SBA_VERR_MIN    = 0.15f;  // rev/s of unmet demand before it is worth pushing
+const float SBA_PWM_MAX     = 26.0f;  // ceiling; ~1.4x the 18 static floor, well under MAX_PWM
+const float SBA_RAMP_PER_S  = 40.0f;  // PWM/s; ~0.65 s from 0 to the ceiling, no step
+// SIGN_CFG: physical forward is NEGATIVE PWM effort, so a POSITIVE targetVel needs a
+// negative assist. Same reasoning and same value as EMF_FF_SIGN; one character to flip.
+const float SBA_SIGN        = -1.0f;
+
 // Low-pass on the D-term gyro rate ONLY (the angle estimate still uses raw rate).
 // Knocks down single-sample gyro spikes that a high Kd would turn into kicks.
 // Higher = smoother D but more phase lag (less effective damping). 0.0 = no filter.
@@ -1295,6 +1341,7 @@ bool  frictionLeanUp = false; // latched LAUNCH -> CRUISE phase for the friction
 float ffFloorFilt = 38.0f;    // slew-limited FF floor; starts at the stopped value (18 + 20).
                               // Was 47 = the OLD 27 static deadband + boost, stale since the
                               // EN wiring fix made the floors 18/18.
+float breakawayAssist = 0.0f;  // ramped stall-breakaway PWM, common-mode (see STALL_BREAKAWAY_ASSIST)
 float plainFloorFilt = 18.0f; // same, for the no-FF path. Starts at the STATIC figure because
                               // the wheels are stopped at boot; no boost on this path.
 bool  integralRollingPrev = false;            // edge-detect stall -> rolling for the integral reset
@@ -1391,6 +1438,7 @@ struct ControlTelemetry {
   float driveCmd = 0.0f, turnCmd = 0.0f;
   float frictionFF = 0.0f;   // -1..+1 : how much of the deadband floor drive is aiming
   int   emfFFL = 0, emfFFR = 0;  // PWM added by the back-EMF feedforward, per wheel (see EMF_FF_GAIN)
+  float breakawayAssist = 0.0f;  // common-mode PWM from the stall-breakaway assist
   bool  frictionLeanUp = false;  // false = LAUNCH phase, true = CRUISE phase
   float wheelVelRawL = 0.0f, wheelVelRawR = 0.0f;
   long encoderDeltaL = 0, encoderDeltaR = 0;
@@ -1672,6 +1720,10 @@ void driveControlDiff(float uL, float uR, float ffBias, float ffRoll) {
   const int emfR = (int)(EMF_FF_SIGN * EMF_FF_GAIN * wheelVelR);
   pwmL += emfL;
   pwmR += emfR;
+  // Stall-breakaway assist, common-mode (see STALL_BREAKAWAY_ASSIST). Ramped in the control
+  // loop; applied here so it lands on the same output the floor and the EMF term do.
+  pwmL += (int)breakawayAssist;
+  pwmR += (int)breakawayAssist;
   controlLog.emfFFL = emfL;
   controlLog.emfFFR = emfR;
   motorPerWheel(pwmL, pwmR);
@@ -2273,6 +2325,8 @@ void loop() {
     controlLog.commandCap = 0.35f + 0.65f * controlLog.speedInput;
     controlLog.driveCmd = controlLog.turnCmd = controlLog.frictionFF = 0.0f;
     controlLog.emfFFL = controlLog.emfFFR = 0;
+    controlLog.breakawayAssist = 0.0f;
+    breakawayAssist = 0.0f;
     controlLog.positionLean = controlLog.velocityLean = controlLog.velocityLeanIntegral = controlLog.leanRaw = 0.0f;
     controlLog.effectiveKvel = Kvel;
     controlLog.posError = controlLog.velError = controlLog.softStart = 0.0f;
@@ -2843,6 +2897,28 @@ void loop() {
   controlLog.effortR = u - turnCmd;
   // Continuous stopped->rolling blend for the FF floor. NOT gated on wheelMoving: that
   // flag toggles at encoder-noise level and square-waved the floor. See driveControlDiff.
+  // ---- Stall-breakaway assist ----------------------------------------------
+  // The one lever left after lean was proven exhausted: PWM driven by UNMET VELOCITY DEMAND
+  // rather than by pitch error. See STALL_BREAKAWAY_ASSIST for why this is gated the way it
+  // is and what killed the two previous attempts.
+#if STALL_BREAKAWAY_ASSIST
+  const bool sbaStalled  = fabs(forwardVel) < SBA_VEL_STALLED;   // wheels are not turning
+  const bool sbaPdIdle   = fabs(u)          < SBA_U_MAX;         // inner loop has arrived
+  const bool sbaWanted   = fabs(velError)   > SBA_VERR_MIN;      // and we are asking to move
+  const bool sbaEngage   = driving && sbaStalled && sbaPdIdle && sbaWanted;
+  const float sbaStep    = SBA_RAMP_PER_S * DT;
+  if (sbaEngage) {
+    // Push in the direction of the DEMAND, not of u. SIGN_CFG: physical forward is negative
+    // PWM effort, so a positive targetVel needs a negative assist.
+    const float want = SBA_SIGN * (targetVel > 0.0f ? 1.0f : -1.0f) * SBA_PWM_MAX;
+    breakawayAssist += constrain(want - breakawayAssist, -sbaStep, sbaStep);
+  } else {
+    // Collapse as soon as ANY gate opens -- the wheels rolled, the PD woke up, or the stick
+    // went away. Same ramp rate, so releasing is as smooth as engaging.
+    breakawayAssist += constrain(0.0f - breakawayAssist, -sbaStep, sbaStep);
+  }
+  controlLog.breakawayAssist = breakawayAssist;
+#endif
   float ffRoll = constrain(fabs(forwardVel) / FRICTION_FF_ROLL_VEL, 0.0f, 1.0f);
   driveControlDiff(controlLog.effortL, controlLog.effortR, frictionFF, ffRoll);
 
@@ -2966,6 +3042,7 @@ void telemetry(float error, float rate, float u) {
   // thing the fix exists to kill. MV keeps the raw wheelMoving flags visible (L then R) so the
   // gate's behaviour can still be watched -- it is no longer wired to the output.
   Serial.print(" EMF "); Serial.print(controlLog.emfFFL); Serial.print("/"); Serial.print(controlLog.emfFFR);
+  Serial.print(" SBA "); Serial.print(controlLog.breakawayAssist, 0);
   Serial.print(" DBF "); Serial.print(plainFloorFilt, 1);
   Serial.print(" MV "); Serial.print(wheelMovingL ? "M" : "S");
   Serial.print(wheelMovingR ? "M" : "S");
