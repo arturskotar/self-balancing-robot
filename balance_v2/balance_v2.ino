@@ -1308,9 +1308,14 @@ const float VEL_DEADZONE = 0.05f;   // rev/s : below this the wheels count as "s
 //   * Robot drives with no stick               -> the `driving` gate has failed; abort.
 #define STALL_BREAKAWAY_ASSIST 1
 const float SBA_VEL_STALLED = 0.05f;  // rev/s : below this the wheels count as not turning
-const float SBA_U_MAX       = 6.0f;   // engage only while |u| is under this (PD idle)
+const float SBA_U_MAX       = 6.0f;   // engage only while |u| is under this (PD idle).
+                                      // NOTE: this is EFFORT, not output. The friction floor
+                                      // turns u 2.77 into 12 PWM, so "PD idle" here does NOT
+                                      // mean the output is idle -- which is why the assist is
+                                      // a one-sided floor rather than an adder.
 const float SBA_VERR_MIN    = 0.15f;  // rev/s of unmet demand before it is worth pushing
-const float SBA_PWM_MAX     = 26.0f;  // ceiling; ~1.4x the 18 static floor, well under MAX_PWM
+const float SBA_PWM_MAX     = 30.0f;  // ceiling; must CLEAR the 18 static floor with margin,
+                                      // and as a one-sided floor it is the output, not an adder
 const float SBA_RAMP_PER_S  = 40.0f;  // PWM/s; ~0.65 s from 0 to the ceiling, no step
 // SIGN_CFG: physical forward is NEGATIVE PWM effort, so a POSITIVE targetVel needs a
 // negative assist. Same reasoning and same value as EMF_FF_SIGN; one character to flip.
@@ -1720,10 +1725,26 @@ void driveControlDiff(float uL, float uR, float ffBias, float ffRoll) {
   const int emfR = (int)(EMF_FF_SIGN * EMF_FF_GAIN * wheelVelR);
   pwmL += emfL;
   pwmR += emfR;
-  // Stall-breakaway assist, common-mode (see STALL_BREAKAWAY_ASSIST). Ramped in the control
-  // loop; applied here so it lands on the same output the floor and the EMF term do.
-  pwmL += (int)breakawayAssist;
-  pwmR += (int)breakawayAssist;
+  // Stall-breakaway assist as a ONE-SIDED FLOOR, not an additive term (see
+  // STALL_BREAKAWAY_ASSIST). Adding it did not work: the PD subtracted from it. 2026-08-15
+  // flight, stalled at the rear target --
+  //     u -2.77 -> floor map -> PWM -12,  SBA +26,  net +14, still under the 18 static floor
+  // The PD opposes because the robot is 0.72 deg short of a REARWARD target, so the loop is
+  // correctly commanding the wheels FORWARD to finish the lean (non-minimum phase) while the
+  // assist commands backward. Both are right; neither is big enough alone; the sum is not
+  // enough to break away.
+  // As a floor it can only push the output FURTHER in the demanded direction, never reduce
+  // it, so the cancellation cannot happen. The balance loop keeps full authority in the
+  // opposite direction -- if the PD wants MORE than the assist, it gets it.
+  if (breakawayAssist > 0.5f) {
+    const int m = (int)breakawayAssist;
+    if (pwmL < m) pwmL = m;
+    if (pwmR < m) pwmR = m;
+  } else if (breakawayAssist < -0.5f) {
+    const int m = (int)breakawayAssist;
+    if (pwmL > m) pwmL = m;
+    if (pwmR > m) pwmR = m;
+  }
   controlLog.emfFFL = emfL;
   controlLog.emfFFR = emfR;
   motorPerWheel(pwmL, pwmR);
