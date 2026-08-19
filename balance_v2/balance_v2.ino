@@ -1303,6 +1303,7 @@ float plainFloorFilt = 18.0f; // same, for the no-FF path. Starts at the STATIC 
                               // the wheels are stopped at boot; no boost on this path.
 bool  integralRollingPrev = false;            // edge-detect stall -> rolling for the integral reset
 bool  integralRollingLatched = false;         // hysteresis state for that detector (see VEL_I_ROLL_DROP)
+bool  breakawayDumpDone = false;              // the dump is ONCE per drive engagement, not per slip
 unsigned long lastControlMicros = 0;
 int controlHz = 0;   // measured control-loop frequency (should read ~200; if lower, we're falling behind)
 
@@ -2558,6 +2559,7 @@ void loop() {
   bool integralRolling = integralRollingLatched;
   if (!driving) {
     velocityLeanI = 0.0f;
+    breakawayDumpDone = false;   // re-arm: the next engagement gets one dump of its own
   } else {
     // BREAKAWAY DUMP, SOFTENED. This used to be a hard `velocityLeanI = 0.0f`.
     // CONFIRMED IN FLIGHT, three times in one run -- the moment VF crosses VEL_I_ROLL_MIN
@@ -2579,7 +2581,23 @@ void loop() {
     // already have; 1.0 disables the dump altogether.
     // 0.5 IS A FIRST VALUE, not a derived one. If the robot now overshoots the commanded
     // speed and has to unwind, lower it. If it still forgets the lean at breakaway, raise it.
-    if (integralRolling && !integralRollingPrev) velocityLeanI *= VEL_I_BREAKAWAY_KEEP;
+    // ONCE PER ENGAGEMENT. The hysteresis band stopped the detector chattering on sensor
+    // dither, but it cannot stop it on REAL motion: after breakaway the wheels genuinely
+    // stop and restart -- stick-slip -- so VF really does fall through 0.10 and climb back
+    // through 0.20, and every one of those is a true stall->roll edge. Four extra dumps in
+    // the 2026-08-19 flight, each an exact halving:
+    //     VELI 14.00 -> 7.60 | ~9.98 -> 4.99 | ~8.98 -> 4.49 | ~7.48 -> 3.74
+    // The integral needed ~2 s to climb back to its clamp, which is the tail the pilot sees
+    // as "jitters a bit and then drives".
+    // No band fixes this, because the crossings are physically real. The POLICY is what was
+    // wrong: the dump exists to shed the wind that was fighting STICTION, and that happens
+    // once, at THE breakaway. A slip 200 ms into a drive is not a new breakaway -- by then
+    // the integral is trimming an accelerating robot, which is its actual job.
+    // Re-arms on stick release, where velocityLeanI is zeroed anyway.
+    if (integralRolling && !integralRollingPrev && !breakawayDumpDone) {
+      velocityLeanI *= VEL_I_BREAKAWAY_KEEP;
+      breakawayDumpDone = true;
+    }
     velocityLeanI += KVEL_I * velError * DT;
     velocityLeanI = constrain(velocityLeanI, -VEL_I_CLAMP, VEL_I_CLAMP);
   }
