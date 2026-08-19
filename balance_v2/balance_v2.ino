@@ -533,7 +533,26 @@ const float KVEL_I = 24.0f;      // velocity-error memory (rev/s*s -> deg lean)
 // path is covered -- but WATCH THE BREAKAWAY LURCH. If the robot snaps hard when the wheels
 // finally free, this is where it came from, and the answer is a lower number here, not more
 // damping in the inner loop.
-const float VEL_I_CLAMP = 14.0f; // deg; must exceed the stiction lean, not sit under it
+// NOTE the 14 -> 24 above was undone by the wholesale reset to v2-lean-baseline, not by a
+// decision about this constant; the value sat at 14 while the note claimed 24.
+// 14 -> 20, 2026-08-19, pilot: "maybe velocity ramp up can be higher".
+// THE RAMP IS CEILING-LIMITED, NOT RATE-LIMITED, so this is the knob and KVEL_I is not.
+// Measured on the 2026-08-19 flight, full stick:
+//     VELI reaches its clamp in 14 / (KVEL_I 24 * Vmax 0.65) = 0.9 s
+//     POS  then climbs at Kpos * Vmax = 3.9 deg/s until PERR pins at POS_ERROR_CLAMP 1.5
+//     LEAN CMD converges to 9.00 + ~1.9 + 14.00 = 24.9 at ~2.3 s and STOPS -- two of the
+//     three terms saturated, nothing left to give
+// and breakaway was observed at LEAN ACT 25.9. The ceiling was sitting a hair UNDER the
+// lean the robot actually needed to move, which is why "leans and never moves" was a coin
+// flip on surface and battery position. 20 puts the ceiling at ~30.9, about 5 deg of margin
+// over the measured requirement.
+// Raising KVEL_I instead would only shorten the first 0.9 s, which is not where the time
+// goes. Raising POS_ERROR_CLAMP would also lift the ceiling but it is a position BACKSTOP:
+// after a long stall it holds a large accumulated position debt and spends it as a catch-up
+// lurch. This term is the one designed to carry sustained demand.
+// Rear note: TARGET = BALANCE_SETPOINT -3.22 - lean was already past the -18.2 torque null
+// at 14, so this does not newly cross it -- see the lean-equilibria finding.
+const float VEL_I_CLAMP = 20.0f; // deg; must exceed the stiction lean, not sit under it
 // The integral may only TRIM A CRUISE, never fight stiction. While the wheels are
 // not actually rolling, velError reports a stalled drivetrain rather than a speed
 // shortfall, and integrating that just winds to the clamp -- so the term arrives
@@ -931,7 +950,16 @@ const float DRIVE_MAX_VEL  = 0.65f; // rev/s at full stick; sized by stopping di
 // 0.30..0.65 rather than 0..0.40 -- narrower AND faster at the bottom.
 const float DRIVE_MIN_VEL  = 0.30f; // rev/s just outside the stick deadzone (scaled by the cap)
 // 25 -> 16: "turns are still faster" than the forward drive they are mixed into.
-const float TURN_AUTHORITY = 16.0f; // PWM-effort differential at full turn stick
+// 25 -> 16 (pilot: "turns are still faster") -> 32, 2026-08-19.
+// THE 16 WAS TUNED AGAINST AN AMPLIFIER. While the back-EMF feedforward ran per-wheel it
+// was a differential positive-feedback loop with gain 0.80, so any commanded turn produced
+// a differential velocity ~5x what this constant asked for. Turn felt fast because it WAS,
+// by a factor nothing in the config recorded. Making the FF common-mode (6369cfb) removed
+// that multiplier and the true authority of 16 showed up as "rotation is very sluggish".
+// Doubling restores roughly a third of what the amplifier was contributing; it is not a
+// return to the old feel and is not meant to be, since the old feel was a feedback bug.
+// Still open loop -- no yaw sensing, no rate limit -- so raise this in steps and watch VROT.
+const float TURN_AUTHORITY = 32.0f; // PWM-effort differential at full turn stick
 // Fraction of TURN_AUTHORITY still available at ZERO throttle. Turn is scaled by the live
 // throttle so rotation cannot out-run translation; this floor keeps a stationary pivot
 // possible. 0 = no turning at all unless the drive stick is off centre.
