@@ -1227,6 +1227,43 @@ const float DT = CONTROL_PERIOD_US * 1e-6f;     // constant dt for the controlle
 // (0.90 -> ~50 ms time constant). VEL_DEADZONE keeps the coast dead-zone from
 // engaging while the robot is still drifting (so velocity feedback can act).
 const float VEL_LPF      = 0.90f;   // EMA weight on the previous velocity estimate
+
+// ---- Back-EMF feedforward ---------------------------------------------------
+// Supplies the PWM a motor needs just to HOLD its speed against back-EMF, so the inner PD
+// no longer has to manufacture it out of a standing pitch error. That standing error was the
+// pilot's "bot may escape the commanded lean when it reaches higher velocity": PITCH walks
+// away from TARGET as VF rises, because the only thing generating cruise voltage was ERR.
+//
+// MEASURED, not guessed. EMF_TEST free-spin staircase, 14 steps from PWM 10 to 140:
+//     LEFT   K_EMF 43.6 PWM per rev/s, intercept 4.1, n 13
+//     RIGHT  K_EMF 45.1 PWM per rev/s, intercept 5.1, n 14
+// Per-step slopes held 42-47 across the whole range, so the linear model is right rather
+// than merely fitted. The intercept landing at 4-5 rather than at the MOVING deadband of 10
+// is expected and is itself a check: 10 is the BREAKAWAY threshold of a stopped wheel, while
+// this line describes a wheel already turning, and kinetic friction is below stiction.
+//
+// ONE GAIN FOR BOTH WHEELS. They differ by 3%, which is not evidence of anything -- and this
+// file has already lost a session to a "wheel asymmetry" that turned out to be a wiring
+// fault. Use the smaller of the two so the error is on the under-compensating side.
+//
+// DERATED TO 80% (43.6 -> 35). This term cancels the motor's own velocity damping. At 100%
+// the motor becomes very nearly a pure torque source; ABOVE 100% it has NEGATIVE damping and
+// wheel speed runs away, because this is velocity feedback on the output. The measurement is
+// clean, but battery sag and the loaded case both move the true value around, and there is no
+// symmetric penalty for being low: under-compensating just leaves some of the old standing
+// offset behind, over-compensating destabilises the wheel. Raise toward 43 once a flight
+// shows the offset gone and nothing running away.
+//
+// WATCH FOR QUANTISATION. One encoder count is 0.366 rev/s, so a single count of velocity
+// noise becomes 35 * 0.366 = 12.8 PWM through this gain. VEL_LPF 0.90 is what keeps that
+// tolerable. If the wheels buzz at low speed after this goes in, it is this amplification and
+// the fix is more velocity filtering, NOT a lower gain -- the gain is measured.
+const float EMF_FF_GAIN = 35.0f;   // PWM per rev/s; 80% of the measured 43.6
+// SIGN_CFG says TARGET_FWD + ENC_FWD + PWM_FWD -, i.e. physical forward is POSITIVE encoder
+// velocity and NEGATIVE PWM. wheelVelL/R come straight off encoder deltas with no flip, so
+// sustaining forward motion needs a MORE NEGATIVE pwm as speed rises: hence -1.
+// If the robot accelerates uncontrollably the instant it starts rolling, this sign is wrong.
+const float EMF_FF_SIGN = -1.0f;
 const float VEL_DEADZONE = 0.05f;   // rev/s : below this the wheels count as "stopped"
 
 // Low-pass on the D-term gyro rate ONLY (the angle estimate still uses raw rate).
@@ -1349,6 +1386,7 @@ struct ControlTelemetry {
   float driveRaw = 0.0f, turnRaw = 0.0f;
   float driveCmd = 0.0f, turnCmd = 0.0f;
   float frictionFF = 0.0f;   // -1..+1 : how much of the deadband floor drive is aiming
+  int   emfFFL = 0, emfFFR = 0;  // PWM added by the back-EMF feedforward, per wheel (see EMF_FF_GAIN)
   bool  frictionLeanUp = false;  // false = LAUNCH phase, true = CRUISE phase
   float wheelVelRawL = 0.0f, wheelVelRawR = 0.0f;
   long encoderDeltaL = 0, encoderDeltaR = 0;
@@ -1618,6 +1656,20 @@ void driveControlDiff(float uL, float uR, float ffBias, float ffRoll) {
   plainFloorFilt = FF_FLOOR_LPF * plainFloorFilt + (1.0f - FF_FLOOR_LPF) * plainTarget;
   int pwmL = mapEffortToPwm(uL, ffBias, ffFloor, plainFloorFilt);
   int pwmR = mapEffortToPwm(uR, ffBias, ffFloor, plainFloorFilt);
+  // Back-EMF feedforward: the voltage each wheel needs simply to HOLD its current speed.
+  // Added AFTER the friction floor because it compensates a different thing -- the floor is
+  // Coulomb friction (constant magnitude, sign of the command), this is back-EMF (grows with
+  // speed, sign of the MOTION). Per-wheel on each wheel's own measured velocity, so it stays
+  // correct through a turn where the two wheels run at different speeds.
+  // Naturally zero at standstill, which is why this is safe where the two previous
+  // feedforwards were not: it cannot contribute during the non-minimum-phase launch that
+  // killed both of them. See EMF_FF_GAIN.
+  const int emfL = (int)(EMF_FF_SIGN * EMF_FF_GAIN * wheelVelL);
+  const int emfR = (int)(EMF_FF_SIGN * EMF_FF_GAIN * wheelVelR);
+  pwmL += emfL;
+  pwmR += emfR;
+  controlLog.emfFFL = emfL;
+  controlLog.emfFFR = emfR;
   motorPerWheel(pwmL, pwmR);
 }
 
@@ -2216,6 +2268,7 @@ void loop() {
     controlLog.speedInput = crsf::speed();
     controlLog.commandCap = 0.35f + 0.65f * controlLog.speedInput;
     controlLog.driveCmd = controlLog.turnCmd = controlLog.frictionFF = 0.0f;
+    controlLog.emfFFL = controlLog.emfFFR = 0;
     controlLog.positionLean = controlLog.velocityLean = controlLog.velocityLeanIntegral = controlLog.leanRaw = 0.0f;
     controlLog.effectiveKvel = Kvel;
     controlLog.posError = controlLog.velError = controlLog.softStart = 0.0f;
@@ -2897,6 +2950,7 @@ void telemetry(float error, float rate, float u) {
   // is exactly the chattering quantity that was removed; printing it back would re-import the
   // thing the fix exists to kill. MV keeps the raw wheelMoving flags visible (L then R) so the
   // gate's behaviour can still be watched -- it is no longer wired to the output.
+  Serial.print(" EMF "); Serial.print(controlLog.emfFFL); Serial.print("/"); Serial.print(controlLog.emfFFR);
   Serial.print(" DBF "); Serial.print(plainFloorFilt, 1);
   Serial.print(" MV "); Serial.print(wheelMovingL ? "M" : "S");
   Serial.print(wheelMovingR ? "M" : "S");
