@@ -1669,13 +1669,31 @@ void driveControlDiff(float uL, float uR, float ffBias, float ffRoll) {
   // Back-EMF feedforward: the voltage each wheel needs simply to HOLD its current speed.
   // Added AFTER the friction floor because it compensates a different thing -- the floor is
   // Coulomb friction (constant magnitude, sign of the command), this is back-EMF (grows with
-  // speed, sign of the MOTION). Per-wheel on each wheel's own measured velocity, so it stays
-  // correct through a turn where the two wheels run at different speeds.
+  // speed, sign of the MOTION).
   // Naturally zero at standstill, which is why this is safe where the two previous
   // feedforwards were not: it cannot contribute during the non-minimum-phase launch that
   // killed both of them. See EMF_FF_GAIN.
-  const int emfL = (int)(EMF_FF_SIGN * EMF_FF_GAIN * wheelVelL);
-  const int emfR = (int)(EMF_FF_SIGN * EMF_FF_GAIN * wheelVelR);
+  //
+  // COMMON MODE ONLY -- driven by forwardVel (the MEAN), not by each wheel's own velocity.
+  // The per-wheel version was a differential positive-feedback loop: the faster wheel reads
+  // a higher velocity, so it is handed MORE pwm, so it pulls further ahead. Nothing in the
+  // loop opposes it -- uL and uR are identical with no turn commanded, and there is no
+  // wheel-speed matching anywhere.
+  // Loop gain of that path = EMF_FF_GAIN / K_EMF_measured = 35 / 43.6 = 0.80, so a
+  // differential disturbance settles at 1/(1-0.80) = 5.1x its true size. Measured on the
+  // 2026-08-19 flight: VR-VL grew 0.03 -> 0.17 rev/s (5.7x) with TCMD 0.00 the whole way,
+  // EMF -11/-12 -> -12/-17, and VROT walked to -0.08 -- the robot curving with the stick
+  // centred, one wheel reading as sluggish. Pilot: "some code introduced wheel assymetry."
+  // NOTE this was only STABLE because the gain was detuned to 80% of measured. At the
+  // measured 43.6 the loop gain is 1.0 and the differential diverges outright. Do not raise
+  // EMF_FF_GAIN toward the measured value while this term carries any per-wheel component.
+  // Deadbands are symmetric (10/10 moving, 18/18 static) and the floor is a single shared
+  // plainFloorFilt, so this was the ONLY asymmetric path in the output stage.
+  // Common-mode compensation is preserved exactly: both wheels get the average of what they
+  // used to get, which is the whole point of the term. Only the differential part is gone.
+  const int emfCommon = (int)(EMF_FF_SIGN * EMF_FF_GAIN * forwardVel);
+  const int emfL = emfCommon;
+  const int emfR = emfCommon;
   pwmL += emfL;
   pwmR += emfR;
   controlLog.emfFFL = emfL;
