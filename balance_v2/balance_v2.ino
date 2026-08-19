@@ -550,6 +550,9 @@ const float VEL_I_ROLL_MIN = 0.20f;  // rev/s : below this the integral is froze
 // Fraction of the velocity integral KEPT when the wheels first break loose. 0.0 = the old
 // hard reset, 1.0 = no dump at all. See the note at the dump itself for the flight evidence.
 const float VEL_I_BREAKAWAY_KEEP = 0.5f;
+// Release threshold for the rolling latch. Rise at VEL_I_ROLL_MIN, fall at this -- without
+// the gap VF dither re-fires the breakaway dump several times per 100 ms. See the detector.
+const float VEL_I_ROLL_DROP = 0.10f;
 // FINDING 2026-08-14, bench: gating the integral OFF below this speed was a
 // CATCH-22. It required rolling before the integral could build, but building was
 // what would start the roll -- so on a stalled drive VELI sat at 0.01 forever.
@@ -1299,6 +1302,7 @@ float ffFloorFilt = 38.0f;    // slew-limited FF floor; starts at the stopped va
 float plainFloorFilt = 18.0f; // same, for the no-FF path. Starts at the STATIC figure because
                               // the wheels are stopped at boot; no boost on this path.
 bool  integralRollingPrev = false;            // edge-detect stall -> rolling for the integral reset
+bool  integralRollingLatched = false;         // hysteresis state for that detector (see VEL_I_ROLL_DROP)
 unsigned long lastControlMicros = 0;
 int controlHz = 0;   // measured control-loop frequency (should read ~200; if lower, we're falling behind)
 
@@ -2537,7 +2541,21 @@ void loop() {
   // on the stall -> rolling transition whatever accumulated was fighting stiction,
   // not trimming a cruise, so MOST of it is shed at breakaway -- most, not all: see
   // VEL_I_BREAKAWAY_KEEP. A full reset fired while the demand was still entirely unmet.
-  bool integralRolling = fabs(forwardVel) >= VEL_I_ROLL_MIN;
+  // ROLLING DETECTOR WITH HYSTERESIS. A bare `>= VEL_I_ROLL_MIN` chattered: VF dithers across
+  // the threshold constantly once the robot is creeping, and EVERY rising crossing fires the
+  // breakaway dump. At 200 Hz it can cross several times inside one 100 ms telemetry sample,
+  // so the integral gets halved repeatedly instead of once.
+  // Measured, 2026-08-19 flight -- VF across consecutive samples:
+  //     0.03 0.08 0.11 0.15 0.17 0.36 0.26 0.14 0.25 0.10 0.28 0.13 0.26 0.15 0.31 ...
+  // and the effect on the integral, in ONE sample: VELI 14.00 -> 2.25. That is 14 halved two
+  // or three times, not once. VELI then lived at 2-5 instead of reaching its 14 clamp, lean
+  // sat at 12-16 instead of ~24, and the velocity ramp was correspondingly slow.
+  // Latching at 0.20 and releasing at 0.10 means one dump per genuine stall->roll transition,
+  // which is what the dump was always meant to be. The drop threshold is half the rise so the
+  // band is wider than the dither seen above.
+  if (fabs(forwardVel) >= VEL_I_ROLL_MIN)        integralRollingLatched = true;
+  else if (fabs(forwardVel) <  VEL_I_ROLL_DROP)  integralRollingLatched = false;
+  bool integralRolling = integralRollingLatched;
   if (!driving) {
     velocityLeanI = 0.0f;
   } else {
