@@ -533,7 +533,7 @@ const float KVEL_I = 24.0f;      // velocity-error memory (rev/s*s -> deg lean)
 // path is covered -- but WATCH THE BREAKAWAY LURCH. If the robot snaps hard when the wheels
 // finally free, this is where it came from, and the answer is a lower number here, not more
 // damping in the inner loop.
-const float VEL_I_CLAMP = 24.0f; // deg; must exceed the stiction lean, not sit under it
+const float VEL_I_CLAMP = 14.0f; // deg; must exceed the stiction lean, not sit under it
 // The integral may only TRIM A CRUISE, never fight stiction. While the wheels are
 // not actually rolling, velError reports a stalled drivetrain rather than a speed
 // shortfall, and integrating that just winds to the clamp -- so the term arrives
@@ -698,8 +698,8 @@ const float DRIVE_KVEL_MULTIPLIER = 1.0f;
 //     it. That is the intended behaviour now, not a margin failure.
 // Was 18 fwd / 10 rear, then 40/40. If the fall latch fires on full stick, drop these rather
 // than pushing FALL_CUTOFF past the frame -- past the frame there is nothing left to catch it.
-const float LEAN_CLAMP_FWD  = 60.0f; // deg : forward cap. Frame at lean +64.2, latch at 63
-const float LEAN_CLAMP_REAR = 44.0f; // deg : rear cap.    Frame at lean -47.8, latch at 47
+const float LEAN_CLAMP_FWD  = 24.0f; // deg : forward cap. Frame at lean +64.2, latch at 63
+const float LEAN_CLAMP_REAR = 18.0f; // deg : rear cap.    Frame at lean -47.8, latch at 47
 // Kept for the places that want a single worst-case figure (see LEAN_RATE_FF_MAX).
 const float LEAN_CLAMP = (LEAN_CLAMP_FWD > LEAN_CLAMP_REAR) ? LEAN_CLAMP_FWD : LEAN_CLAMP_REAR;
 // 0.99 -> 0.97 (tau 0.50 s -> 0.17 s, pole 2 -> 6 rad/s). The velocity loop
@@ -928,6 +928,10 @@ const float DRIVE_MAX_VEL  = 0.65f; // rev/s at full stick; sized by stopping di
 const float DRIVE_MIN_VEL  = 0.30f; // rev/s just outside the stick deadzone (scaled by the cap)
 // 25 -> 16: "turns are still faster" than the forward drive they are mixed into.
 const float TURN_AUTHORITY = 16.0f; // PWM-effort differential at full turn stick
+// Fraction of TURN_AUTHORITY still available at ZERO throttle. Turn is scaled by the live
+// throttle so rotation cannot out-run translation; this floor keeps a stationary pivot
+// possible. 0 = no turning at all unless the drive stick is off centre.
+const float TURN_THROTTLE_FLOOR = 0.30f;
 const float DRIVE_STICK_DEADZONE = 0.15f;
 const float TURN_STICK_DEADZONE  = 0.30f; // measured cross-axis reaches ~0.25 during straight drive
 const float DRIVE_SIGN     = +1.0f; // flip to -1 if the drive stick drives the wrong way
@@ -2352,7 +2356,18 @@ void loop() {
     float speed = DRIVE_MIN_VEL + live * (DRIVE_MAX_VEL - DRIVE_MIN_VEL);
     targetVel = DRIVE_SIGN * (driveIn > 0.0f ? 1.0f : -1.0f) * cap * speed;  // rev/s, + = fwd
   }
-  float turnCmd   = TURN_SIGN  * turnIn  * cap * TURN_AUTHORITY;      // per-wheel PWM-effort diff
+  // TURN SCALED BY THROTTLE. Turn is an open-loop PWM-effort differential -- it has no
+  // velocity feedback, no rate limit and nothing measuring yaw -- while drive has to
+  // negotiate with the balance loop and the lean ramp before it produces any motion. That
+  // asymmetry is why turns have always felt faster than the driving they are mixed into,
+  // and dropping TURN_AUTHORITY 25 -> 16 reduced it without changing its nature.
+  // Scaling by the live throttle ties rotation to translation: hard turns need the stick.
+  // TURN_THROTTLE_FLOOR keeps a fraction available at zero throttle so the robot can still
+  // pivot in place; set it to 0 to forbid stationary turns entirely.
+  float turnScale = TURN_THROTTLE_FLOOR
+                  + (1.0f - TURN_THROTTLE_FLOOR) * fabs(driveIn);
+  if (turnScale > 1.0f) turnScale = 1.0f;
+  float turnCmd   = TURN_SIGN * turnIn * cap * turnScale * TURN_AUTHORITY;  // per-wheel PWM diff
   targetVelLog = targetVel;
   turnCmdLog = turnCmd;
   controlLog.speedInput = speedIn;
