@@ -297,7 +297,7 @@ const int           LEAN_SWEEP_MAX_REST = 8;      // per direction, for the spre
 // here that spins them, so keep hands clear and let it run to the summary.
 // See emfTestLoop for what the number is for and how to sanity-check the fit.
 // Set back to 0 when done.
-#define EMF_TEST 0
+#define EMF_TEST 1
 const int EMF_TEST_SIGN       = 1;    // which way to spin; magnitude is what matters
 const int EMF_TEST_PWM_START  = 10;   // start at the moving floor, below it nothing turns
 const int EMF_TEST_PWM_STEP   = 10;
@@ -1913,6 +1913,12 @@ void leanSweepLoop() {
 
   if (millis() - lastPrint < 100) return;             // live stream at 10 Hz
   lastPrint = millis();
+  Serial.print("LEAN_SWEEP pitch "); Serial.print(p, 2);
+  Serial.print("  rate ");           Serial.print(rate, 1);
+  Serial.print("  ");                Serial.print(still ? (resting ? "HOLDING" : "still") : "moving");
+  Serial.print("  | rests F/R ");    Serial.print(nFwd);
+  Serial.print("/");                 Serial.println(nRear);
+}
 
 // ---- Back-EMF / velocity feedforward measurement (see EMF_TEST) -------------
 // Drives a PWM STAIRCASE with the wheels off the ground and records the STEADY free-spin
@@ -2023,12 +2029,6 @@ void emfTestLoop() {
   sampling   = false;
   phaseStart = millis();
   motorRaw(EMF_TEST_SIGN * pwm);
-}
-  Serial.print("LEAN_SWEEP pitch "); Serial.print(p, 2);
-  Serial.print("  rate ");           Serial.print(rate, 1);
-  Serial.print("  ");                Serial.print(still ? (resting ? "HOLDING" : "still") : "moving");
-  Serial.print("  | rests F/R ");    Serial.print(nFwd);
-  Serial.print("/");                 Serial.println(nRear);
 }
 
 // Update filtered wheel velocities from the counters. Call once per control
