@@ -698,10 +698,9 @@ const float DRIVE_KVEL_MULTIPLIER = 1.0f;
 //     it. That is the intended behaviour now, not a margin failure.
 // Was 18 fwd / 10 rear, then 40/40. If the fall latch fires on full stick, drop these rather
 // than pushing FALL_CUTOFF past the frame -- past the frame there is nothing left to catch it.
-const float LEAN_CLAMP_FWD  = 24.0f; // deg : forward cap. Frame at lean +64.2, latch at 63
-const float LEAN_CLAMP_REAR = 18.0f; // deg : rear cap.    Frame at lean -47.8, latch at 47
-// Kept for the places that want a single worst-case figure (see LEAN_RATE_FF_MAX).
-const float LEAN_CLAMP = (LEAN_CLAMP_FWD > LEAN_CLAMP_REAR) ? LEAN_CLAMP_FWD : LEAN_CLAMP_REAR;
+// LEAN_CLAMP_FWD / _REAR / LEAN_CLAMP all REMOVED 2026-08-15 -- the outer loop is no longer
+// capped. See the note at the leanRaw sum for what bounds it instead (~25 deg from the
+// per-term caps) and why removing this does not solve breakaway.
 // 0.99 -> 0.97 (tau 0.50 s -> 0.17 s, pole 2 -> 6 rad/s). The velocity loop
 // crosses over near 2.5 rad/s, so the old 2 rad/s pole sat essentially ON the
 // crossover and ate ~51 deg of phase exactly where it hurt. That lag is what
@@ -1336,7 +1335,7 @@ float pitch = 0.0f;
 float integral = 0.0f;
 float dRateFilt = 0.0f;   // low-pass-filtered gyro rate for the D term (angle est. uses the raw rate)
 float targetRateFilt = 0.0f;         // d(leanCmd)/dt, filtered like dRateFilt, for D-on-ERROR
-const float LEAN_RATE_FF_MAX = 60.0f; // deg/s : bound on the setpoint-rate term (a full LEAN_CLAMP
+const float LEAN_RATE_FF_MAX = 60.0f; // deg/s : bound on the setpoint-rate term (the outer loop
                                       // swing in 100 ms). Stops a leanCmd STEP becoming a PWM kick.
 float dTermLog = 0.0f;    // derivative contribution, for telemetry
 float leanCmd   = 0.0f;   // cascade outer-loop output: the desired lean (deg) added to BALANCE_SETPOINT
@@ -2586,10 +2585,6 @@ void loop() {
   // target is AHEAD of us -> we must travel forward -> lean FORWARD (+deg).
   // With targetVel = 0 and posSetpoint parked this is identically the baseline
   // law  leanRaw = -(Kpos*positionRev + Kvel*forwardVel).
-  // Remember both accumulator states so a saturated output can unwind exactly
-  // this tick's contribution -- see the conditional integration below.
-  float posSetpointPrev   = posSetpoint;
-  float velocityLeanIPrev = velocityLeanI;
 
   posSetpoint += targetVel * DT;
   // Backstop only. This used to be the anti-windup mechanism, which capped the
@@ -2628,22 +2623,29 @@ void loop() {
   float velocityLeanIntegral = 0.0f;
 #endif
   float leanRaw = positionLean + velocityLean + velocityLeanIntegral;
-  // CONDITIONAL INTEGRATION (rc_balance structure). LEAN_CLAMP is the single
-  // saturation point: while the requested lean is pinned there, freeze both
-  // accumulators so neither can wind past what the loop is allowed to ask for.
-  // Below saturation they run free, so the loop keeps searching upward for the
-  // lean that actually breaks the wheels loose instead of stalling at a fixed
-  // ceiling. On breakaway there is no lurch to unwind: forwardVel rises,
-  // velError collapses, and positionRev catches posSetpoint, so all three terms
-  // shrink on their own.
-  // Per-direction now: the rear cap is set by an equilibrium at -18.2 and the forward one is
-  // not, so a single symmetric number cannot serve both. See LEAN_CLAMP_FWD / _REAR.
-  const float leanLimit = (leanRaw >= 0.0f) ? LEAN_CLAMP_FWD : LEAN_CLAMP_REAR;
-  if (fabs(leanRaw) >= leanLimit) {
-    posSetpoint   = posSetpointPrev;
-    velocityLeanI = velocityLeanIPrev;
-  }
-  leanRaw = constrain(leanRaw, -LEAN_CLAMP_REAR, LEAN_CLAMP_FWD);
+  // ══ LEAN CLAMP REMOVED 2026-08-15, ON PILOT'S CALL: "remove lean clamp. we don't need it." ══
+  // There is no longer an outer-loop lean cap, and no conditional-integration freeze keyed to
+  // one. Both were here to stop the accumulators winding past a ceiling that no longer exists.
+  //
+  // WHAT STILL BOUNDS THE LEAN, because "no clamp" does not mean "unbounded": each of the
+  // three terms carries its own cap, and their sum is the real ceiling --
+  //     Kpos * POS_ERROR_CLAMP = 6.0 * 1.5 = 9.0
+  //     Kveff * velError                   ~ 2.0
+  //     VEL_I_CLAMP                        = 14.0
+  //                                          ----
+  //                                          ~25 deg of reachable lean
+  // The previous rear cap of 18 WAS binding (the last flight shows RAW -18.00 = CMD -18.00),
+  // so removing it buys roughly 7 more degrees rearward. It does not buy motion: 35 deg was
+  // already flown and did not break the wheels loose. This removes an artificial limit, it
+  // does not solve breakaway, and nothing here should be read as expecting it to.
+  //
+  // Anti-windup is unaffected. It never depended on this clamp: POS_ERROR_CLAMP bounds the
+  // position term and VEL_I_CLAMP bounds the integral, both directly, and the breakaway edge
+  // detector still discards the integral on the stall->rolling transition. The freeze was a
+  // second layer over accumulators that were already individually bounded.
+  //
+  // Safety is unaffected and does not live here. FALL_CUTOFF (63 fwd / 47 rear, at the
+  // measured frame) and RECOVERY_GIVEUP still apply, and ~25 deg is far inside both.
   float leanCmdBefore = leanCmd;
   leanCmd = LEAN_LPF * leanCmd + (1.0f - LEAN_LPF) * leanRaw;
 #if STATIC_LEAN_TEST
