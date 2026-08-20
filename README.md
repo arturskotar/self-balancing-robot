@@ -16,6 +16,25 @@ inner pitch PD chases that lean. This is the librobotcontrol / `rc_balance`
 > lean. Every drive feature that failed here failed by bypassing the cascade and
 > commanding lean or PWM directly.
 
+## Demo
+
+**Balancing on the floor, under inspection** — the chassis holds itself upright
+on 140 mm wheels while the outer loop keeps it near its home position, and takes
+a poke from the resident QA department without going over.
+
+![Balancing on the floor](docs/media/balancing-floor.gif)
+
+**Bench test with live telemetry** — propped on a box with the wheels free, the
+TX16S driving it and the 100 ms telemetry stream scrolling on the monitor. Most
+of the tuning in this repo was read off that stream.
+
+![Bench test with telemetry](docs/media/bench-telemetry.gif)
+
+The GIFs are 8 fps and downscaled. Full-quality 30 fps versions of the same ten
+seconds are committed alongside them and play in GitHub's file view:
+[balancing-floor.mp4](docs/media/balancing-floor.mp4) ·
+[bench-telemetry.mp4](docs/media/bench-telemetry.mp4)
+
 ## Project Structure
 
 ```
@@ -24,6 +43,7 @@ self-balancing-robot/
 │   ├── balance_v2.ino      # the entire controller (single file)
 │   └── crsf.h              # ELRS/CRSF parser + TX16S channel map
 ├── flash.sh                # build/flash pipeline (OneDrive -> WSL -> board)
+├── docs/media/             # demo clips (GIF for inline, MP4 for full quality)
 ├── CONTROL_THEORY.md       # derivation and physics
 ├── MIGRATION_TEENSY.md     # V1 Uno -> V2 Teensy 4.1 port plan
 ├── PATCHES_FROM_CASCADE.md # salvage list from an abandoned branch
