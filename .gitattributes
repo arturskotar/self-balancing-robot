@@ -11,5 +11,8 @@
 # Binary assets — never touch.
 *.pdf binary
 *.png binary
+*.jpg binary
+*.gif binary
+*.mp4 binary
 *.hex binary
 *.bin binary

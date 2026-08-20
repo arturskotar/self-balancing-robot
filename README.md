@@ -1,281 +1,364 @@
 # Self-Balancing Robot
 
-Self-balancing robot on 2 wheels using a GY-91 IMU (MPU9250) and a **cascaded
-controller**. It **stands up by itself, finds level, holds its spot, recovers
-from drags, and rests its motors silently when balanced**: an inner pitch PD
-loop (with a low-passed D term) wrapped by an outer position/velocity loop that
-steers a *lean setpoint* (`Kpos`/`Kvel`), plus a **coast band** that cuts the
-motors when settled so they don't buzz, heat, or drain the battery.
+A two-wheel inverted pendulum on a **Teensy 4.1**, flown from a **TX16S over
+ELRS/CRSF**. It stands itself up, holds its spot, drives and pivots under stick
+control, and latches safe when it reaches its frame.
+
+The control structure is a **cascade**: the pilot drives a *velocity setpoint*,
+never the lean and never the motors. Stick → wheel velocity → integrated into a
+position setpoint → an always-closed outer loop derives the **lean** → a fast
+inner pitch PD chases that lean. This is the librobotcontrol / `rc_balance`
+(EduMiP) structure.
+
+> **The single most important idea in this repo:** *lean is an output, not a
+> command.* A lean angle is an **acceleration** command — holding lean θ requires
+> sustained wheel acceleration of `g·tan(θ)`, so constant speed needs **zero**
+> lean. Every drive feature that failed here failed by bypassing the cascade and
+> commanding lean or PWM directly.
+
+## Demo
+
+**Balancing on the floor, under inspection** — the chassis holds itself upright
+on 140 mm wheels while the outer loop keeps it near its home position, and takes
+a poke from the resident QA department without going over.
+
+![Balancing on the floor](docs/media/balancing-floor.gif)
+
+**Bench test with live telemetry** — propped on a box with the wheels free, the
+TX16S driving it and the 100 ms telemetry stream scrolling on the monitor. Most
+of the tuning in this repo was read off that stream.
+
+![Bench test with telemetry](docs/media/bench-telemetry.gif)
+
+The GIFs are 8 fps and downscaled. Full-quality 30 fps versions of the same ten
+seconds are committed alongside them and play in GitHub's file view:
+[balancing-floor.mp4](docs/media/balancing-floor.mp4) ·
+[bench-telemetry.mp4](docs/media/bench-telemetry.mp4)
 
 ## Project Structure
 
 ```
 self-balancing-robot/
 ├── balance_v2/
-│   └── balance_v2.ino          # Main control firmware (current)
-├── arduino-cli.yaml            # Arduino CLI configuration
-├── CONTROL_THEORY.md           # In-depth control/robotics theory with the physics
-└── README.md                   # This file
+│   ├── balance_v2.ino      # the entire controller (single file)
+│   └── crsf.h              # ELRS/CRSF parser + TX16S channel map
+├── flash.sh                # build/flash pipeline (OneDrive -> WSL -> board)
+├── docs/media/             # demo clips (GIF for inline, MP4 for full quality)
+├── CONTROL_THEORY.md       # derivation and physics
+├── MIGRATION_TEENSY.md     # V1 Uno -> V2 Teensy 4.1 port plan
+├── PATCHES_FROM_CASCADE.md # salvage list from an abandoned branch
+└── README.md
 ```
 
 ## Hardware
 
-- **Microcontroller**: Arduino Uno (temporary bench tester; Teensy 4.1 in final build)
-- **IMU**: GY-91 (MPU9250 — accel + gyro used; mag/baro unused in V1)
-- **Motor Driver**: 2x IBT-2 / BTS7960 H-Bridge (one per motor)
-- **Motors**: 2x Waveshare DCGM-3865 12V geared DC, ~240 RPM no-load, integrated Hall encoders (used for velocity damping + position hold)
-- **Wheels**: 90–100 mm grippy rubber/TPU
-- **Power**: 4S LiPo (~14–16.8 V) → motors; LM2596 buck → 5 V logic
+| | |
+|---|---|
+| **MCU** | Teensy 4.1 (600 MHz) — *not 5 V tolerant* |
+| **IMU** | GY-91 / MPU9250 (accel + gyro; mag/baro unused) |
+| **Motor driver** | 2x IBT-2 / BTS7960 H-bridge, one per motor |
+| **Motors** | 2x Waveshare DCGM-3865, 12 V, 42:1, integrated Hall encoders |
+| **Encoder resolution** | **546 counts/rev** at the output shaft (13 PPR x 42:1, rising edges of A) |
+| **Wheels** | **140 mm** (were 120 mm, originally 90–100 mm) |
+| **Radio** | RadioMaster RP1 ELRS RX -> `Serial1` @ 420000 8N1, TX16S |
+| **Power** | 4S LiPo (~14–16.8 V) -> motors; buck -> 5 V / 3.3 V logic |
 
-> ⚠️ Motors are rated **12 V** but the 4S pack runs **~14–16.8 V**. Keep PWM
-> capped and watch motor temperature/current. See `MAX_PWM` in the firmware.
+> ⚠️ Motors are rated **12 V** and the 4S pack runs up to **16.8 V**. `MAX_PWM`
+> is the current limiter — watch motor temperature.
 
-## Wiring
+### Pinout (Teensy 4.1)
 
-| Component | Pin (Arduino Uno) |
-|-----------|-------------------|
-| MPU9250 SDA | A4 |
-| MPU9250 SCL | A5 |
-| Left Motor Forward  | 5 |
-| Left Motor Reverse  | 6 |
-| Right Motor Forward | 9 |
-| Right Motor Reverse | 10 |
-| Left Encoder A (green)  | 2 (INT0) |
-| Left Encoder B (yellow) | 4 |
-| Right Encoder A (green) | 3 (INT1) |
-| Right Encoder B (yellow)| 7 |
+| Function | Pin | Notes |
+|---|---|---|
+| Left motor FWD / REV | 6 / 9 | FlexPWM2.2 A/B |
+| Right motor FWD / REV | 22 / 23 | FlexPWM4.0 / 4.1 |
+| Left encoder A / B | 2 / 3 | A on interrupt |
+| Right encoder A / B | 4 / 5 | A on interrupt |
+| IMU SDA / SCL | 18 / 19 | `Wire` default |
+| CRSF RX | `Serial1` (0 / 1) | 420000 baud |
 
-All logic grounds must share a common reference with the motor-driver ground.
+**Power the encoders from 3.3 V**, not 5 V — the Teensy's inputs are not 5 V
+tolerant. The 6-pin PH2.0 motor cable is silkscreened `M V A B G M`:
 
-### Motor / encoder connector (Waveshare DCGM-3865)
+| Pin | Label | Wire | Function |
+|---|---|---|---|
+| 1 | M | white | motor power (M−) |
+| 2 | V | blue | encoder supply -> **3.3 V** |
+| 3 | A | green | Hall A -> interrupt pin |
+| 4 | B | yellow | Hall B |
+| 5 | G | black | encoder ground (shared) |
+| 6 | M | white | motor power (M+) |
 
-Each motor has one 6-pin PH2.0 cable carrying both motor power and the encoder.
-On this batch the connector PCB is silkscreened **`M V A B G M`**:
+Both `M` wires are white and interchangeable — if a wheel runs backwards, swap
+them. All logic grounds must share a reference with the driver ground.
 
-| Pin | Label | Wire   | Function          | Goes to            |
-|-----|-------|--------|-------------------|--------------------|
-| 1   | M     | white  | motor power       | IBT-2 motor out (M−) |
-| 2   | V     | blue   | encoder 3.3/5 V   | 5 V (Uno) / **3.3 V (Teensy)** |
-| 3   | A     | green  | Hall A            | interrupt pin (D2/D3) |
-| 4   | B     | yellow | Hall B            | digital pin (D4/D7) |
-| 5   | G     | black  | encoder ground    | GND (shared)       |
-| 6   | M     | white  | motor power       | IBT-2 motor out (M+) |
+> **PWM frequency is a control parameter, not a cosmetic one.** The BTS7960 has
+> a ~8 µs input-to-output turn-on delay, so any pulse shorter than that produces
+> *nothing*. At 20 kHz that swallows ~41 PWM counts and looks exactly like a
+> stiction wall; at `MOTOR_PWM_HZ 2000` it costs ~2. **Never change
+> `MOTOR_PWM_HZ` without re-running `DEADBAND_TEST`** — the deadband numbers
+> below were measured at 2000 Hz and are only valid there.
 
-Both `M` wires are white — M1/M2 are interchangeable; if a wheel runs the wrong
-way, swap them. Encoder resolution: 13 PPR base (26-pole magnet ring) × 42:1 gearbox
-= **546 counts/rev** at the output shaft (counting rising edges of A; full 4× quadrature
-would be 2184 but needs more interrupt pins than the Uno has). The Teensy 4.1 is
-**not 5 V-tolerant** — power the encoder from 3.3 V there so A/B are 3.3 V logic.
+## Radio Control (TX16S)
 
-**Bench-testing the encoders:** set `#define ENCODER_TEST 1` in
-`balance_v2/balance_v2.ino`, flash, and open the monitor. The motors stay off so
-you can roll each wheel by hand; the loop streams `ENC_TEST LENC … RENC … | rev L … R …`.
-One full wheel turn should move the count by ~546 (≈1.00 rev). Set it back to `0`
-to restore normal balancing.
+| Channel | Control | Function |
+|---|---|---|
+| CH1 | right stick, horizontal | **turn** — open-loop effort differential |
+| CH2 | right stick, vertical | **drive** — commands wheel velocity |
+| CH3 | left stick, vertical | **speed cap** — scales everything |
+| CH6 | SB | **arm / kill** — disarmed cuts the motors and clears all state |
+| CH7 | SC | gain select (Kp / Kd / Kvel) |
+| CH8 | S1 knob | live tune for the selected gain ("pickup" style — the knob only takes over once moved) |
 
-## Building & Uploading (WSL)
-
-### Prerequisites (one-time)
-```bash
-sudo apt update
-sudo apt install -y arduino-cli rsync
-arduino-cli core install arduino:avr
-```
-
-### Compile, upload, monitor
-```bash
-# from the repo root
-arduino-cli compile --fqbn arduino:avr:uno balance_v2
-arduino-cli upload  -p /dev/ttyUSB0 --fqbn arduino:avr:uno balance_v2
-arduino-cli monitor -p /dev/ttyUSB0 --config baudrate=115200
-```
-
-Replace `/dev/ttyUSB0` with your port (`arduino-cli board list`). On WSL you
-first need to attach the USB device from Windows (`usbipd`) and grant access to
-the port (`sudo chmod a+rw /dev/ttyUSB0`).
+Link loss for `LINK_TIMEOUT_MS` (500 ms) disarms.
 
 ## Control Algorithm
 
-**Complementary filter** (sensor fusion):
-- 99% gyroscope integration (fast, drifts over time)
-- 1% accelerometer correction (slow, noisy, but absolute reference)
+**Estimator** — complementary filter, 99 % gyro integration + 1 % accelerometer.
 
-**Cascaded control law** — an outer position/velocity loop shapes the *lean
-setpoint* for an inner pitch PD loop (a balancer can only accelerate by leaning,
-so to brake/return it tilts *against* the motion and lets the fast inner loop
-chase that tilt — a strong, sign-stable "reverse-kick"):
+> **IMU axis gotcha:** the pitch-axis rate is `-(getGyroY() - bias)`, **not** X.
+> A library update silently moved it once, which zeroed the rate signal and made
+> the robot "balance slowly but explode when pushed". Re-verify with `IMU_TEST`
+> after any IMU or library change.
+
+**Outer loop** — runs always, and produces a lean:
+
+```c
+posSetpoint += targetVel * DT;                       // the stick's ONLY path in
+posSetpoint  = constrain(posSetpoint, positionRev +/- POS_ERROR_CLAMP);
+
+posError = posSetpoint - positionRev;                // rev
+velError = targetVel   - forwardVel;                 // rev/s
+
+velocityLeanI += KVEL_I * velError * DT;             // clamped to +/-VEL_I_CLAMP
+leanRaw  = Kpos*posError + Kvel*velError + velocityLeanI;
+leanCmd  = LEAN_LPF*leanCmd + (1-LEAN_LPF)*leanRaw;
 ```
-// OUTER loop: position + velocity  ->  a commanded lean (deg), clamped + SLOW-low-passed
-leanRaw     = -(Kpos * positionRev + Kvel * forwardVel)        clamped to ±LEAN_CLAMP
-leanCmd     = LEAN_LPF * leanCmd + (1 - LEAN_LPF) * leanRaw    // ~500 ms — MUST be slow (see below)
-effSetpoint = BALANCE_SETPOINT + leanCmd
 
-// INNER loop: balance to the leaned setpoint
-error = pitch - effSetpoint
-u     = -(Kp * error + Kd * rate_filt + Ki * integral)        // D on a low-passed rate
+**Inner loop** — pitch PD onto the leaned target:
+
+```c
+TARGET = BALANCE_SETPOINT + leanCmd;
+error  = pitch - TARGET;
+u      = -(Kp*error + Kd*rateFilt + Ki*integral);    // D on a low-passed rate
 ```
-`u` is then mapped to PWM with **motor-deadband feed-forward** so small
-corrections actually move the geared motors, and clamped to `MAX_PWM`. The D
-term runs on a **low-passed gyro rate** (`D_LPF`) so single-sample gyro spikes
-don't become motor kicks.
 
-Two non-obvious pieces make this work on a non-minimum-phase plant:
-- **`LEAN_LPF` (outer-loop low-pass) must be slow (~500 ms).** To return home the
-  wheels must first roll the "wrong way" (non-minimum-phase). If the outer loop
-  reacts *faster* than that wrong-way transient (~100–300 ms), it re-commands the
-  lean mid-transient → positive feedback → **runaway** (an earlier ~100 ms setting
-  did exactly this). Slowing it below the transient kills the runaway.
-- **Coast band (motor protection):** when `|error| < ANGLE_DEADZONE` *and* the
-  wheels are stopped, output is forced to **0** — the motors go fully off. This
-  isn't just power saving: the residual jitter was a self-sustaining loop (motors
-  buzz → vibration → the gyro reads it as motion → motors buzz). Cutting the
-  motors at balance stops the vibration, the gyro goes quiet, and it stays
-  settled. Telemetry shows long runs of `U 0` with `RATE ≈ 0`.
+**Output stage** — two corrections, deliberately separate:
 
-> **IMU axis gotcha:** on this MPU9250 library build the *pitch-axis* gyro rate
-> reads on **`getGyroY()` (negated)**, not X — `gyroRate = -(getGyroY() -
-> GYRO_Y_BIAS)`. A library update silently moved it, which zeroed the rate signal
-> and made the robot "balance slowly but explode when pushed." If you swap IMUs or
-> libraries, re-verify with `IMU_TEST` (hand-tilt, watch which gyro axis tracks).
+```c
+pwm  = plainFloor * min(|u|/FLOOR_KNEE, 1) + |u|     // Coulomb friction floor
+pwm += EMF_FF_SIGN * EMF_FF_GAIN * forwardVel        // back-EMF, COMMON MODE
+```
 
-See **[CONTROL_THEORY.md](CONTROL_THEORY.md)** for the full derivation and physics.
+The friction floor is a **continuous blend** from the static to the moving
+deadband, driven by speed. It used to be a binary `moving ? dbMoving : dbStatic`
+gate, which square-waved the output by 8 counts at loop rate and produced an
+~8.7 Hz limit cycle.
 
-**Key parameters** (in `balance_v2/balance_v2.ino`) — current working tune:
+The back-EMF term is **common mode on purpose** — driven by `forwardVel`, the
+mean. Per-wheel (each wheel from its own velocity) it is a differential
+positive-feedback loop of gain `EMF_FF_GAIN / K_EMF` = 35/43.6 = **0.80**, which
+settles any wheel-speed difference at **5x** its true size and makes the robot
+curve with the stick centred. Note this also means the term contributes
+**exactly zero in a pure pivot**, since `forwardVel` is zero when the wheels
+counter-rotate — pivot authority comes from `TURN_AUTHORITY` alone.
+
+### Non-obvious pieces
+
+- **`LEAN_LPF` must be slower than the plant's wrong-way transient.** To lean
+  forward the wheels must first roll *backward* (non-minimum phase). An outer
+  loop faster than that transient (~100–300 ms) re-commands the lean mid-swing,
+  which is positive feedback, and the robot runs away.
+- **Turn must beat the balance effort, not merely reduce it.** `effortL = u +
+  turn`, `effortR = u - turn`, floored independently. Counter-rotation needs the
+  two to have **opposite signs**, i.e. `|turn| > |u|`. Below that both wheels are
+  driven the same way and the weaker one drops under its breakaway and simply
+  sits — looking exactly like a dead wheel.
+- **Coast band.** With `|error| < ANGLE_DEADZONE` and the wheels stopped, output
+  is forced to 0. Motor buzz causes chassis vibration, the gyro reads that as
+  motion, which causes more buzz; cutting the motors breaks the loop.
+- **Beware bare thresholds.** `VF` is quantised at **0.366 rev/s per encoder
+  count** before filtering, so *any* bare threshold on it in the 0–0.5 band
+  chatters at loop rate. This has caused three separate destructive bugs here —
+  the floor gate, the integral rolling detector, and the `driving` flag. All
+  three are now hysteretic or debounced. **Treat a new bare threshold on a noisy
+  signal as a bug on sight.**
+
+See **[CONTROL_THEORY.md](CONTROL_THEORY.md)** for the derivation.
+
+## Current Tune
 
 | Param | Value | Meaning |
-|-------|-------|---------|
-| `Kp` | 2.0 | inner proportional gain (pitch) |
-| `Kd` | 0.3 | inner derivative damping (on the low-passed rate). **Low** — see note below |
-| `Ki` | 0.0 | inner integral (unused; the outer loop handles standing bias) |
-| `Kpos` | 1.0 | outer loop: position → lean (deg per rev from home); raise = returns home harder |
-| `Kvel` | 4.0 | outer loop: velocity → lean (deg per rev/s); raise = brakes/damps recovery harder |
-| `LEAN_CLAMP` | 5.0° | max lean the outer loop may command (tip-over safety cap) |
-| `LEAN_LPF` | 0.99 | outer-loop low-pass (~500 ms). **Must stay slow** or the plant runs away |
-| `D_LPF` | 0.60 | low-pass weight on the D-term gyro rate (~7 ms) |
-| `ANGLE_DEADZONE` | 1.0° | coast band: within this of target (and wheels stopped) → motors off |
-| `GYRO_Y_BIAS` | −9.0 | raw `getGyroY()` at rest — **recalibrate per unit** (`IMU_TEST`, hold still) |
-| `BALANCE_SETPOINT` | −3.22° | the angle where it truly balances — **calibrate on the wheels** |
-| gyro/accel on-chip DLPF | 20 / 21 Hz | MPU9250 hardware low-pass — tames motor vibration at the sensor |
-| `MAX_PWM` | 110 | output ceiling (raise carefully; watch heat/current) |
-| `MOTOR_DEADBAND` | 11 | lowest PWM that just spins the loaded wheels — **measure with `DEADBAND_TEST`** |
-| control loop | 200 Hz | fixed-rate, constant `dt` |
+|---|---|---|
+| `Kp` / `Kd` / `Ki` | 2.0 / 0.3 / 0.0 | inner pitch PD (Ki unused) |
+| `DRIVE_KP` / `DRIVE_KD` | 4.0 / 0.20 | gain schedule while driving |
+| `Kpos` | 6.0 | position error -> lean (deg per rev) |
+| `Kvel` | 3.0 | velocity error -> lean (deg per rev/s) |
+| `KVEL_I` | 24.0 | velocity-error integral rate |
+| `VEL_I_CLAMP` | 20.0° | **dominant term; sets the reachable lean** |
+| `POS_ERROR_CLAMP` | 1.5 rev | position backstop, caps the `Kpos` term at 9° |
+| `LEAN_LPF` | 0.95 | ~98 ms EMA on `leanCmd` |
+| `BALANCE_SETPOINT` | −3.22° | calibrate per build, on the wheels |
+| `MAX_PWM` | 140 | output ceiling |
+| deadbands | 10 / 10 moving, **18 / 18 static** | measured at 2000 Hz, symmetric |
+| `FLOOR_KNEE` | 5.0 | floor ramp; **a trade-off, not a fix** (see below) |
+| `EMF_FF_GAIN` | 35 | PWM per rev/s — 80 % of the measured 43.6 |
+| `DRIVE_MIN_VEL` / `DRIVE_MAX_VEL` | 0.30 / 0.90 rev/s | the stick maps to this span |
+| `TURN_AUTHORITY` | 32 | effort differential at full turn stick |
+| `TURN_THROTTLE_FLOOR` | 0.75 | fraction of turn available at zero throttle |
+| `FALL_CUTOFF` fwd / rear | 63° / 47° | at the measured frame contacts |
+| control loop | 200 Hz | fixed `dt` |
 
-> **Why `Kd` is so low (0.3, not the 3–5 typical of balancers):** these motors
-> couple vibration into the gyro, so the *rate* signal carries a fast phantom
-> component. A high `Kd` amplifies it into a violent limit cycle. The on-chip DLPF
-> + a low `Kd` + the coast band together keep the loop quiet. If you fit a
-> vibration-isolating (foam/rubber) IMU mount, you can carry more `Kd` for crisper
-> recovery.
+**Measured chassis limits (140 mm wheels):** the frame stops at **+61° / −51°**
+pitch. Geometry is no longer the binding constraint on lean.
 
-## Tuning Guide
+**`FLOOR_KNEE` is a trade-off.** It sets the zero-crossing incremental gain
+(`floor/KNEE + 1`): 5.0 gives 4.6, 2.5 gives 8.2 (jitters), 1.0 gives 19.0
+(unusable). Lowering it buys breakaway and costs a limit cycle. Do not reach for
+it to fix breakaway — it trades one symptom for the other.
 
-Do the two **physical calibrations first** — they matter more than the gains:
+## Building & Flashing
 
-1. **`MOTOR_DEADBAND`**: wheels off the ground, ramp PWM until each wheel just
-   starts to spin under its own gearbox friction. Put that number in. Easiest way:
-   set `#define DEADBAND_TEST 1`, flash, and read the `first-move L@<pwm> R@<pwm>`
-   line — it ramps PWM and reports each wheel's stiction threshold via the
-   encoders. Set `MOTOR_DEADBAND` to ~the larger of the two, then `DEADBAND_TEST 0`.
-   This is the usual cause of "can't catch itself": if the deadband is below true
-   stiction, a few-degree lean commands a PWM too small to move the wheels.
-2. **`BALANCE_SETPOINT`**: hold the bot on its wheels, find the angle where it
-   has no tendency to tip either way, read `PITCH`, set it.
+`flash.sh` syncs the Windows/OneDrive copy into WSL and builds *that*, then
+uploads. Teensy uploads run through the **Windows** loader, because the board
+re-enumerates to a different USB device in bootloader mode and that breaks
+`usbipd` mid-flash.
 
-Then tune **P → D → I**, one gain at a time:
+```bash
+bash flash.sh --sketch balance_v2 --teensy --all
+```
 
-1. `Kd ≈ 0.4`, `Ki = 0`. Raise **Kp** until it pushes back and just begins a
-   steady oscillation; back off to ~60–70% of that.
-2. Raise **Kd** until the oscillation damps out smoothly. Too high → motor
-   hiss/chatter (Kd amplifies gyro noise) → reduce, or rely on the D-term
-   low-pass (`D_LPF`) which lets you carry more Kd without amplifying spikes.
-3. (Optional) a **tiny Ki** (0.05–0.2) removes a standing lean, but here the
-   outer loop's `Kpos` (position → lean) handles that, so Ki stays 0.
-4. Once the inner PD balances, tune the **outer (cascade) loop**, which steers a
-   *lean setpoint* from velocity + position (see the control law above):
-   - **`LEAN_LPF` first — and keep it slow.** This is the outer-loop low-pass. If
-     it's faster than the plant's non-minimum-phase wrong-way transient
-     (~100–300 ms), the velocity term re-commands the lean mid-transient and the
-     robot **runs away** when dragged. Start at **0.99** (~500 ms). Only lower it
-     (toward 0.97) if recovery feels sluggish — and watch for runaway each notch.
-   - **`Kvel`** (velocity → lean) is the *brake / recovery damper*. Raise it until
-     a push/drag is arrested crisply without overshoot. Watch `VF` (should return
-     to 0) and `LEAN` (the commanded tilt). Too high → twitchy; too low →
-     overshoots home and lurches (big pitch swings during the return).
-   - **`Kpos`** (position → lean) is the *return-home* spring. Raise it until
-     `POS` converges back to 0 after a disturbance. Too high → slow oscillation
-     about home; too low → parks off-center.
-   - `LEAN_CLAMP` caps the commanded lean so the outer loop can never tip it over.
-   The cascade sign is intuitive — *lean against the motion* — so unlike the old
-   direct terms you shouldn't need to flip anything.
-5. **Coast band (`ANGLE_DEADZONE`)** — tune last, for quiet motors. Widen it
-   until the motors go silent at rest (`U 0` in telemetry, no buzz) but it doesn't
-   visibly sway. ~**1.0°** here. Too wide → a lazy ±1° rock; too narrow → the
-   motors never get to rest and buzz continuously (this is also what removes the
-   self-sustaining vibration jitter — see the control-law section).
+One-time core install:
 
-Read the serial `ERR / RATE / U` columns while tuning: growing amplitude = too
-much P or too little D; a fast limit cycle when you *raise* `Kd` = the rate is too
-noisy/lagged for that much D (lower it); `U` never reaching 0 at rest = widen the
-coast band. If it drives the **wrong way** and accelerates the fall, the gyro or
-motor sign is off — verify with `IMU_TEST` before touching gains.
+```bash
+bash flash.sh --board teensy --setup
+```
+
+Other forms: `--compile` (build only), `--clean` (from scratch), `--monitor
+--port COM5` (serial).
+
+> Read telemetry with `screen` at **115200**. `arduino-cli monitor --config
+> baudrate=` is unreliable here and produces garbled output.
+
+## Test Harnesses
+
+Set the `#define` to `1`, flash, read the serial output, then set it back to `0`.
+All are off in flight builds.
+
+| Mode | What it measures |
+|---|---|
+| `ENCODER_TEST` | motors off; roll by hand, one turn should be ~546 counts |
+| `DEADBAND_TEST` | multi-pass PWM ramp -> per-wheel static/moving breakaway, with spreads |
+| `EMF_TEST` | steps PWM, fits `PWM = K_EMF * rev/s + intercept` per wheel |
+| `LEAN_SWEEP` | motors off; finds rest angles and frame stops under a slow push |
+| `STATIC_LEAN_TEST` | holds a fixed commanded lean |
+| `IMU_TEST` | which gyro axis tracks pitch |
+| `BURST_LOG` | 400-sample (2 s) full-rate capture, dumped after the event |
+
+> **Measure distributions, not single samples.** Single ramps produced several
+> findings here that later evaporated — a per-wheel deadband difference that
+> vanished once each wheel's own spread was measured, and a tether-load trend
+> fitted to three medians and killed by a fourth. `DEADBAND_TEST` runs six
+> passes for exactly this reason.
+>
+> Equally: **a rest angle reached by *releasing* the chassis is not a limit.** A
+> limit is where the chassis stops under a slow deliberate push *and* reproduces
+> across sweeps. That confusion cost two sessions.
+
+## Telemetry
+
+One line per 100 ms, in labelled groups:
+
+```
+MS 21070 STATE DRIVE LINK Y ARM Y HZ 200
+| IMU   AP 21.41 PITCH 20.58 TARGET 20.85 ERR -0.27 RATE 0.42 DFILT 0.62 ...
+| PID   P -1.09 I 0.00 D -0.63 U 1.72 EL 1.72 ER 1.72 PWML 7 PWMR 7
+| ENC   L -23 R -22 VL -0.01 VR -0.00 VF -0.00 VROT -0.00 POS 0.041
+| TRK   TVEL 0.65 PSET 1.372 PERR 1.413 VERR 0.65 SOFT 1.00
+| LEAN  ACT 23.80 POS 8.48 VEL 1.95 VELI 14.00 RAW 24.43 CMD 24.07
+| RC    SPD 1.00 CAP 1.00 DRAW 0.99 TRAW 0.00 DCMD 0.99 TCMD 0.00 TEFF 0.00
+| CFG   Kp 2.00 Kpeff 3.98 Kd 0.30 ... DBF 17.7 PWMHZ 2000
+```
+
+| Field | Meaning |
+|---|---|
+| `PITCH` / `TARGET` / `ERR` | estimate, `BALANCE_SETPOINT + leanCmd`, and the tracking error |
+| `U` / `EL` / `ER` | inner-loop effort, then per-wheel after the turn mix |
+| `VF` / `VROT` | chassis forward and rotational speed (rev/s) |
+| `POS` / `PSET` / `PERR` | measured position, setpoint, and error (rev) |
+| `TVEL` / `VERR` | commanded velocity and its error |
+| `LEAN POS/VEL/VELI` | the three outer-loop terms — **read these to see which one saturated** |
+| `LEAN ACT` vs `CMD` | achieved lean vs commanded |
+| `EMF` | back-EMF feedforward, per wheel — **must print identical values** |
+| `DBF` | the live blended friction floor |
+
+**Reading it:** `ERR ~ 0` *and* `U ~ 0` *and* `PWM 0` at a large sustained lean
+means the target is sitting on a **torque null**, not that the loop is losing —
+a loop that is losing shows large `ERR` and saturated `u`. And `LEAN RAW == CMD`
+is a question, not a finding: a pinned clamp, a dragging wheel, and an
+over-large velocity demand all produce the same signature.
+
+## Known Limits & Open Work
+
+- **Dead time before breakaway.** At standstill the loop tracks the commanded
+  lean perfectly while producing less torque than static friction, so nothing
+  moves for ~2 s while the lean ramps. `PWM` alternates sign below the floor
+  during this — that is the buzz you hear before it goes.
+- **The lean ceiling is a sum of clamps**, not a single constant:
+  `Kpos * POS_ERROR_CLAMP (9°) + Kvel * velError (~2°) + VEL_I_CLAMP (20°)`, so
+  about 31°. Breakaway was measured at ~26°, so the margin is real but not large.
+- **Low CoM is the root cause.** Acceleration goes as
+  `g * L * sin(θ) / (R + L * cos(θ))` — with `L` (CoM height above the axle)
+  small, a large lean buys little force and the loop has to wind further for the
+  same acceleration. **Raising the CoM is the real fix**; `VEL_I_CLAMP` is a
+  workaround. Bigger wheels also *cut* ground force as `τ/R` (120 to 140 mm is
+  1.167x), so they traded torque for reach.
+- **Lean collapses on reaching commanded speed.** Expected — at the target
+  velocity there is no acceleration left to demand, so the lean must go. Not
+  tunable away; only postponable by raising `DRIVE_MAX_VEL`.
+- **A rear torque null sits at PITCH −18.2°.** A target placed on it has zero
+  drive authority. The forward null vanished with the 140 mm wheels.
 
 ## Troubleshooting
 
-**Robot overshoots / "head-bashes"**:
-- Make sure `MOTOR_DEADBAND` is set so small corrections move the wheels.
-- Recheck `BALANCE_SETPOINT` on the wheels; a wrong setpoint = constant lean.
-- Reduce Kp or raise Kd.
+**Leans correctly but will not move** — check for the torque-null signature
+(`ERR ~ 0`, `U ~ 0`, `PWM 0`) before touching anything. Otherwise it is the
+friction floor against available gravity torque; look at `LEAN VELI` and whether
+it reached `VEL_I_CLAMP`.
 
-**Robot falls immediately / balances slowly but explodes when pushed**:
-- Check motor polarity (forward/reverse pins swapped?) — wrong sign accelerates the fall.
-- **Verify the gyro axis** with `IMU_TEST`: hand-tilt the robot and confirm which
-  gyro channel tracks the pitch motion. This firmware uses `getGyroY()` negated
-  (`GYRO_Y_BIAS`); a library/IMU change can move it. A dead rate signal balances
-  on the accelerometer alone (sluggish) but has no damping, so it blows up fast.
-- Verify `PITCH_ZERO_OFFSET` / `BALANCE_SETPOINT` trim.
+**One wheel spins, the other sits** — the turn is losing the sign contest to
+`u`. Compare `TEFF` against `U`; raise `TURN_AUTHORITY` or
+`TURN_THROTTLE_FLOOR`.
 
-**Robot drifts forward/backward, or runs away when dragged**:
-- Raise `Kvel` (recovery brake) and `Kpos` (return-home spring). Watch `VF` / `POS`.
-- If it *accelerates away* on a slow drag, `LEAN_LPF` is too fast — raise it back
-  toward 0.99 (the outer loop must be slower than the wrong-way transient).
+**Robot curves with the stick centred** — `EMF L/R` should print **identical**
+values. A split means the back-EMF term has gone per-wheel again.
 
-**Motors buzz / never go quiet at rest**:
-- Widen `ANGLE_DEADZONE` (coast band) until `U` reaches 0 when settled.
-- The residual gyro vibration is mechanical — a foam/rubber IMU mount removes it
-  at the source and lets you carry more `Kd`.
+**Loses its lean mid-drive** — check whether `VELI` *steps* to zero (a state
+wipe: something toggled `driving`, or a reset path fired) or *slides* down (the
+loop arriving at commanded speed, which is correct behaviour).
 
-> **Note:** the old stall cutoff is **disabled** (`STALL_CUTOFF 0`). It false-tripped
-> on the cascade's lean-and-hold (moderate `u`, near-zero `VF` is *normal* here)
-> and could deadlock into a guaranteed topple. Re-add only with a saturation-level
-> `|u|` threshold and a non-latching re-arm (off the absolute accel angle).
+**Balances but explodes when pushed** — verify the gyro axis with `IMU_TEST`. A
+dead rate signal balances on the accelerometer alone and has no damping.
 
-**Arduino not discovered on USB**:
-- On WSL, attach the device from Windows via `usbipd`; then `ls /dev/ttyUSB*` should show it.
-- `dmesg | tail` for USB device messages.
+**Motors buzz at rest** — widen `ANGLE_DEADZONE` until `U` reaches 0 when
+settled. Residual vibration is mechanical; an isolating IMU mount removes it at
+source and lets you carry more `Kd`.
 
-## Serial Protocol
+## Working Practice
 
-Output every 100 ms:
-```
-PITCH <deg> ERR <deg> RATE <deg/s> U <pwm> SET <n> HZ <hz> LENC <t> RENC <t> VL <rev/s> VR <rev/s> VF <rev/s> LEAN <deg> POS <rev>
-```
-Example (settled — note `U 0`, the motors coasting):
-```
-PITCH -3.92 ERR -0.76 RATE 0.09 U 0 SET 0 HZ 188 LENC -28 RENC -3 VL 0.00 VR 0.00 VF 0.00 LEAN 0.05 POS -0.03
-```
-- **PITCH**: estimated angle (deg), positive = forward lean
-- **ERR**: `PITCH − effSetpoint` (the *leaned* target, not the bare setpoint)
-- **RATE**: pitch-axis angular velocity (deg/s) from `getGyroY()` negated, positive = forward
-- **U**: control effort before deadband/PWM mapping (`0` when coasting in the dead band)
-- **SET**: active PID sweep set (0 if sweep disabled)
-- **HZ**: achieved control-loop rate (expect ~200)
-- **LENC / RENC**: left / right encoder ticks since boot
-- **VL / VR**: per-wheel speed (rev/s, low-pass filtered)
-- **VF**: chassis forward speed (mean of the two wheels) — outer loop brakes this
-- **LEAN**: lean offset (deg) the outer loop is commanding (negative = leaning back to brake/return)
-- **POS**: average wheel position in revs from home — outer loop drives this to 0
+Two rules, both learned expensively:
 
-(Startup banner: `BALANCE_V2_READY`.)
+1. **Revert before theorising.** When a symptom appears right after a change,
+   revert and re-fly *before* reading the new telemetry as evidence. A change
+   that moves the operating point makes the log say things that are true of the
+   log and false of the robot.
+2. **Diff the working tag first.** `git diff v2-lean-baseline HEAD --
+   balance_v2/balance_v2.ino` is a 30-second check that beats any amount of
+   telemetry reading. It once surfaced twelve accumulated changes, including a
+   constant that was believed reverted and was not.
+
+Tags: `v1.0-arduino`, `v2-drive-works`, **`v2-lean-baseline`** (current
+reference build).
 
 ## License
 
