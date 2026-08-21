@@ -508,8 +508,10 @@ complete FPV camera the moment it is paired.
 A new O3 **must be activated before it will work properly.** Out of the box it
 reports that functions are limited, and no amount of correct wiring gets past it.
 
-1. Connect the air unit to a PC with **USB-C**. It **self-powers from USB** — no
-   pack, no bench supply, nothing else connected.
+1. Connect the air unit to a **PC or Mac** with **USB-C**. It **self-powers from
+   USB** — no pack, no bench supply, nothing else connected. **A phone cannot do
+   this**: the air unit has no phone or over-the-air update path, and it cannot be
+   updated through the goggles (§14.1).
 2. Open **DJI Assistant 2**, log in with a DJI account, click the O3 Air Unit
    icon, and follow **Start Activation**.
 
@@ -712,20 +714,43 @@ have it retrofitted into a nose already full of O3.
 Everything needed to activate, update, bind and configure the pair. Nothing here
 is required to *build* the robot — it is the desk work in §9.
 
-### 14.1 Required
+### 14.1 Which device is updated from what
 
-| Software | What it does | Link |
+They are not the same, and this is the thing that causes an afternoon of
+confusion:
+
+| Device | Activation | Firmware |
 |---|---|---|
-| **DJI Assistant 2 (Consumer Drones Series)** | **The one you need.** Activates the O3 Air Unit and firmware-updates both the air unit and the Goggles 3 over USB-C. | https://www.dji.com/downloads/softwares/dji-assistant-2-consumer-drones-series |
-| **DJI Fly app** (iOS/Android) | Alternative route for Goggles 3 firmware (Profile → Device Management → Firmware Update, over the OTG cable), and the endpoint for the **Wi-Fi live feed** in §13.2. | https://www.dji.com/downloads/djiapp/dji-fly |
+| **O3 Air Unit** | **PC/Mac only** | **PC/Mac only** — USB-C into DJI Assistant 2. There is **no phone path and no over-the-air path.** It cannot be updated through the goggles. |
+| **Goggles 3** | — | **Either**: DJI Fly on a phone (Profile → Device Management → Firmware Update, over the OTG cable), **or** DJI Assistant 2 on a PC. |
 
-A **DJI account** is required for activation. Both devices need it done once.
+**So the air unit is a desk job with a computer, full stop.** Plan for it: a
+known-good USB-C *data* cable and a PC, before the unit is mounted.
 
-### 14.2 Firmware, manuals and release notes
+> **Why the download page looks phone-only.** The product page
+> (`dji.com/downloads/products/o3-air-unit`) lists **manuals, release notes and
+> phone apps**. The desktop installer is not on it — DJI keeps Assistant 2 on its
+> own **software** page, linked below. If you only looked at the product page, you
+> saw apps and reasonably concluded phone-only. It is not; you were on the wrong
+> page for the tool.
+
+### 14.2 Required
+
+| Software | Platform | What it does | Link |
+|---|---|---|---|
+| **DJI Assistant 2 (Consumer Drones Series)** | **Windows / macOS** | **The one you need.** Activates the O3 Air Unit and firmware-updates both it and the Goggles 3 over USB-C. | https://www.dji.com/downloads/softwares/dji-assistant-2-consumer-drones-series |
+| **DJI Fly app** | iOS / Android | Goggles 3 firmware over the OTG cable, and the endpoint for the **Wi-Fi live feed** in §13.2. **Cannot touch the air unit.** | https://www.dji.com/downloads/djiapp/dji-fly |
+
+A **DJI account** is required for activation.
+
+### 14.3 Firmware, manuals and release notes
+
+These pages carry **manuals, release notes and apps** — not the desktop
+installer (§14.1).
 
 | Item | Link |
 |---|---|
-| O3 Air Unit — downloads (firmware, manuals) | https://www.dji.com/downloads/products/o3-air-unit |
+| O3 Air Unit — manuals and release notes | https://www.dji.com/downloads/products/o3-air-unit |
 | O3 Air Unit — support / specifications | https://www.dji.com/support/product/o3-air-unit |
 | Goggles 3 — downloads | https://www.dji.com/downloads/products/goggles-3 |
 | Goggles 3 — support | https://www.dji.com/support/product/goggles-3 |
@@ -735,13 +760,13 @@ concluding a bind failure is a fault. They live on DJI's CDN under dated paths
 that change with each release — reach them from the download pages above rather
 than bookmarking a URL.
 
-### 14.3 Fallback
+### 14.4 Fallback
 
 | Software | When | Link |
 |---|---|---|
 | **DJI Assistant 2 (DJI FPV Series)** | Only if the Consumer Drones build refuses to see the unit. Primarily for the original DJI FPV drone. | https://www.dji.com/downloads/softwares/dji-assistant-2-dji-fpv-series |
 
-### 14.4 Not DJI, but part of this build
+### 14.5 Not DJI, but part of this build
 
 | Software | Why it is on this list | Link |
 |---|---|---|
