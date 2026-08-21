@@ -513,12 +513,15 @@ reports that functions are limited, and no amount of correct wiring gets past it
 2. Open **DJI Assistant 2**, log in with a DJI account, click the O3 Air Unit
    icon, and follow **Start Activation**.
 
-> **Which DJI Assistant 2?** There are several builds. DJI's own O3 guide points
-> at the **Consumer Drone Series** build; other guides say the **FPV Series**
-> build. Installing both is harmless — if the unit does not appear in one, try the
-> other. "Air unit does not show up in Assistant 2" is usually this, a dead USB-C
-> *charge-only* cable, or a USB hub. Use a known-good data cable, straight into
-> the machine.
+> **Which DJI Assistant 2?** DJI publishes several builds and they are not
+> interchangeable. **Use "DJI Assistant 2 (Consumer Drones Series)"** — it is the
+> right one for **both** the O3 Air Unit and the Goggles 3, despite both being FPV
+> products. The **"DJI FPV Series"** build is for the original DJI FPV drone and
+> is only worth trying as a fallback. Links in [§14](#14-software-and-downloads).
+>
+> "Air unit does not show up in Assistant 2" is usually the wrong build, a
+> **charge-only USB-C cable**, or a hub. Use a known-good *data* cable, straight
+> into the machine.
 
 3. While you are there, **update the firmware on the air unit** — and separately
    update the **goggles**. The large majority of "it will not bind" reports are a
@@ -576,7 +579,7 @@ the existing test harnesses.
 
 | Stage | Do | Pass criterion |
 |---|---|---|
-| **0** | Activate, update, bind, set region/power — on the bench over USB-C, off the robot (§9) | Live video in the goggles, unit not mounted, nothing else connected |
+| **0** | Activate, update, bind, set region/power — on the bench over USB-C, off the robot (§9; software in §14) | Live video in the goggles, unit not mounted, nothing else connected |
 | **1** | Continuity-check the 6-pin cable against §3.1 (colours already confirmed) | Every wire traced to its connector pin **before** any power |
 | **2** | Power the O3 from the pack branch alone — fuse, cap, twisted pair, **no UART** | Video up, nothing else on the robot disturbed |
 | **3** | **Thermal test** in the final mount with the fan (§4.2) | 20 min stationary, no warning, no shutdown |
@@ -704,7 +707,55 @@ have it retrofitted into a nose already full of O3.
 
 ---
 
-## 14. Sources
+## 14. Software and downloads
+
+Everything needed to activate, update, bind and configure the pair. Nothing here
+is required to *build* the robot — it is the desk work in §9.
+
+### 14.1 Required
+
+| Software | What it does | Link |
+|---|---|---|
+| **DJI Assistant 2 (Consumer Drones Series)** | **The one you need.** Activates the O3 Air Unit and firmware-updates both the air unit and the Goggles 3 over USB-C. | https://www.dji.com/downloads/softwares/dji-assistant-2-consumer-drones-series |
+| **DJI Fly app** (iOS/Android) | Alternative route for Goggles 3 firmware (Profile → Device Management → Firmware Update, over the OTG cable), and the endpoint for the **Wi-Fi live feed** in §13.2. | https://www.dji.com/downloads/djiapp/dji-fly |
+
+A **DJI account** is required for activation. Both devices need it done once.
+
+### 14.2 Firmware, manuals and release notes
+
+| Item | Link |
+|---|---|
+| O3 Air Unit — downloads (firmware, manuals) | https://www.dji.com/downloads/products/o3-air-unit |
+| O3 Air Unit — support / specifications | https://www.dji.com/support/product/o3-air-unit |
+| Goggles 3 — downloads | https://www.dji.com/downloads/products/goggles-3 |
+| Goggles 3 — support | https://www.dji.com/support/product/goggles-3 |
+
+Release-note PDFs are the place to confirm the §9.2 version gates before
+concluding a bind failure is a fault. They live on DJI's CDN under dated paths
+that change with each release — reach them from the download pages above rather
+than bookmarking a URL.
+
+### 14.3 Fallback
+
+| Software | When | Link |
+|---|---|---|
+| **DJI Assistant 2 (DJI FPV Series)** | Only if the Consumer Drones build refuses to see the unit. Primarily for the original DJI FPV drone. | https://www.dji.com/downloads/softwares/dji-assistant-2-dji-fpv-series |
+
+### 14.4 Not DJI, but part of this build
+
+| Software | Why it is on this list | Link |
+|---|---|---|
+| **ExpressLRS Configurator** | Flash the **3.x maintenance branch** to the TX16S module and the RP1 — the specific fix for the Goggles 3 / ELRS 2.4 GHz interference in §8 R3. Do this *before* judging any link degradation. | https://github.com/ExpressLRS/ExpressLRS-Configurator/releases · https://www.expresslrs.org/ |
+| **Cosmostreamer** *(optional, paid)* | Goggles 3 → USB-C → PC video for test capture (§13.2). Only needed for live video and telemetry on one screen; the goggles' own DVR is free. | https://cosmostreamer.com/products/djigoggles2/ |
+| **OBS Studio** *(optional, free)* | Capture the video source and the serial-monitor window in one scene so frames stay aligned with the `MS` timestamps (§13.2). | https://obsproject.com/ |
+
+> These URLs were collected from search results; DJI's download-center paths are
+> stable but the site reorganises occasionally. If one 404s, start from
+> https://www.dji.com/downloads and search the product name.
+
+---
+
+## 15. Sources
 
 Vendor-published figures (dimensions, mass, voltage window, temperature range,
 cable lengths, EIRP limits) come from DJI's O3 Air Unit specifications and
