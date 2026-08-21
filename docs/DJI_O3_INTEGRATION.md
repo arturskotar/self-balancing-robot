@@ -582,7 +582,71 @@ the one that will get skipped and shouldn't be.
 
 ---
 
-## 13. Sources
+## 13. Getting the video onto a PC
+
+Worth settling early, because the obvious-looking answer is a dead end and the
+right answer depends on *why* you want it.
+
+### 13.1 Not with an SDR
+
+**The O3 link is encrypted and proprietary.** OcuSync uses AES-256 with a session
+key regenerated at every power-on, over an undocumented LTE-like OFDM physical
+layer. There is **no open receiver, no public decoder, and no known break of the
+video payload.**
+
+The HackRF is doubly the wrong tool even before the crypto:
+
+| | HackRF One | What O3 needs |
+|---|---|---|
+| Bandwidth | ~20 MHz max sample rate | 20 MHz *and* 40 MHz channel modes — **40 MHz is physically uncapturable**, and 20 MHz leaves no oversampling headroom |
+| ADC | **8-bit** (~48 dB) | OFDM has high peak-to-average ratio and wants 12+ bits |
+| 5.8 GHz | top edge of its 1 MHz–6 GHz range, where sensitivity is worst | the whole downlink lives there |
+
+For scale: the academic team that did get somewhere used a **USRP B200mini**
+(56 MHz, 12-bit) — and what they recovered was **DroneID, the telemetry beacon DJI
+left unencrypted**, not the video. The video payload remains unbroken publicly.
+
+So: capturing RF gets you a spectrogram, not a picture. Treat this as closed.
+(Nothing here is about anyone else's link — receiving your own transmission is
+the only case in view, and it still does not work.)
+
+### 13.2 What actually works
+
+**Live, on a PC:**
+
+| Path | Notes |
+|---|---|
+| **Goggles 3 → Wi-Fi → DJI Fly app** | Native and free. Goggles 3 share the live feed to the phone app over Wi-Fi; restream or screen-capture from there. Adds latency — fine for watching, not for closing a loop. |
+| **Goggles 3 → USB-C → PC** | Third-party software (e.g. Cosmostreamer, which lists Goggles 2/3/Integra/N3) takes the goggles' USB output and gives clean video or RTSP/SRT/NDI/UDP-H.264 restreaming at low latency. Paid, but it is the least-friction route to a real video stream on a desktop. |
+| **DJI RC Pro relay → HDMI** | Works, but only if you already own an RC Pro. Goggles 3 have **no HDMI port** of their own. |
+
+**Recorded, after the fact** — often all you need for reviewing test runs:
+
+- **O3 internal storage** (~20 GB, expandable with a microSD in the module) — pull
+  over USB-C.
+- **Goggles 3 DVR** to their own card.
+
+> Recording adds heat to a unit that is already thermally marginal on this
+> chassis (§4 C7). For long tuning sessions, record on the goggles, not the air
+> unit.
+
+### 13.3 If the goal is machine vision, use a different camera
+
+If the PC feed is wanted for *processing* — the Jetson/ROS2 work the V1 BOM
+deferred, autonomy, mapping — then **tapping the DJI link is the wrong
+architecture regardless of feasibility.** The O3 is a closed, pilot-eyes
+downlink: encrypted, latency-optimised for human viewing, and terminating in a
+headset.
+
+The right structure is **two cameras with two jobs**: the O3 for the pilot's view,
+and a separate machine-vision camera on whatever compute lands later — a plain
+UVC/CSI camera straight into the companion board, or a Wi-Fi/UDP camera if it must
+be off-board. Do not design the autonomy path around getting frames back out of
+DJI's goggles.
+
+---
+
+## 14. Sources
 
 Vendor-published figures (dimensions, mass, voltage window, temperature range,
 cable lengths, EIRP limits) come from DJI's O3 Air Unit specifications and
@@ -605,3 +669,8 @@ against and not good enough to skip the bench measurements in §11.
 - [fpv-wtf/msp-osd — MSP DisplayPort implementation](https://github.com/fpv-wtf/msp-osd)
 - [simacFPV — DJI Goggles 3/N3 and ExpressLRS 2.4 GHz interference](https://simacfpv.com/blog/dji-goggles3-n3-expressLRS-2.4-a-troublesome-combination)
 - [Oscar Liang — LC filters for FPV video power](https://oscarliang.com/lc-filter-fpv/)
+- [Schiller et al., NDSS 2023 — *Drone Security and the Mysterious Case of DJI's DroneID*](https://www.ndss-symposium.org/wp-content/uploads/2023-217-paper.pdf) (OcuSync reverse engineering; DroneID recovered, video payload not)
+- [DJI — System Security white paper (OcuSync AES-256, per-session keys)](https://stockrc.com/pdfdoc/DJI%20Security%20White%20Paper.pdf)
+- [DJI — Goggles 3 FAQ (Wi-Fi live feed sharing, no HDMI port, RC Pro relay)](https://www.dji.com/goggles-3/faq)
+- [Cosmostreamer — video out for DJI Goggles 2/3/Integra/N3](https://cosmostreamer.com/products/djigoggles2/)
+- [iFlight — how to activate and link a DJI O3/O4 Air Unit](https://iflightrc.freshdesk.com/support/solutions/articles/48001236409-how-to-activate-link-dji-o3-o4-air-unit-)
