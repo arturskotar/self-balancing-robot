@@ -43,7 +43,9 @@ self-balancing-robot/
 │   ├── balance_v2.ino      # the entire controller (single file)
 │   └── crsf.h              # ELRS/CRSF parser + TX16S channel map
 ├── flash.sh                # build/flash pipeline (OneDrive -> WSL -> board)
-├── docs/media/             # demo clips (GIF for inline, MP4 for full quality)
+├── docs/
+│   ├── DJI_O3_INTEGRATION.md  # FPV payload spec: power, mounting, cooling, RF
+│   └── media/              # demo clips (GIF for inline, MP4 for full quality)
 ├── CONTROL_THEORY.md       # derivation and physics
 ├── MIGRATION_TEENSY.md     # V1 Uno -> V2 Teensy 4.1 port plan
 ├── PATCHES_FROM_CASCADE.md # salvage list from an abandoned branch
@@ -65,6 +67,10 @@ self-balancing-robot/
 
 > ⚠️ Motors are rated **12 V** and the 4S pack runs up to **16.8 V**. `MAX_PWM`
 > is the current limiter — watch motor temperature.
+
+The FPV payload the build was always aimed at — a DJI O3 Air Unit streaming to DJI
+goggles — is specified but not yet fitted. Power, mounting, cooling and RF
+requirements are in **[docs/DJI_O3_INTEGRATION.md](docs/DJI_O3_INTEGRATION.md)**.
 
 ### Pinout (Teensy 4.1)
 
