@@ -1107,9 +1107,14 @@ limits are undocumented gets trusted by the next person.
   60 cm even within the swept plane (§4.3).
 * **The map goes stale.** 0.4–1.3 Hz per sweep; at full speed the robot covers
   31–103 cm between looks at the same bearing (§3.3).
-* **No world frame.** No yaw sensor exists on this robot; turn is open-loop
-  effort differential. Scans cannot be registered to each other across a pivot.
-  This is a reactive corridor check, not a map.
+* **No pose estimate — though the ingredients exist.** Yaw *rate* is available
+  twice over and unused: `imu.getGyroZ()` is read every tick, and
+  `rotationVel = 0.5*(wheelVelL - wheelVelR)` is already computed at line 2216.
+  Neither is integrated into a heading, and nothing estimates translation.
+  Note the asymmetry if you ever do: balance corrections are **common-mode**
+  wheel motion, so differential (yaw) odometry is comparatively clean while
+  `positionRev` is corrupted by every catch and lean the balance loop makes.
+  As shipped this is a reactive corridor check, not a map.
 * **It cannot see the pivot.** The scanner has no authority over turn (§9.2) and
   no information about what a pivot sweeps into.
 * **Direct sunlight degrades it.** Indoor sensor. Not a limitation for this
