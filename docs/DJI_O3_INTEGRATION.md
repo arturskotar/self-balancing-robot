@@ -149,19 +149,34 @@ is a cheap way to isolate the question during bring-up.
 
 ### 3.1 The 6-pin JST-GH connector
 
-| Pin | Function | DJI wire colour | Connect to |
-|---:|---|---|---|
-| 1 | **Power +** (VBAT, 7.4–26.4 V) | red | O3 branch + (§2.2) |
-| 2 | **Power GND** | black | distribution block GND |
-| 3 | **UART RX** (into the O3) | white | Teensy **TX** |
-| 4 | **UART TX** (out of the O3) | grey | Teensy **RX** |
-| 5 | **Signal GND** | brown | Teensy GND |
-| 6 | DJI HDL / SBUS | yellow | **not used** — leave unconnected and insulated |
+**Confirmed against the cable in hand** (2026-08-21): it carries exactly this
+six-colour set, in this order.
 
-> ⚠️ **Check this pinout against your own cable with a meter before applying
-> power.** Colour conventions vary between DJI kits and third-party cables, and a
-> single swapped pin puts pack voltage onto a 3.3 V UART line — destroying the
-> Teensy, the O3, or both. Ring it out; do not trust a table (including this one).
+| Pin | Function | Wire colour | Connect to |
+|---:|---|---|---|
+| 1 | **Power +** (VBAT, 7.4–26.4 V) | **red** | O3 branch + (§2.2) |
+| 2 | **Power GND** | **black** | distribution block GND |
+| 3 | **UART RX** (into the O3) | **white** | Teensy **TX** (pin 8) |
+| 4 | **UART TX** (out of the O3) | **grey** | Teensy **RX** (pin 7) |
+| 5 | **Signal GND** | **brown** | Teensy GND |
+| 6 | DJI HDL / SBUS | **yellow** | **not used** — insulate individually |
+
+Because the wires are colour-coded and the connector is keyed into the O3, the
+mapping is determined by **colour, not by counting pins** — so the classic hazard
+of counting from the wrong end of the header (which mirrors the pinout and lands
+pack voltage on the SBUS pin) does not apply at the robot end. Land the wires by
+colour.
+
+Two checks that are still worth the two minutes before power goes anywhere near it:
+
+- **Continuity from each bare wire to its connector pin.** Confirms nothing is
+  transposed inside the moulding — the one thing colour alone cannot tell you.
+- **Red and black only, on the bench, first.** Stage 2 of §10 is power-only for a
+  reason: the two UART wires cannot be miswired if they are not yet wired.
+
+Insulate **white, grey, brown and yellow separately** during the power-only stage.
+Heatshrink them individually, not as a bundle — a bundle that chafes shorts four
+signals to each other, including pack-adjacent ones.
 
 The O3's UART is **3.3 V logic**, so it connects directly to the Teensy 4.1 with
 no level shifting. This is the same situation as the ELRS receiver.
@@ -429,7 +444,7 @@ the existing test harnesses.
 | Stage | Do | Pass criterion |
 |---|---|---|
 | **0** | Activate, update, bind, set region/power — on the bench, off the robot (§9) | Live video in the goggles, unit not mounted |
-| **1** | Ring out the 6-pin cable with a meter against §3.1 | Every pin confirmed **before** any power |
+| **1** | Continuity-check the 6-pin cable against §3.1 (colours already confirmed) | Every wire traced to its connector pin **before** any power |
 | **2** | Power the O3 from the pack branch alone — fuse, cap, twisted pair, **no UART** | Video up, nothing else on the robot disturbed |
 | **3** | **Thermal test** in the final mount with the fan (§4.2) | 20 min stationary, no warning, no shutdown |
 | **4** | Mount camera, set tilt and nose profile with video live | Wheels and nose acceptable in frame, camera protected |
@@ -449,7 +464,7 @@ the one that will get skipped and shouldn't be.
 |---|---|---|
 | 1 | **Measure chassis mass and current CoM height `L`.** Neither is recorded anywhere in this repo, and the §7.4 numbers are assumptions without them. | CoM sizing, and honestly for the whole `VEL_I_CLAMP` discussion |
 | 2 | Confirm the **air unit screw thread** (M1.6 vs M2) on the physical unit | Printed mount |
-| 3 | Confirm the **6-pin cable colour order** on the physical cable with a meter | Not destroying hardware |
+| ~~3~~ | ~~Confirm the **6-pin cable colour order**~~ — **done 2026-08-21**: red / black / white / grey / brown / yellow = pins 1–6, matching §3.1. Continuity to the connector pins still worth checking. | — |
 | 4 | Measure **actual O3 current draw** at the chosen transmit power | Fuse sizing, endurance figures |
 | 5 | Decide **Stage A (25 mW, no UART) vs Stage B (MSP)** for V1 | Firmware scope |
 | 6 | Decide the **video-loss policy** (§8, R5) | Failsafe design |
