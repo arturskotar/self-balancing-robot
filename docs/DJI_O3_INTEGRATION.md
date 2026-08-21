@@ -33,7 +33,7 @@ The cable lengths are layout constraints, so they are listed first.
 | **Transmission module** ("air unit") | 32.5 × 30.5 × 14.5 | ~28 g | 25.5 × 25.5 mm hole pattern |
 | **Camera module** | 21.2 × 20 × 19.5 (L×W×H) | (36.4 g incl. air unit + coax) | frame-specific bracket |
 | **Camera coaxial cable** | **115 mm** | — | fixed, shielded, **do not modify or extend** |
-| **Power/UART cable** ("3-in-1") | **100 mm** | — | 6-pin JST-GH 1.25 mm |
+| **Power/UART cable** ("3-in-1") | **100 mm** | — | **6-pin JST-SH, 1.0 mm pitch** |
 | **Antennas** ×2 | 85 mm long | ~3 g each | **MMCX** |
 
 Plus, for this build: a printed cage/mount (~10 g), a 25–30 mm fan (~8 g), and
@@ -47,7 +47,7 @@ harness. **Budget ~65–70 g of payload total.**
   constraint in the whole install.
 - The air unit's power/UART pigtail is **100 mm**. The Teensy shelf and the power
   distribution point must both be reachable within that, or you make an extension
-  (6-pin JST-GH 1.25 mm, twisted power pair) — extending *this* cable is fine, and
+  (6-pin JST-SH 1.0 mm, twisted power pair) — extending *this* cable is fine, and
   is the normal fix. Extending the **camera coax is not**.
 
 Video is DJI-proprietary and digital: it goes to DJI goggles and nowhere else.
@@ -147,7 +147,24 @@ is a cheap way to isolate the question during bring-up.
 
 ## 3. Signal wiring
 
-### 3.1 The 6-pin JST-GH connector
+### 3.1 The 6-pin JST-SH connector
+
+**The connector standard is 6-pin JST-SH, 1.0 mm pitch** — the same family as the
+small "SH1.0" cables used all over FPV flight controllers.
+
+> **Do not size this from the previous generation.** The DJI FPV Air Unit V1 and
+> the Caddx/RunCam Vista used the larger **1.25 mm pitch** connector (8-pin on the
+> DJI end). The O3 shrank ~40 % and moved to **1.0 mm**. The two are not
+> intermateable, and a lot of writing about "the DJI air unit connector" still
+> describes the old one. If a part is listed as GH 1.25 mm, it is for the old air
+> unit, not this one.
+
+**Sourcing.** 1.0 mm pitch is too fine to hand-crimp reliably — do not try. Buy
+**pre-made, pre-crimped 6-pin SH1.0 cables** (Flywoo, Pyrodrone and generic kits
+sell them in 100 / 150 / 200 mm, which is also how you get the extension §1 calls
+for). Buy at least one spare and **build the robot harness from the spare, keeping
+DJI's stock 100 mm cable intact** — it is the reference for wire order and it is
+the thing you will want on hand when something is miswired.
 
 **Confirmed against the cable in hand** (2026-08-21): it carries exactly this
 six-colour set, in this order.
@@ -170,7 +187,9 @@ colour.
 Two checks that are still worth the two minutes before power goes anywhere near it:
 
 - **Continuity from each bare wire to its connector pin.** Confirms nothing is
-  transposed inside the moulding — the one thing colour alone cannot tell you.
+  transposed inside the moulding — the one thing colour alone cannot tell you. At
+  1.0 mm pitch, probe with a **needle/fine-tip probe or at the wire end**; a
+  standard multimeter probe will bridge adjacent pins or splay them.
 - **Red and black only, on the bench, first.** Stage 2 of §10 is power-only for a
   reason: the two UART wires cannot be miswired if they are not yet wired.
 
@@ -325,7 +344,7 @@ loop. Keep it off the control path entirely, feeding from a snapshot struct.
 | **M1** | Hole pattern **25.5 × 25.5 mm**. Community sources report **M1.6** screws into the module; 20×20 adapter plates for it commonly use M2 through-holes. **Test-fit before committing a printed part** — measure the thread on the unit in hand. |
 | **M2** | Bay envelope: module is 32.5 × 30.5 × 14.5 mm; allow **≥45 × 45 × 30 mm** for the module plus airflow plus cable exits. |
 | **M3** | Mount on **soft standoffs / grommets**, not rigidly. The IMU vibration problem this repo already has is not one to feed a second rigid mass into. |
-| **M4** | Orientation: heatsink face into the airflow (§4), MMCX ports toward the antenna exits, JST-GH exit toward the harness. |
+| **M4** | Orientation: heatsink face into the airflow (§4), MMCX ports toward the antenna exits, JST-SH exit toward the harness. |
 | **M5** | **Serviceable without disassembly**: the USB-C port (activation, firmware), the microSD slot, and the **bind button + status LED** must all be reachable through a hatch. Bind and activate before final assembly regardless. |
 | **M6** | Position: **upper rear**, as the PoC layout already specifies — which is also the right answer for CoM (§7.4) and antenna height (§7.3). |
 
