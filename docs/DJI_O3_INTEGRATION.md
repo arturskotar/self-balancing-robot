@@ -579,7 +579,17 @@ restart and it does matter.
 
 ### 9.3 Pairing (binding) to the goggles
 
-Do this **at the desk, with the air unit on USB-C**, before it goes anywhere near
+**There is no cable between the goggles and the air unit.** The link is the
+wireless 5.8 GHz downlink — that is the entire purpose of the air unit. The only
+USB-C cables in this whole process run from a *computer* to one device at a time,
+for activation and firmware (§9.2), never between the two.
+
+So "connecting them" means exactly one thing: **binding them once.** After that
+they find each other automatically every time both are powered, and the binding
+survives power cycles, republishes and remounting. You redo it only if you change
+goggles or reset the unit.
+
+Do it **at the desk, with the air unit on USB-C**, before it goes anywhere near
 the chassis. It takes seconds and it is miserable to do through a service hatch.
 
 **Goggles 3 — the procedure for this build.** Note the menu path differs from
@@ -605,8 +615,11 @@ bind button. **FPV Goggles V2:** same shape, link button elsewhere on the body.
   cooler, and kinder to the ELRS link.
 - **Leave temperature protection enabled** (§4 C5).
 
-Binding survives power cycles. Redo it only if you change goggles or reset the
-unit.
+**What "connected" looks like in normal use:** power the robot, put the goggles
+on, and the image appears within a few seconds with the air unit's LED solid.
+Nothing is pressed. If it does not come up, check in this order: both actually
+powered; the air unit not in thermal shutdown from a previous session (§4); the
+goggles on the same channel/band; and only then suspect the bind.
 
 ---
 
