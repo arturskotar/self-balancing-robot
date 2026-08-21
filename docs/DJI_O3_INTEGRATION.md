@@ -425,7 +425,8 @@ chassis, and the goggles at the operator end also transmit.
 |---|---|
 | **R1** | Physical separation ≥100 mm between the ELRS antenna and the O3 antennas, non-parallel orientation. Keep the ELRS RX **upper/rear and away from motor power wiring**, as the BOM already says. |
 | **R2** | **Measure the interaction, don't assume it.** CRSF gives link statistics back over the same UART: log LQ and RSSI with the O3 powered off, then on, then transmitting at full power, at a fixed distance. A drop is a finding; a shrug is not. |
-| **R3** | Keep the ELRS transmitter module on current firmware. DJI-goggles-vs-ELRS 2.4 GHz interference is a known, actively-patched class of problem. |
+| **R3** | **Goggles 3 + ELRS 2.4 GHz is a known, named problem — and it lives at the *pilot's* end, not the robot's.** The Goggles 3 transmit continuously on 2.4 GHz to talk to DJI's RC3 **even when no DJI controller is in use**, and they sit ~30 cm from the TX16S's ELRS antenna on the pilot's head. That is near-field desense of the *transmitter*, which no amount of care on the robot fixes. Mitigations, in order: **flash the ELRS 3.x maintenance-branch firmware to the TX module and the RP1** (this is the specific fix the ELRS project shipped for it); keep the TX16S antenna up and angled away from the goggles; do not rest the radio against the headset. |
+| **R3b** | **Fly the range test with the goggles actually on your head**, not on the bench beside the robot. Bench-testing this particular interaction reproduces the wrong geometry and will tell you it is fine. |
 | **R4** | Set the O3's region correctly and stay inside it (roughly: ≤1200 mW FCC, ≤700 mW / 14 dBm EIRP at 5.8 GHz CE, 25 mW in some regions). Lower power also means less heat and less ELRS desense — for indoor use the low setting is the better engineering answer as well as the legal one. |
 | **R5** | **Link loss policy is already correct and must stay that way**: `LINK_TIMEOUT_MS` 500 ms disarms. Note the asymmetry to be aware of while driving — **losing video does not disarm the robot.** It keeps balancing and keeps whatever velocity setpoint it had. Decide deliberately whether that is what you want, and consider whether the video link should feed a separate, slower failsafe that zeroes the drive setpoint while leaving the balance loop up. |
 
@@ -433,13 +434,20 @@ chassis, and the goggles at the operator end also transmit.
 
 ## 9. Goggles compatibility and activation
 
+**This build targets DJI Goggles 3.** The other models are kept in the table for
+reference only.
+
 | Goggles | Works with O3? | Notes |
 |---|---|---|
+| **DJI Goggles 3** | **Yes — the target here.** Firmware-gated, see §9.2 | O3 support arrived in goggles firmware **v01.00.0300** (mid-2024). Requires air unit **≥ V01.02.0000**. |
 | **DJI Goggles 2** | Yes | 1080p/100fps, ~30 ms latency. No DVR on the goggles side with an Air Unit. |
 | **DJI Goggles Integra** | Yes | As Goggles 2. |
-| **DJI FPV Goggles V2** | Yes, reduced | 810p/120fps. Needs goggles firmware ≥ 01.06.0000 and air unit ≥ 01.01.0100 — check both. |
-| **DJI Goggles 3** | Yes, with current firmware | O3 support was added later; an air unit on V01.01.0000 **will not bind** until updated via DJI Assistant 2. |
+| **DJI FPV Goggles V2** | Yes, reduced | 810p/120fps. Needs goggles firmware ≥ 01.06.0000 and air unit ≥ 01.01.0100. |
 | **DJI FPV Goggles V1** | **No** | — |
+
+> ⚠️ **Goggles 3 carries a second consequence beyond firmware — it is the model
+> named in the ELRS 2.4 GHz interference reports. See [§8](#8-rf-coexistence-with-the-elrs-link), which is not
+> optional reading for this pairing.**
 
 ### 9.1 The video link needs power and nothing else
 
@@ -479,28 +487,39 @@ reports that functions are limited, and no amount of correct wiring gets past it
    update the **goggles**. The large majority of "it will not bind" reports are a
    firmware mismatch between the two, not a fault.
 
+**For Goggles 3 specifically, these are hard gates, not recommendations:**
+
+| Device | Minimum | Symptom if below |
+|---|---|---|
+| **Goggles 3** | **v01.00.0300** | O3 not offered as a device at all |
+| **O3 Air Unit** | **≥ V01.02.0000** | **Will not bind.** A unit still on V01.01.0000 simply refuses, with no useful error |
+
+A brand-new-old-stock O3 is very likely to ship below V01.02.0000, so **assume the
+air unit needs updating before it will ever talk to Goggles 3.** Update both, then
+**power-cycle both** before attempting to bind — DJI's own notes call for the
+restart and it does matter.
+
 ### 9.3 Pairing (binding) to the goggles
 
 Do this **at the desk, with the air unit on USB-C**, before it goes anywhere near
 the chassis. It takes seconds and it is miserable to do through a service hatch.
 
-**Goggles 2 / Integra:**
+**Goggles 3 — the procedure for this build.** Note the menu path differs from
+Goggles 2: it is under **Transmission**, not Status.
 
-1. Power the air unit. Wait for boot: the LED goes **green, then off, then red**.
-   Red = booted and unbound. Do not start pressing buttons before this.
-2. On the goggles, swipe **right** on the touchpad to open the menu → **Status** →
-   select **DJI O3 Air Unit** as the device.
-3. Press the goggles' **Link button** (between the lenses).
-4. Press the air unit's **bind/link button** — the small recessed one beside the
-   LED. The LED starts **flashing**.
-5. **Bound: the LED goes solid green and the camera image appears in the goggles.**
+1. Confirm both firmware versions clear the gates in §9.2, and that both have been
+   **power-cycled since updating**.
+2. Power the air unit and wait for it to finish booting.
+3. Press the air unit's **bind button** — the small recessed one beside the LED —
+   until the **LED blinks rapidly**.
+4. On the goggles: **Settings → Transmission → Bind**.
+5. Binding takes **5–10 seconds**. Bound: the LED goes **solid** and the camera
+   image appears.
 
-**FPV Goggles V2:** same sequence — link button on the goggles, then the button on
-the air unit — but the button sits elsewhere on the goggles body, and the firmware
-minimums in the table above are strict. Check both versions first.
-
-**Goggles 3:** same sequence, but O3 support arrived in a later firmware. An air
-unit still on V01.01.0000 **will not bind at all** until updated (§9.2).
+**Goggles 2 / Integra**, for reference: boot the air unit until the LED goes green
+→ off → **red**, then swipe right on the touchpad → **Status** → select *DJI O3
+Air Unit* → press the **Link button between the lenses** → press the air unit's
+bind button. **FPV Goggles V2:** same shape, link button elsewhere on the body.
 
 ### 9.4 Then set
 
@@ -526,7 +545,7 @@ the existing test harnesses.
 | **3** | **Thermal test** in the final mount with the fan (§4.2) | 20 min stationary, no warning, no shutdown |
 | **4** | Mount camera, set tilt and nose profile with video live | Wheels and nose acceptable in frame, camera protected |
 | **5** | Power the robot and the O3 together; drive with the motors under load | No video noise tracking motor effort; no brownout at switch-on |
-| **6** | ELRS coexistence: log CRSF LQ/RSSI with O3 off / on / full power (§8, R2) | No meaningful LQ loss at working range |
+| **6** | ELRS coexistence: log CRSF LQ/RSSI with O3 off / on / full power — **wearing the Goggles 3**, radio in hand (§8 R2, R3, R3b) | No meaningful LQ loss at working range |
 | **7** | Re-run `LEAN_SWEEP`, recalibrate `BALANCE_SETPOINT`, re-derive `FALL_CUTOFF`, retune inner PD (§7.5) | Balances as well as it did before the payload |
 | **8** | *Optional:* MSP on `Serial2` — OSD and full-power arm flag (§6) | OSD renders; unit steps up from 25 mW |
 
@@ -544,6 +563,8 @@ the one that will get skipped and shouldn't be.
 | ~~3~~ | ~~Confirm the **6-pin cable colour order**~~ — **done 2026-08-21**: red / black / white / grey / brown / yellow = pins 1–6, matching §3.1. Continuity to the connector pins still worth checking. | — |
 | 4 | Measure **actual O3 current draw** at the chosen transmit power | Fuse sizing, endurance figures |
 | 5 | Decide **Stage A (25 mW, no UART) vs Stage B (MSP)** for V1 | Firmware scope |
+| 5b | **Check the O3's shipped firmware version against ≥ V01.02.0000** before assuming it will bind to the Goggles 3 (§9.2) | Getting a picture at all |
+| 5c | **Confirm the ELRS TX module and RP1 are on 3.x maintenance-branch firmware** before judging any link degradation (§8 R3) | Not chasing a fixed bug |
 | 6 | Decide the **video-loss policy** (§8, R5) | Failsafe design |
 | 7 | Check whether the **RP1 exposes a second UART** for the DisplayPort trick (§5, option C) | Possible shortcut past §6 |
 
