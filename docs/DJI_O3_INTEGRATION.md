@@ -450,6 +450,42 @@ Adding ~70 g high up changes the plant. Expect to redo, in this order:
 4. **Deadbands, `EMF_FF_GAIN`, `MOTOR_PWM_HZ`** — unaffected by payload mass.
    Do **not** re-run `DEADBAND_TEST` for this change; nothing it measures moved.
 
+### 7.6 Head tracking and a panning camera
+
+The Goggles 3 **do** contain a head-tracking IMU — it is a real feature of the
+hardware. The catch is who is allowed to read it.
+
+**Head tracking is gated to DJI's own aircraft** (Avata 2, Neo and similar), where
+DJI owns both ends of the link. On a custom build with an O3 Air Unit there is **no
+documented path for head angles to reach your own controller.** Pin 6 (DJI
+HDL/SBUS) carries channel data from a bound **DJI remote controller**, not head
+orientation — and this robot has no DJI remote in the first place; control is
+ELRS/CRSF from the TX16S.
+
+> **Confidence:** this is not confirmed from a primary DJI source. The evidence is
+> circumstantial but consistent: the community threads asking for it end without a
+> solution, and the market's answer is **external head trackers sold specifically
+> "for DJI O3/O4"** — which would not exist if the goggles' own sensor were
+> reachable. Treat it as "no known route", not "proven impossible", and re-check
+> before designing around it either way.
+
+**The route that does work** fits this build unusually well: an **external head
+tracker feeding the TX16S**, whose angles then travel as ordinary **CRSF channels**
+→ RP1 → Teensy → servo. No new radio link, no new protocol, and `crsf.h` already
+parses channels — a pan servo would be one more channel alongside CH1/CH2/CH3.
+
+**Two constraints before designing a panning head:**
+
+| | |
+|---|---|
+| **The coax is not a flex cable.** | Panning the camera alone repeatedly flexes the 115 mm shielded coax (§1), which is not rated for continuous articulation. Either **pan the air unit and camera together as one assembly**, or accept a limited sweep with a generous service loop. Do not build a 180° continuous pan around that cable. |
+| **A panning head is a moving mass above the axle.** | Panning the camera alone (~8 g) is negligible. Panning the whole ~70 g stack moves a meaningful fraction of the payload off-centre, which shifts the CoM laterally and feeds a disturbance into a loop that is already working near its authority limits (§7.4, §7.5). If the whole stack pans, treat it as a balance-affecting change and re-check on the bench. |
+
+**Cheapest alternative: turn the robot.** It already pivots in place. That costs
+nothing to build, and the trade is that looking around also changes heading — for
+a scout easing round a doorway, that may be exactly wrong, which is the argument
+for the servo.
+
 ---
 
 ## 8. RF coexistence with the ELRS link
