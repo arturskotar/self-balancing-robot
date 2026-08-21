@@ -216,17 +216,52 @@ the LIDAR the migration plan reserves.
 | MSP in (Teensy RX2) | 7 | 4 (UART TX, grey) |
 | Signal ground | GND | 5 (brown) |
 
-### 3.3 Do you need the UART at all?
+### 3.3 Why connect the UART to the Teensy at all?
 
-**For video: no.** Power alone (pins 1 and 2) gets a picture in the goggles —
-pairing and video are entirely an air-unit-to-goggles affair, with no flight
-controller in the path (§9.1). The UART buys two things:
+**For video: you don't.** Power alone (pins 1 and 2) gets a picture in the
+goggles — pairing and video are entirely an air-unit-to-goggles affair, with no
+flight controller in the path (§9.1). So the two signal wires are a deliberate
+choice, and worth arguing rather than assuming.
 
-1. **OSD** — telemetry drawn over the video in the goggles, via MSP DisplayPort.
-2. **Full transmit power** — see [§5](#5-the-low-power-mode-problem).
+They buy exactly two things.
 
-**Recommendation: build Stage A power-only first** (two wires), prove the video,
-the cooling and the RF, and only then add the UART. See the bring-up plan in §9.
+**1. The telemetry, in the goggles — the real reason.**
+
+This repo's entire debugging method is reading the 100 ms telemetry stream: which
+of the three outer-loop terms saturated, whether `VELI` *stepped* to zero or
+*slid*, whether a stalled wheel is a torque null or a lost sign contest. Every
+troubleshooting entry in the README ends in "look at the telemetry".
+
+That method works today because the robot is on a box next to the monitor. **The
+moment it is driving around under FPV, the serial monitor is somewhere else and
+you are wearing goggles.** You get the symptom — it stopped, it curved, it lost
+its lean — with none of the state that explains it, and you have to walk over,
+tether it, and try to reproduce on the bench what happened in the next room.
+
+MSP DisplayPort puts `PITCH`, `TARGET`, `LEAN VELI`, `VF`, `PWM L/R`, `ARM`,
+`LINK` and pack voltage **on the video you are already looking at**. It is not a
+cosmetic overlay; it is the difference between keeping the repo's debugging
+practice once the robot goes mobile and losing it.
+
+**2. Full transmit power** (§5). The unit sits at 25 mW until an FC reports
+"armed" over MSP. Indoors, line-of-sight, 25 mW is fine. But the build this robot
+is modelled on is a **scout that goes through doorways and around corners** —
+which means walls between the antennas and the goggles, and 5.8 GHz does not like
+walls. If the video breaks up two rooms away, this is the fix, and it is the
+*only* fix.
+
+**Why both wires, not just one:** MSP is request/response. The air unit **polls**
+the Teensy and expects answers — the arm flag arrives as a *reply* to a status
+request, not as something you can push unprompted. Teensy TX (white) carries the
+OSD frames and the replies; Teensy RX (grey) hears the polls. Wiring only TX gets
+you neither reliably.
+
+**Recommendation: land all four wires during the build, use them later.** The
+hardware cost is two extra wires in a cable you are already plugging in, and the
+cost of *adding* them afterwards is opening a sealed, cooled, antenna-routed
+chassis. The firmware (§6) can arrive whenever. Build **Stage A power-only**
+first — prove video, cooling and RF with nothing else in the way — but solder for
+Stage B while the shell is still open.
 
 ---
 
