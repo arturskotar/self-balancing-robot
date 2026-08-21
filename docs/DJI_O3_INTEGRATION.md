@@ -217,8 +217,9 @@ the LIDAR the migration plan reserves.
 
 ### 3.3 Do you need the UART at all?
 
-**For video: no.** Power alone (pins 1 and 2) gets a picture in the goggles. The
-UART buys two things:
+**For video: no.** Power alone (pins 1 and 2) gets a picture in the goggles —
+pairing and video are entirely an air-unit-to-goggles affair, with no flight
+controller in the path (§9.1). The UART buys two things:
 
 1. **OSD** — telemetry drawn over the video in the goggles, via MSP DisplayPort.
 2. **Full transmit power** — see [§5](#5-the-low-power-mode-problem).
@@ -440,18 +441,75 @@ chassis, and the goggles at the operator end also transmit.
 | **DJI Goggles 3** | Yes, with current firmware | O3 support was added later; an air unit on V01.01.0000 **will not bind** until updated via DJI Assistant 2. |
 | **DJI FPV Goggles V1** | **No** | — |
 
-**Before the payload goes in the chassis:**
+### 9.1 The video link needs power and nothing else
 
-1. Connect the air unit to a PC over **USB-C** (it self-powers) and **activate** it
-   in **DJI Assistant 2 (FPV series)** — a DJI account is required.
-2. **Update firmware on both** the air unit and the goggles. Most "won't bind"
-   reports are a firmware mismatch.
-3. **Bind** — the recessed bind button beside the LED; slow green flash = standby,
-   solid green = bound and transmitting.
-4. Set region and transmit power.
+Worth stating plainly, because it is the thing that makes Stage A viable:
 
-Doing all four on the bench, before the unit is buried in a shell, is worth the
-five minutes.
+**The video link is entirely between the air unit and the goggles.** Pairing,
+video, and the goggles' own recording all happen over DJI's own radio link. No
+flight controller is involved in the video path at any point. Two wires — pin 1
+red and pin 2 black — get a live picture.
+
+What the UART adds is only:
+
+- the **OSD overlay** drawn on top of the video (§6), and
+- the **arm flag** that lets the unit leave 25 mW standby (§5).
+
+Neither is needed to *see* anything. An unbound, un-UARTed, power-only O3 is a
+complete FPV camera the moment it is paired.
+
+### 9.2 Activation — the gate that catches everyone
+
+A new O3 **must be activated before it will work properly.** Out of the box it
+reports that functions are limited, and no amount of correct wiring gets past it.
+
+1. Connect the air unit to a PC with **USB-C**. It **self-powers from USB** — no
+   pack, no bench supply, nothing else connected.
+2. Open **DJI Assistant 2**, log in with a DJI account, click the O3 Air Unit
+   icon, and follow **Start Activation**.
+
+> **Which DJI Assistant 2?** There are several builds. DJI's own O3 guide points
+> at the **Consumer Drone Series** build; other guides say the **FPV Series**
+> build. Installing both is harmless — if the unit does not appear in one, try the
+> other. "Air unit does not show up in Assistant 2" is usually this, a dead USB-C
+> *charge-only* cable, or a USB hub. Use a known-good data cable, straight into
+> the machine.
+
+3. While you are there, **update the firmware on the air unit** — and separately
+   update the **goggles**. The large majority of "it will not bind" reports are a
+   firmware mismatch between the two, not a fault.
+
+### 9.3 Pairing (binding) to the goggles
+
+Do this **at the desk, with the air unit on USB-C**, before it goes anywhere near
+the chassis. It takes seconds and it is miserable to do through a service hatch.
+
+**Goggles 2 / Integra:**
+
+1. Power the air unit. Wait for boot: the LED goes **green, then off, then red**.
+   Red = booted and unbound. Do not start pressing buttons before this.
+2. On the goggles, swipe **right** on the touchpad to open the menu → **Status** →
+   select **DJI O3 Air Unit** as the device.
+3. Press the goggles' **Link button** (between the lenses).
+4. Press the air unit's **bind/link button** — the small recessed one beside the
+   LED. The LED starts **flashing**.
+5. **Bound: the LED goes solid green and the camera image appears in the goggles.**
+
+**FPV Goggles V2:** same sequence — link button on the goggles, then the button on
+the air unit — but the button sits elsewhere on the goggles body, and the firmware
+minimums in the table above are strict. Check both versions first.
+
+**Goggles 3:** same sequence, but O3 support arrived in a later firmware. An air
+unit still on V01.01.0000 **will not bind at all** until updated (§9.2).
+
+### 9.4 Then set
+
+- **Region and transmit power** — see §8 R4 and §4 C6. Low power indoors: legal,
+  cooler, and kinder to the ELRS link.
+- **Leave temperature protection enabled** (§4 C5).
+
+Binding survives power cycles. Redo it only if you change goggles or reset the
+unit.
 
 ---
 
@@ -462,7 +520,7 @@ the existing test harnesses.
 
 | Stage | Do | Pass criterion |
 |---|---|---|
-| **0** | Activate, update, bind, set region/power — on the bench, off the robot (§9) | Live video in the goggles, unit not mounted |
+| **0** | Activate, update, bind, set region/power — on the bench over USB-C, off the robot (§9) | Live video in the goggles, unit not mounted, nothing else connected |
 | **1** | Continuity-check the 6-pin cable against §3.1 (colours already confirmed) | Every wire traced to its connector pin **before** any power |
 | **2** | Power the O3 from the pack branch alone — fuse, cap, twisted pair, **no UART** | Video up, nothing else on the robot disturbed |
 | **3** | **Thermal test** in the final mount with the fan (§4.2) | 20 min stationary, no warning, no shutdown |
