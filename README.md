@@ -47,6 +47,7 @@ self-balancing-robot/
 ├── CONTROL_THEORY.md       # derivation and physics
 ├── MIGRATION_TEENSY.md     # V1 Uno -> V2 Teensy 4.1 port plan
 ├── PATCHES_FROM_CASCADE.md # salvage list from an abandoned branch
+├── SHARP_2Y0A21_SPEC.md    # scanning IR rangefinder: wiring + config spec (not built)
 └── README.md
 ```
 
