@@ -50,9 +50,10 @@ harness. **Budget ~65–70 g of payload total.**
   (6-pin JST-SH 1.0 mm, twisted power pair) — extending *this* cable is fine, and
   is the normal fix. Extending the **camera coax is not**.
 
-Video is DJI-proprietary and digital: it goes to DJI goggles and nowhere else.
-There is no analog tap, no HDMI out, and no way to get this feed into a PC in
-real time. Latency to Goggles 2 is ~30 ms at 1080p/100fps.
+Video is DJI-proprietary, digital and encrypted: it goes to DJI goggles, and
+everything else comes **out of the goggles**, not off the air. There is no analog
+tap and no receiver but a DJI headset — see [§13](#13-getting-the-video-onto-a-pc)
+for the routes onto a PC. Latency to Goggles 2 is ~30 ms at 1080p/100fps.
 
 ---
 
