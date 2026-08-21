@@ -359,6 +359,7 @@ loop. Keep it off the control path entirely, feeding from a snapshot struct.
 | **M9** | Field of view is ~155°, so the wheels and any nose structure **will** be in frame. Set the tilt and the nose profile with the camera live in the goggles before finalising the shell. |
 | **M10** | **Tilt matters more here than on a quad**: this chassis pitches ±20–30° in normal driving and the horizon swings with it. Make the camera tilt **adjustable**, and expect to want it pitched up relative to the body's balance attitude, not level with the frame. |
 | **M11** | Do not mount the camera rigidly to a panel that rings. Same grommet logic as M3. |
+| **M11b** | **Reserve a second front aperture and cable path** for the future machine-vision camera (§13.3). Cheap now, structural surgery later. |
 
 ### 7.3 Antennas
 
@@ -613,6 +614,11 @@ the only case in view, and it still does not work.)
 
 ### 13.2 What actually works
 
+> **Decided:** the PC feed is for **test capture and review only** — watching runs
+> back alongside the telemetry, not feeding anything. **Route: goggles → PC.**
+> Computer vision is a separate board with its own camera (§13.3), so nothing
+> downstream depends on this path's latency or on DJI keeping it open.
+
 **Live, on a PC:**
 
 | Path | Notes |
@@ -631,19 +637,35 @@ the only case in view, and it still does not work.)
 > chassis (§4 C7). For long tuning sessions, record on the goggles, not the air
 > unit.
 
-### 13.3 If the goal is machine vision, use a different camera
+**Try the free paths before paying for one.** If reviewing runs afterwards is
+enough, the **Goggles 3 DVR** costs nothing and needs no software. The USB-C
+route earns its keep only for the thing the card cannot do: **video and the
+100 ms telemetry stream on one screen, live, at the same time.**
 
-If the PC feed is wanted for *processing* — the Jetson/ROS2 work the V1 BOM
-deferred, autonomy, mapping — then **tapping the DJI link is the wrong
-architecture regardless of feasibility.** The O3 is a closed, pilot-eyes
-downlink: encrypted, latency-optimised for human viewing, and terminating in a
-headset.
+That combination is worth something specific here. Most of the tuning in this
+repo was read off the scrolling telemetry with the robot on a box; being able to
+see *what the robot saw* against `LEAN VELI` saturating, or a breakaway stalling,
+turns two separate observations into one. If you go that way, capture both in one
+recording — an OBS scene with the video source and the serial monitor window side
+by side — so the frames and the `MS` timestamps stay aligned without any sync
+work.
 
-The right structure is **two cameras with two jobs**: the O3 for the pilot's view,
-and a separate machine-vision camera on whatever compute lands later — a plain
-UVC/CSI camera straight into the companion board, or a Wi-Fi/UDP camera if it must
-be off-board. Do not design the autonomy path around getting frames back out of
-DJI's goggles.
+### 13.3 Machine vision is a separate camera — decided
+
+**Decided:** when the deferred compute work lands, computer vision runs on **its
+own board with its own camera**. The O3 is not in that path.
+
+This is the right split and worth keeping to. The O3 is a closed, pilot-eyes
+downlink — encrypted, latency-optimised for human viewing, and terminating in a
+headset. Anything built on extracting frames back out of DJI's goggles inherits
+the whole chain's latency, an extra PC in the loop, and a dependency on DJI not
+closing the route in a firmware update.
+
+**Two cameras, two jobs:** the O3 for the pilot's view, a plain UVC/CSI camera
+straight into the companion board for vision. The consequence for *this* spec is
+small but real — **the chassis should reserve a second front aperture and a cable
+path** for that camera now, while the shell is still being designed, rather than
+have it retrofitted into a nose already full of O3.
 
 ---
 
