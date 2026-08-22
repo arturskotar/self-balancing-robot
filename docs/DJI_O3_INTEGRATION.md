@@ -408,7 +408,7 @@ loop. Keep it off the control path entirely, feeding from a snapshot struct.
 | **M2** | Bay envelope: module is 32.5 × 30.5 × 14.5 mm; allow **≥45 × 45 × 30 mm** for the module plus airflow plus cable exits. |
 | **M3** | Mount on **soft standoffs / grommets**, not rigidly. The IMU vibration problem this repo already has is not one to feed a second rigid mass into. |
 | **M4** | Orientation: heatsink face into the airflow (§4), MMCX ports toward the antenna exits, JST-SH exit toward the harness. |
-| **M5** | **Serviceable without disassembly**: the USB-C port (activation, firmware), the microSD slot, and the **bind button + status LED** must all be reachable through a hatch. Bind and activate before final assembly regardless. |
+| **M5** | **Serviceable without disassembly**: the USB-C port (activation, firmware), the microSD slot, and the **bind button + status LED** must all be reachable through a hatch. Bind and activate before final assembly regardless — noting that binding needs a **VBAT lead**, not just USB (§9.3). |
 | **M6** | Position: **upper rear**, as the PoC layout already specifies — which is also the right answer for CoM (§7.4) and antenna height (§7.3). |
 
 ### 7.2 Camera module
@@ -620,8 +620,31 @@ they find each other automatically every time both are powered, and the binding
 survives power cycles, republishes and remounting. You redo it only if you change
 goggles or reset the unit.
 
-Do it **at the desk, with the air unit on USB-C**, before it goes anywhere near
-the chassis. It takes seconds and it is miserable to do through a service hatch.
+> ⚠️ **Binding needs real power — USB-C is not enough.** Activation and firmware
+> (§9.2) work off USB because the unit only has to enumerate to the PC. **Binding
+> needs the radio up**, and reports are that on USB power the air unit stays
+> **dormant** — it never transmits, so the goggles never see it. Give it proper
+> **VBAT (7.4–26.4 V) on pins 1 and 2** before you try to bind: the 4S pack, a
+> spare 3S/4S, or a bench supply at ~12 V.
+>
+> *Confidence: secondary sources, not DJI's own manual. If you want to settle it
+> in ten seconds, plug USB only and watch the LED — if it never reaches the
+> booted state, that is your answer.*
+
+**So the desk work splits in two, and they need different power:**
+
+| Step | Power | Where |
+|---|---|---|
+| Activate + firmware-update | **USB-C from the PC**, nothing else | §9.2 |
+| **Bind** | **VBAT on pins 1/2** — pack or bench supply | below |
+
+Still do both **before the unit is buried in the chassis** — binding through a
+service hatch is miserable. It just means having a power lead ready, not only a
+USB cable.
+
+> **While it is powered on the bench to bind, it is transmitting with no
+> airflow** — the §4 thermal clock is running. Bind promptly, or point a fan at
+> it.
 
 > **"There is no button on the air unit, and no bind setting in the goggles."**
 > Two symptoms, almost always **one cause: firmware (§9.2)** — do that first, then
@@ -643,7 +666,8 @@ Goggles 2: it is under **Transmission**, not Status.
 
 1. Confirm both firmware versions clear the gates in §9.2, and that both have been
    **power-cycled since updating**.
-2. Power the air unit and wait for it to finish booting.
+2. Power the air unit **from VBAT, not USB** (see the warning above) and wait for
+   it to finish booting.
 3. Press the air unit's **bind button** — the small recessed one beside the LED —
    until the **LED blinks rapidly**.
 4. On the goggles: **Settings → Transmission → Bind**.
@@ -676,7 +700,8 @@ the existing test harnesses.
 
 | Stage | Do | Pass criterion |
 |---|---|---|
-| **0** | Activate, update, bind, set region/power — on the bench over USB-C, off the robot (§9; software in §14) | Live video in the goggles, unit not mounted, nothing else connected |
+| **0a** | **Activate and firmware-update** both devices — bench, **USB-C to the PC**, no pack (§9.2; software in §14) | Both on current firmware, both power-cycled |
+| **0b** | **Bind**, then set region/power — bench, but now on **VBAT** (pack or ~12 V supply), still off the robot (§9.3) | Live video in the goggles, unit not mounted |
 | **1** | Continuity-check the 6-pin cable against §3.1 (colours already confirmed) | Every wire traced to its connector pin **before** any power |
 | **2** | Power the O3 from the pack branch alone — fuse, cap, twisted pair, **no UART** | Video up, nothing else on the robot disturbed |
 | **3** | **Thermal test** in the final mount with the fan (§4.2) | 20 min stationary, no warning, no shutdown |
