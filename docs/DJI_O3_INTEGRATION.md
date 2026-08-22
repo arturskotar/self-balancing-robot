@@ -206,9 +206,35 @@ no level shifting. This is the same situation as the ELRS receiver.
 Currently used: pins 0/1 (`Serial1`, CRSF), 2–5 (encoders), 6/9 and 22/23 (motor
 PWM), 18/19 (I²C to the GY-91).
 
+**No external board is needed.** The Teensy 4.1 has **eight hardware UARTs**, and
+this build uses exactly one of them. Having spare UARTs was one of the stated
+reasons for the Uno → Teensy migration in the first place; this is that headroom
+being spent.
+
+Pin map, from the Teensy core source (`HardwareSerial1..8.cpp`), checked against
+every pin this project already uses:
+
+| Port | RX | TX | Status here |
+|---|---:|---:|---|
+| `Serial1` | 0 | 1 | **used** — CRSF from the RP1 |
+| **`Serial2`** | **7** | **8** | free → **allocated to the O3** |
+| `Serial3` | 15 | 14 | free — the migration plan's LIDAR candidate |
+| `Serial4` | 16 | 17 | free |
+| `Serial5` | 21 | 20 | free |
+| `Serial6` | 25 | 24 | free |
+| `Serial7` | 28 | 29 | free |
+| `Serial8` | 34 | 35 | free |
+
+None of them collide with the encoders (2–5), the motor PWM (6, 9, 22, 23) or
+I²C (18/19). Serial telemetry to the PC runs over **native USB** and costs no
+UART at all.
+
+> ⚠️ **`Serial2` and `Serial4` overlap in the core's alternate pin tables** —
+> `Serial2` can also be placed on 16/17 and `Serial4` on 7/8. Harmless as long as
+> you never assign both to the same physical pins. Take `Serial2` on **7/8** and
+> leave `Serial4` alone.
+
 **Allocate `Serial2` (RX2 = pin 7, TX2 = pin 8) to the O3**, at **115200 8N1**.
-It is free, it is adjacent to nothing else in use, and it leaves `Serial3`+ for
-the LIDAR the migration plan reserves.
 
 | Signal | Teensy pin | O3 pin |
 |---|---:|---:|
@@ -567,15 +593,20 @@ reports that functions are limited, and no amount of correct wiring gets past it
 
 **For Goggles 3 specifically, these are hard gates, not recommendations:**
 
-| Device | Minimum | Symptom if below |
-|---|---|---|
-| **Goggles 3** | **v01.00.0300** | O3 not offered as a device at all |
-| **O3 Air Unit** | **≥ V01.02.0000** | **Will not bind.** A unit still on V01.01.0000 simply refuses, with no useful error |
+| Device | Symptom if too old |
+|---|---|
+| **Goggles 3** | **O3 is not offered as a device at all** — the bind option simply is not in the menu |
+| **O3 Air Unit** | **Will not bind.** The button does nothing useful, the LED blinks, and the goggles never see it — no error, just silence |
 
-A brand-new-old-stock O3 is very likely to ship below V01.02.0000, so **assume the
-air unit needs updating before it will ever talk to Goggles 3.** Update both, then
-**power-cycle both** before attempting to bind — DJI's own notes call for the
-restart and it does matter.
+> **Do not chase a specific version number.** Sources disagree on the exact
+> minimum — Goggles 3 gained O3 support around **v01.00.0300**, and reported air
+> unit minimums range from **V01.02.0000 to v01.03.0000**. The two devices speak a
+> proprietary protocol that changes between releases, so the only reliable
+> instruction is: **update both to the latest available, then power-cycle both.**
+> DJI's notes call for the restart and it matters.
+
+A new-old-stock O3 is very likely to ship too old, so **assume the air unit needs
+updating before it will ever talk to Goggles 3.**
 
 ### 9.3 Pairing (binding) to the goggles
 
@@ -591,6 +622,21 @@ goggles or reset the unit.
 
 Do it **at the desk, with the air unit on USB-C**, before it goes anywhere near
 the chassis. It takes seconds and it is miserable to do through a service hatch.
+
+> **"There is no button on the air unit, and no bind setting in the goggles."**
+> Two symptoms, almost always **one cause: firmware (§9.2)** — do that first, then
+> look again.
+>
+> - **The button exists.** It is a *small recessed* button beside the status LED
+>   on the module, easy to miss and easy to mistake for a moulding mark. Look
+>   next to the LED and the USB-C port. (DJI's quick-start manual shows it on its
+>   Activation/Linking page — worth opening for the photo.)
+> - **The goggles' bind option is absent until the goggles support O3.** On
+>   firmware predating O3 support, the O3 is not offered as a device at all, so
+>   there is nothing under Transmission to find. It appears after the update.
+>
+> This is exactly why §10 puts activation and updating at **Stage 0**, before any
+> wiring: on out-of-the-box firmware, the pairing UI may not exist yet.
 
 **Goggles 3 — the procedure for this build.** Note the menu path differs from
 Goggles 2: it is under **Transmission**, not Status.
