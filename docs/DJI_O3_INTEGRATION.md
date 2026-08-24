@@ -354,6 +354,25 @@ This robot has no flight controller. Three options:
 | **B. Teensy speaks MSP** | firmware work, §6 | **The right end state.** Gets full power *and* the OSD in one job. |
 | **C. Use the ELRS RX's DisplayPort output** | RX must expose a second UART with a DisplayPort/MSP mode | Known trick on some ELRS receivers, but the **RP1's single UART is already carrying CRSF to the Teensy** — verify before counting on it. |
 
+### 5.1 A third reason, specific to Goggles 3: link recovery
+
+There are reports of a **safety issue with the O3 + Goggles 3 combination**: after
+a video signal loss, the link **does not re-establish until the air unit receives
+a disarm over MSP DisplayPort**. On a drone that means a crash; here it would
+mean the video does not come back after a dropout until the unit is
+power-cycled — on a machine that is driven entirely by that video, in another
+room.
+
+> **Confidence: community reports, not a DJI erratum**, and later goggles firmware
+> is said to have improved reconnection behaviour. Do not treat it as settled —
+> but do **test it deliberately**: walk the robot out of range, come back, and see
+> whether video returns on its own. That is a ten-minute test with a clear answer.
+
+If it reproduces on your firmware, it converts the MSP UART from *nice to have*
+into **required** — because with no flight controller there is nothing to send the
+disarm that unwedges the link. This is the strongest argument yet for landing
+those two wires during the build (§3.3).
+
 > A design note for option B: tie the O3's reported "armed" flag to **link-up**,
 > not to the robot's CH6 motor-arm switch. The video link must not drop to 25 mW
 > exactly when the robot is disarmed and you are walking up to it. Make it a
@@ -708,9 +727,11 @@ The single most common bind failure, and the order to work it:
 |---|---|---|
 | 1 | **Air unit activated** (§9.2) | **A new O3 is not activated out of the box.** An unactivated unit **will not transmit at all** — so the goggles cannot find it, however many times you press bind. This is a hard gate, not a degraded mode. |
 | 2 | **Both devices on current firmware.** | The other ~90 % case. The O3 and Goggles 3 speak a proprietary protocol that **changes between firmware releases** — a mismatch produces silence, not an error. Reports are that the versions need to be within about one minor revision of each other. Same USB-C session as activation, so there is no reason to separate them. |
-| 3 | **Put the goggles into pairing mode *first*, then the air unit.** | Sources differ on the order and the control — **Settings → Transmission → Bind**, or **holding the goggles' power button until they beep**. Both devices must be searching *at the same time*; getting the order backwards is a real cause. |
-| 4 | **Press the air unit's link button twice.** | Some units are reported not to enter link mode on the first press. Free to try. |
-| 5 | **Power-cycle the goggles fully** and retry. | Also free, and it clears a goggles-side state that firmware updates are known to leave behind. |
+| 3 | **Check the blink RATE, not just the colour.** | **Rapid blink = bind mode. Slow blink = firmware-update mode**, which is *not* bindable and which the goggles will never find. A unit sitting in update mode looks identical to a bind attempt if you only note "blinking". If it is slow, it is not trying to bind. |
+| 4 | **Move the goggles within 1 metre of the air unit.** | Binding has a proximity requirement. Being across the bench is enough to fail it, and it fails silently. |
+| 5 | **Put the goggles into pairing mode *first*, then the air unit.** | Sources differ on the order and the control — **Settings → Transmission → Bind**, or **holding the goggles' power button until they beep**. Both devices must be searching *at the same time*; getting the order backwards is a real cause. |
+| 6 | **Press the air unit's link button twice.** | Some units are reported not to enter link mode on the first press. Free to try. |
+| 7 | **Power-cycle the goggles fully** and retry. | Also free, and it clears a goggles-side state that firmware updates are known to leave behind. |
 
 > **The tell that it is firmware:** if the goggles offer **no O3 option and no bind
 > entry in the menu at all**, their firmware predates O3 support. There is nothing
