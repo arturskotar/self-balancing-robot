@@ -434,8 +434,32 @@ Additions:
 
 | Pin | Function | Note |
 |---|---|---|
-| **14 (A0)** | sensor `Vo` via the 6.8k/10k divider | ADC only |
-| **8** | servo signal | FlexPWM1_3_A — a different FlexPWM *module* from both motors |
+| **14 (A0)** | sensor `Vo` via the 6.8k/10k divider | ADC only. Also `QuadTimer3_2` and `TX3` — neither used |
+| **8** | servo signal | `FlexPWM1_3_A` — verified clear of both motor modules |
+
+Alternatives, if either pin is awkward on your harness:
+
+* **Sensor:** any free analog pin — `A1`/15, `A2`/16, `A3`/17, `A6`/20, `A7`/21.
+  (`A4`/`A5` = 18/19 are the IMU's I2C.) Pins 16, 17, 20 and 21 have **no PWM
+  mapping at all**, so they cannot be caught by Trap 2 even by accident.
+* **Servo:** any free digital pin at all — see Trap 1 below; on Teensy 4 the
+  `Servo` library does not use PWM pins. Pins 10/11/12 (`QuadTimer1`) put more
+  header distance between the servo lead and motor pin 9 if that helps the
+  harness.
+
+Both choices verified against `cores/teensy4/pwm.c`:
+
+| Pin | Timer | Used by |
+|---|---|---|
+| 6 / 9 | `FlexPWM2_2_A` / `FlexPWM2_2_B` | left motor — one submodule, one frequency |
+| 22 / 23 | `FlexPWM4_0_A` / `FlexPWM4_1_A` | right motor |
+| 7 / 8 / 25 | `FlexPWM1_3_B` / `_A` / `_X` | **servo (pin 8)**; 7 and 25 unused |
+| 10 / 11 / 12 | `QuadTimer1_0` / `1_2` / `1_1` | free |
+| 14 | `QuadTimer3_2` | **sensor ADC (pin 14)** |
+
+Pin 8's submodule (`FlexPWM1_3`) is not merely a different submodule from the
+motors — it is a different *module*. Nothing a servo does to it can reach
+`FlexPWM2_2` or `FlexPWM4_0/4_1`.
 
 ### Trap 1 — `analogWriteResolution` is global; the servo cannot use hardware PWM
 
@@ -458,22 +482,38 @@ raising the global resolution to 12 bits to fix that:
 ```
 
 > **Do not change `MOTOR_PWM_BITS`. Do not use `analogWrite` for the servo. Use
-> the `Servo` library**, which on Teensy 4.x drives the pin from a hardware
-> timer interrupt and does not touch `analogWrite` state. Command it with
-> `writeMicroseconds()`, never `write(degrees)` — the degree mapping is a
-> library convention, and [§11.3](#113-servo_cal--endpoints-and-scale) measures
-> the real endpoints.
+> the `Servo` library**, which on Teensy 4.x generates the pulse from its own
+> timer interrupt and does not use the PWM pin hardware at all — PJRC's own
+> documentation states that on ARM-based Teensy, Servo uses other timers so PWM
+> pins are not impacted. Command it with `writeMicroseconds()`, never
+> `write(degrees)` — the degree mapping is a library convention, and
+> [§11.3](#113-servo_cal--endpoints-and-scale) measures the real endpoints.
 
-Avoid `PWMServo` here specifically *because* it uses the hardware PWM path.
+**This is why the servo pin choice is free.** Any digital pin works; the
+FlexPWM analysis above is a defensive check for the hypothetical `analogWrite`
+path, not a constraint on the wiring.
+
+**Avoid `PWMServo` here specifically.** It does use the hardware PWM path, and
+on ARM Teensy it drags the whole timer group of that pin down to 50 Hz — which
+is Trap 2 fired deliberately. (It does wrap `analogWriteResolution()` in
+`noInterrupts()` to save and restore the global setting, so it survives Trap 1;
+it is the frequency that would kill you.)
+
+**One caveat that comes with `Servo`:** it depends on precisely timed
+interrupts, so its pulse degrades if something disables interrupts for
+substantial periods. Checked here — the only `noInterrupts()` in
+`balance_v2.ino` is the two-`long` copy in `readEncoders()` (line 1813), which
+is sub-microsecond at 600 MHz. Not a problem, but re-check if a library that
+masks interrupts is ever added.
 
 ### Trap 2 — FlexPWM submodules share a frequency
 
 `analogWriteFrequency(pin, 50)` sets the frequency of the pin's whole FlexPWM
 submodule. Land that on a submodule a motor uses and `MOTOR_PWM_HZ` silently
 becomes 50 — and `MOTOR_PWM_HZ` is a control parameter here, matched to measured
-deadband floors. Motors sit on FlexPWM2_2 and FlexPWM4_0/4_1; pin 8 is
-FlexPWM1_3_A, a different module. **Re-check that against the current PJRC pin
-table before soldering.**
+deadband floors. Motors sit on `FlexPWM2_2` and `FlexPWM4_0`/`4_1`; pin 8 is
+`FlexPWM1_3_A`, a different module — **verified against `cores/teensy4/pwm.c`,
+see the table above.** Re-check if you move the servo to a different pin.
 
 > **Guard, whichever route you take: after the servo is wired and running,
 > re-run `DEADBAND_TEST` and confirm the floors still measure 10/10 and 18/18.
