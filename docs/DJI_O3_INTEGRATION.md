@@ -729,7 +729,8 @@ The single most common bind failure, and the order to work it:
 | 2 | **Both devices on current firmware.** | The other ~90 % case. The O3 and Goggles 3 speak a proprietary protocol that **changes between firmware releases** — a mismatch produces silence, not an error. Reports are that the versions need to be within about one minor revision of each other. Same USB-C session as activation, so there is no reason to separate them. |
 | 3 | **Check the blink RATE, not just the colour.** | **Rapid blink = bind mode. Slow blink = firmware-update mode**, which is *not* bindable and which the goggles will never find. A unit sitting in update mode looks identical to a bind attempt if you only note "blinking". If it is slow, it is not trying to bind. |
 | 4 | **Move the goggles within 1 metre of the air unit.** | Binding has a proximity requirement. Being across the bench is enough to fail it, and it fails silently. |
-| 5 | **Put the goggles into pairing mode *first*, then the air unit.** | Sources differ on the order and the control — **Settings → Transmission → Bind**, or **holding the goggles' power button until they beep**. Both devices must be searching *at the same time*; getting the order backwards is a real cause. |
+| 5 | **`Transmission` set to `Pilot`, not `Audience`.** | Audience goggles receive another pair's broadcast and **cannot bind to an air unit**. Costs nothing to check and invalidates every other test if wrong. |
+| 5b | **Both devices searching at the same time.** | Goggles pairing mode is **press and hold the power button until they beep** — *not* a menu item, whatever the blogs say. Put the air unit in link mode, then the goggles, and keep them close. |
 | 6 | **Press the air unit's link button twice.** | Some units are reported not to enter link mode on the first press. Free to try. |
 | 7 | **Power-cycle the goggles fully** and retry. | Also free, and it clears a goggles-side state that firmware updates are known to leave behind. |
 
@@ -738,18 +739,29 @@ The single most common bind failure, and the order to work it:
 > to press, and no amount of button-pressing on the air unit will change that.
 > Go to §9.2.
 
-**Goggles 3 — the procedure for this build.** Note the menu path differs from
-Goggles 2: it is under **Transmission**, not Status.
+**Goggles 3 — the procedure, against the real menu.**
+
+> ⚠️ **There is no "Transmission → Bind" item.** Plenty of write-ups say there
+> is; on this firmware there is not, and following them wastes an evening. The
+> **Transmission** menu selects **Pilot / Audience**. The bind is triggered by the
+> **power button**, not by a menu entry.
 
 1. Confirm both firmware versions clear the gates in §9.2, and that both have been
    **power-cycled since updating**.
-2. Power the air unit **from VBAT, not USB** (see the warning above) and wait for
-   it to finish booting.
-3. Press the air unit's **bind button** — the small recessed one beside the LED —
-   until the **LED blinks rapidly**.
-4. On the goggles: **Settings → Transmission → Bind**.
-5. Binding takes **5–10 seconds**. Bound: the LED goes **solid** and the camera
-   image appears.
+2. **Menu → Transmission → `Pilot`.** ← **the trap.** In **Audience** mode the
+   goggles are trying to watch *another pair of goggles'* broadcast, not to own an
+   air unit — **audience goggles cannot bind to an air unit at all.** If this is
+   set to Audience, nothing else in this list can work.
+3. **Menu → Status → Switch model → `Air Unit 3`.** This is the device selector —
+   the O3 must be the selected model before it will be looked for.
+4. Power the air unit **from VBAT, not USB** (see the warning above) and let it
+   finish booting.
+5. Press the air unit's **link button** — the small recessed one beside the LED —
+   until the LED **blinks** (rapid, not slow — see §9.3.1).
+6. **On the goggles: press and hold the POWER button until they beep.** That is
+   pairing mode. There is no menu item for it.
+7. Keep the two **within 1 metre.** Binding takes a few seconds; the LED goes
+   **solid** and the image appears.
 
 **Goggles 2 / Integra**, for reference: boot the air unit until the LED goes green
 → off → **red**, then swipe right on the touchpad → **Status** → select *DJI O3
