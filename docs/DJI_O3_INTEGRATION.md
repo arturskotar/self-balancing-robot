@@ -739,7 +739,9 @@ The single most common bind failure, and the order to work it:
 > to press, and no amount of button-pressing on the air unit will change that.
 > Go to §9.2.
 
-**Goggles 3 — the procedure, against the real menu.**
+**Goggles 3 — the procedure, against the real menu. Bench-verified 2026-08-24**
+on Goggles 3 **v01.00.1400** + O3 **v01.03**, both activated: this sequence binds,
+the published "Transmission → Bind" one does not exist.
 
 > ⚠️ **There is no "Transmission → Bind" item.** Plenty of write-ups say there
 > is; on this firmware there is not, and following them wastes an evening. The
@@ -790,7 +792,7 @@ the existing test harnesses.
 | Stage | Do | Pass criterion |
 |---|---|---|
 | **0a** | **Activate and firmware-update** both devices — bench, **USB-C to the PC**, no pack (§9.2; software in §14) | Both on current firmware, both power-cycled |
-| **0b** | **Bind**, then set region/power — bench, but now on **VBAT** (pack or ~12 V supply), still off the robot (§9.3) | Live video in the goggles, unit not mounted |
+| **0b** ✅ | **Bind**, then set region/power — bench, but now on **VBAT** (pack or ~12 V supply), still off the robot (§9.3) | **Done 2026-08-24** — live video in the goggles, unit not mounted |
 | **1** | Continuity-check the 6-pin cable against §3.1 (colours already confirmed) | Every wire traced to its connector pin **before** any power |
 | **2** | Power the O3 from the pack branch alone — fuse, cap, twisted pair, **no UART** | Video up, nothing else on the robot disturbed |
 | **3** | **Thermal test** in the final mount with the fan (§4.2) | 20 min stationary, no warning, no shutdown |
@@ -814,7 +816,7 @@ the one that will get skipped and shouldn't be.
 | ~~3~~ | ~~Confirm the **6-pin cable colour order**~~ — **done 2026-08-21**: red / black / white / grey / brown / yellow = pins 1–6, matching §3.1. Continuity to the connector pins still worth checking. | — |
 | 4 | Measure **actual O3 current draw** at the chosen transmit power | Fuse sizing, endurance figures |
 | 5 | Decide **Stage A (25 mW, no UART) vs Stage B (MSP)** for V1 | Firmware scope |
-| 5b | **Check the O3's shipped firmware version against ≥ V01.02.0000** before assuming it will bind to the Goggles 3 (§9.2) | Getting a picture at all |
+| ~~5b~~ | ~~Check the O3 firmware before assuming it will bind~~ — **done 2026-08-24.** O3 **v01.03**, Goggles 3 **v01.00.1400**, both activated, **bound successfully**. Firmware was never the blocker; the wrong bind procedure was (§9.3). | — |
 | 5c | **Confirm the ELRS TX module and RP1 are on 3.x maintenance-branch firmware** before judging any link degradation (§8 R3) | Not chasing a fixed bug |
 | 6 | Decide the **video-loss policy** (§8, R5) | Failsafe design |
 | 7 | Check whether the **RP1 exposes a second UART** for the DisplayPort trick (§5, option C) | Possible shortcut past §6 |
