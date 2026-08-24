@@ -667,13 +667,18 @@ USB cable.
 |---|---|
 | **Green** | powering on / booting |
 | **Solid red** | booted, **not linked** — ready to bind |
-| **Blinking red** | **actively in linking mode**, searching for goggles |
+| **Blinking red** | depends on what you did — see below |
 | **Solid green** | **linked.** Video should be up |
 
-So **blinking red is the good state mid-bind** — the unit is doing its half and
-waiting for the goggles. If it blinks red indefinitely and never goes solid
-green, the air unit is fine and the *goggles* are not completing: that is the
-firmware gate in §9.2, not a hardware fault.
+**Blinking red means two different things, and the difference is the diagnosis:**
+
+- **After you press the link button** → actively in linking mode, searching. This
+  is the good state mid-bind.
+- **On its own, from power-up, without pressing anything** → the unit is *not*
+  in link mode. On an **unactivated** unit this is what you get: an unactivated
+  O3 **will not transmit at all**, cannot set functions or channels, and
+  therefore **cannot be found by the goggles no matter how often you press
+  bind.** Go to §9.2.
 
 > It is transmitting while it searches. Do not leave it blinking red on the bench
 > with no airflow (§4).
@@ -682,10 +687,17 @@ firmware gate in §9.2, not a hardware fault.
 
 The single most common bind failure, and the order to work it:
 
+**First, bisect it — the goggles tell you which side is at fault:**
+
+| What the goggles show | Verdict |
+|---|---|
+| **No O3 / Air Unit option at all** in the device list | **Goggles firmware** predates O3 support. Nothing to press. Update the goggles. |
+| **The O3 option exists**, but the air unit never appears under Transmission | **The goggles are fine.** The fault is on the **air unit** — activation or its firmware. Work the table below from the top. |
+
 | # | Check | Why |
 |---|---|---|
-| 1 | **Both devices on current firmware.** | **~90 % of cases.** The O3 and Goggles 3 speak a proprietary protocol that **changes between firmware releases** — a mismatch produces silence, not an error. Reports are that the versions need to be within about one minor revision of each other. This is the answer far more often than anything below. |
-| 2 | **Air unit activated** (§9.2) | An un-activated unit reports limited functions. Same USB-C session as the firmware update, so there is no reason to separate them. |
+| 1 | **Air unit activated** (§9.2) | **A new O3 is not activated out of the box.** An unactivated unit **will not transmit at all** — so the goggles cannot find it, however many times you press bind. This is a hard gate, not a degraded mode. |
+| 2 | **Both devices on current firmware.** | The other ~90 % case. The O3 and Goggles 3 speak a proprietary protocol that **changes between firmware releases** — a mismatch produces silence, not an error. Reports are that the versions need to be within about one minor revision of each other. Same USB-C session as activation, so there is no reason to separate them. |
 | 3 | **Put the goggles into pairing mode *first*, then the air unit.** | Sources differ on the order and the control — **Settings → Transmission → Bind**, or **holding the goggles' power button until they beep**. Both devices must be searching *at the same time*; getting the order backwards is a real cause. |
 | 4 | **Press the air unit's link button twice.** | Some units are reported not to enter link mode on the first press. Free to try. |
 | 5 | **Power-cycle the goggles fully** and retry. | Also free, and it clears a goggles-side state that firmware updates are known to leave behind. |
