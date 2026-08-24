@@ -661,6 +661,23 @@ USB cable.
 > This is exactly why §10 puts activation and updating at **Stage 0**, before any
 > wiring: on out-of-the-box firmware, the pairing UI may not exist yet.
 
+**Air unit LED, in order:**
+
+| LED | Means |
+|---|---|
+| **Green** | powering on / booting |
+| **Solid red** | booted, **not linked** — ready to bind |
+| **Blinking red** | **actively in linking mode**, searching for goggles |
+| **Solid green** | **linked.** Video should be up |
+
+So **blinking red is the good state mid-bind** — the unit is doing its half and
+waiting for the goggles. If it blinks red indefinitely and never goes solid
+green, the air unit is fine and the *goggles* are not completing: that is the
+firmware gate in §9.2, not a hardware fault.
+
+> It is transmitting while it searches. Do not leave it blinking red on the bench
+> with no airflow (§4).
+
 **Goggles 3 — the procedure for this build.** Note the menu path differs from
 Goggles 2: it is under **Transmission**, not Status.
 
