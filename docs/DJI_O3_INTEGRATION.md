@@ -598,12 +598,22 @@ reports that functions are limited, and no amount of correct wiring gets past it
 | **Goggles 3** | **O3 is not offered as a device at all** — the bind option simply is not in the menu |
 | **O3 Air Unit** | **Will not bind.** The button does nothing useful, the LED blinks, and the goggles never see it — no error, just silence |
 
-> **Do not chase a specific version number.** Sources disagree on the exact
-> minimum — Goggles 3 gained O3 support around **v01.00.0300**, and reported air
-> unit minimums range from **V01.02.0000 to v01.03.0000**. The two devices speak a
-> proprietary protocol that changes between releases, so the only reliable
-> instruction is: **update both to the latest available, then power-cycle both.**
-> DJI's notes call for the restart and it matters.
+**The known-good pairing**, from the release notes of the update that introduced
+this combination:
+
+| Device | Version | What it is |
+|---|---|---|
+| **O3 Air Unit** | **v01.03.0000** (25 Jul 2024) | The release that **added Goggles 3 + DJI FPV RC3 support**. Below this, binding to Goggles 3 does not work. |
+| **Goggles 3** | **v01.00.0300** | The counterpart release that added O3 Air Unit support. |
+
+Later versions are fine; these are the floors. **Update both to the latest
+available anyway**, keep them close together, and **power-cycle both afterwards**
+— DJI's notes call for the restart explicitly and it matters.
+
+> ⚠️ **Firmware version and activation are independent gates.** A unit can be on
+> current firmware and *still* be unactivated — and an unactivated unit does not
+> transmit at all. Confirming the version tells you nothing about activation.
+> Check both.
 
 A new-old-stock O3 is very likely to ship too old, so **assume the air unit needs
 updating before it will ever talk to Goggles 3.**
