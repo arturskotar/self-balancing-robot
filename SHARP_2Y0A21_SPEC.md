@@ -404,17 +404,47 @@ guarantee to read. **Wire it direct, and if the servo jitters or will not hold
 position, add a 74HCT125 buffer on 5 V rather than tuning around it.** Jitter
 from an unlatched input looks exactly like backlash.
 
-### 6.5 Connector
+### 6.5 Connector and wire colours
 
-Datasheet pinout: **pin 1 `Vo`, pin 2 `GND`, pin 3 `Vcc`**. The supplied JST-PH
-pigtail is commonly red / black / white or red / black / yellow, and the
-colour-to-pin mapping is not something to take on trust.
+3-pin JST PH pigtail. The signal wire is **white** on Pololu-supplied cables and
+**yellow** on most aftermarket ones; red and black are universal:
 
-> **Verify with a meter before first power-up.** Continuity from pin 2 to the
-> sensor ground identifies `GND`; power it on the bench with the third wire
-> floating to confirm which pin reads ~5 V. Swapping `Vcc` and `Vo` puts 5 V
-> into the divider — survivable at the 0.60 ratio specified above, and not
-> survivable without it.
+| Wire | Function | Goes to |
+|---|---|---|
+| **Red** | `Vcc` | 5 V, own feed from the buck (E3), with 100 µF ‖ 0.1 µF at the connector (E2) |
+| **Black** | `GND` | logic/ADC star ground, **on its own conductor** (E1) |
+| **Yellow** (or white) | `Vo` | top of the 6.8k, divider junction → pin 14 (A0) |
+
+**`GND` is the middle wire.** That is the one orientation-independent fact here
+and the anchor worth remembering: the datasheet numbers the pins `Vo`, `GND`,
+`Vcc` while vendor drawings viewed from the sensor face list them `Vcc`, `GND`,
+`Vo` — the same connector described from opposite ends. Counting pins is
+therefore unreliable; ground in the middle is not.
+
+```
+  red    ----------------------------------------- +5V (buck, own feed)
+                                       |
+                                    100uF || 0.1uF
+                                       |
+  black  --------------------------+---+---------- STAR GND (own conductor)
+                                   |
+  yellow ---[ 6.8k ]---+---[ 10k ]-+
+                       |
+                       +--- Teensy pin 14 (A0)
+                       |
+                      0.1uF
+                       |
+                      STAR GND
+```
+
+> **Still verify with a meter before first power-up** — clone cables vary, and
+> it takes thirty seconds. Continuity from the black wire to the sensor's
+> exposed ground identifies `GND`; then power it on the bench with the third
+> wire floating and confirm red reads ~5 V.
+>
+> Swapping `Vcc` and `Vo` puts 5 V into the divider. **That specific mistake is
+> what the 0.60 ratio was sized for** (§6.3): 5.0 V × 0.5952 = 2.98 V, still
+> inside the 3.3 V rail. At a "tighter" 0.68 it would be 3.40 V and over.
 
 ---
 
